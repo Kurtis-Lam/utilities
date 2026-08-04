@@ -1,0 +1,66 @@
+{
+    "1079212152814043188": {
+        "rare": [
+            {
+                "target": 1276161273989697588,
+                "restrict_categories": [],
+                "restrict_channels": [],
+                "exclude_categories": [
+                    1458748895264899239
+                ],
+                "exclude_channels": []
+            }
+        ],
+        "regional": [
+            {
+                "target": 1276161290653667368,
+                "restrict_categories": [],
+                "restrict_channels": [],
+                "exclude_categories": [
+                    1458748895264899239
+                ],
+                "exclude_channels": []
+            }
+        ],
+        "user": [
+            {
+                "target": 1281560553130692618,
+                "restrict_categories": [],
+                "restrict_channels": [],
+                "exclude_categories": [
+                    1458748895264899239
+                ],
+                "exclude_channels": []
+            }
+        ]
+    },
+    "1526776564992184381": {
+        "rare": [
+            {
+                "target": 1529294359659417711,
+                "restrict_categories": [],
+                "restrict_channels": [],
+                "exclude_categories": [],
+                "exclude_channels": []
+            }
+        ],
+        "regional": [
+            {
+                "target": 1529294670121930927,
+                "restrict_categories": [],
+                "restrict_channels": [],
+                "exclude_categories": [],
+                "exclude_channels": []
+            }
+        ],
+        "user": [
+            {
+                "target": 1281560553130692618,
+                "restrict_categories": [],
+                "restrict_channels": [],
+                "exclude_categories": [],
+                "exclude_channels": []
+            }
+        ]
+    }
+}
