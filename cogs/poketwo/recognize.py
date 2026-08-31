@@ -1,265 +1,266 @@
 import asyncio
 import gc
 import io
-import os
+import json
 import re
+from pathlib import Path
+
 import aiohttp
-import discord
-from discord.ext import commands
+import certifi
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
+from pymongo import MongoClient
 
-TARGET_USER_ID = 716390085896962058
-LOG_CHANNEL_ID = 1534081811511246910
-DB_PATH = "pokemon_db.npz"
-MODEL_PATH = "vision_model_quantized.onnx"
-
-# Direct URL for Xenova's quantized vision model
-MODEL_URL = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx"
+MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 
-class PokemonRecognizeCog(commands.Cog):
+def resolve_file_path(filename: str) -> Path:
+    """Searches for a file in the cog/module folder first, then falls back to current working directory."""
+    cog_dir_path = Path(__file__).resolve().parent / filename
+    root_dir_path = Path.cwd() / filename
 
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        # Track pending predictions: channel_id -> {"predicted": str, "confidence": float, "url": str}
-        self.pending_predictions = {}
-        self.session: aiohttp.ClientSession | None = None
-        self.ort_session: ort.InferenceSession | None = None
+    if cog_dir_path.exists():
+        return cog_dir_path
+    if root_dir_path.exists():
+        return root_dir_path
 
-        # 1. Load Pokémon Vector Database
-        if not os.path.exists(DB_PATH):
-            raise FileNotFoundError(
-                f"Database file '{DB_PATH}' not found in root directory!"
-            )
+    raise FileNotFoundError(
+        f"Could not locate '{filename}'. Checked:\n"
+        f"  - {cog_dir_path}\n"
+        f"  - {root_dir_path}"
+    )
 
-        print("[Pokétwo Cog] Loading Pokémon database...")
-        # Use mmap_mode="r" to avoid reading the whole file into RAM upfront
-        db = np.load(DB_PATH, mmap_mode="r")
-        self.db_vectors = np.array(db["vectors"], dtype=np.float32)  # Shape: (N, 512)
-        self.db_names = db["names"]  # Shape: (N,)
-        del db
-        gc.collect()
 
-    async def cog_load(self):
-        """Async initialization downloading model to disk to enable memory-mapping."""
-        self.session = aiohttp.ClientSession(
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
+def format_name(name: str) -> str:
+    """Capitalizes names correctly while preserving apostrophes, hyphens, colons, and percentages."""
+    if not name:
+        return ""
 
-        # Download model to disk in 1MB chunks to keep RAM usage minimal
-        if not os.path.exists(MODEL_PATH):
-            print("[Pokétwo Cog] Model not found locally. Downloading to disk...")
-            async with self.session.get(MODEL_URL) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(
-                        f"Failed to fetch model from HF: HTTP {resp.status}"
+    words = name.split(" ")
+    formatted_words = []
+
+    for word in words:
+        hyphen_parts = word.split("-")
+        formatted_hyphen_parts = []
+
+        for part in hyphen_parts:
+            colon_parts = part.split(":")
+            formatted_colon_parts = []
+
+            for c_part in colon_parts:
+                if "'" in c_part:
+                    apo_parts = c_part.split("'")
+                    formatted_colon_parts.append(
+                        apo_parts[0].capitalize() + "'" + apo_parts[1].lower()
                     )
-                with open(MODEL_PATH, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(1024 * 1024):
-                        f.write(chunk)
-            print("[Pokétwo Cog] Model download complete.")
+                else:
+                    formatted_colon_parts.append(c_part.capitalize())
 
-        print("[Pokétwo Cog] Initializing memory-mapped ONNX Runtime Session...")
-        opts = ort.SessionOptions()
-        # Aggressive RAM Saver Settings
-        opts.enable_cpu_mem_arena = False
-        opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        opts.intra_op_num_threads = 1
-        opts.inter_op_num_threads = 1
+            formatted_hyphen_parts.append(":".join(formatted_colon_parts))
 
-        # Load session using file path so ONNX memory-maps it without duplicating RAM
-        self.ort_session = ort.InferenceSession(
-            MODEL_PATH,
-            sess_options=opts,
-            providers=["CPUExecutionProvider"],
-        )
+        formatted_words.append("-".join(formatted_hyphen_parts))
 
-        gc.collect()
-        print("[Pokétwo Cog] Recognized Cog loaded and ready!")
+    formatted_str = " ".join(formatted_words)
+    formatted_str = re.sub(r"\b(Jangmo|Hakamo|Kommo)-O\b", r"\1-o", formatted_str)
+    return formatted_str
 
-    async def cog_unload(self):
-        """Cleanup network session upon cog unloading."""
-        if self.session and not self.session.closed:
-            await self.session.close()
 
-    def _preprocess_image(self, image: Image.Image) -> np.ndarray:
-        """Pure NumPy CLIP image preprocessing."""
-        image = image.resize((224, 224), Image.BICUBIC)
-        img_np = np.array(image, dtype=np.float32) / 255.0
+def extract_pokemon_from_text(text: str) -> str | None:
+    """Extracts the Pokémon name from caught/fled messages."""
+    cleaned_text = re.sub(r"<a?:[a-zA-Z0-9_]+:\d+>", "", text)
+    cleaned_text = re.sub(r"[♂♀♂️♀️✨]", "", cleaned_text)
 
-        # OpenAI CLIP normalization
+    caught_match = re.search(
+        r"you caught a level \d+\s+([^\(!]+?)\s*(?:\(|\!)",
+        cleaned_text,
+        re.IGNORECASE,
+    )
+    if caught_match:
+        return caught_match.group(1).strip().lower()
+
+    fled_match = re.search(
+        r"wild\s+([^\!\.\n]+?)\s+fled", cleaned_text, re.IGNORECASE
+    )
+    if fled_match:
+        return fled_match.group(1).strip().lower()
+
+    return None
+
+
+class PokemonRecognizer:
+    def __init__(self):
+        self.ort_session = None
+        self.input_name = None
+        self.db_vectors = None
+        self.db_names = None
+        self.converts_sorted = []
+        self.pokevars = set()
+        self.pokeinfo = {}
+        self.mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+        self.db = self.mongo_client["utilities"]
+        self.constdata = self.db["constdata"]
+
+    def _preprocess_image(
+        self, img: Image.Image, target_size: int = 224
+    ) -> np.ndarray:
+        """Preprocesses image for CLIP Vision Model using NumPy, keeping parity with indexer."""
+        img = img.convert("RGB")
+
+        # 1. Apply exact parity cropping logic
+        width, height = img.size
+        zoom_factor = 0.85  # Must match the indexer's zoom factor
+        new_size = int(min(width, height) * zoom_factor)
+        left = (width - new_size) // 2
+        top = (height - new_size) // 2
+        right = left + new_size
+        bottom = top + new_size
+        
+        # 2. Crop to strict square, then resize (prevents stretching)
+        img = img.crop((left, top, right, bottom))
+        img = img.resize((target_size, target_size), Image.Resampling.BICUBIC)
+
+        arr = np.array(img, dtype=np.float32) / 255.0
+
         mean = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
         std = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
 
-        img_np = (img_np - mean) / std
-        img_np = np.transpose(img_np, (2, 0, 1))  # (C, H, W)
-        img_np = np.expand_dims(img_np, axis=0)  # (1, C, H, W)
+        arr = (arr - mean) / std
+        arr = arr.transpose(2, 0, 1)  # HWC -> CHW
+        return np.expand_dims(arr, axis=0)  # (1, 3, 224, 224)
 
-        return img_np
+    def load_resources(self):
+        """Loads lightweight ONNX model & vector db from disk, and constant datasets from MongoDB Atlas."""
 
-    def _predict_pokemon(self, image_bytes: bytes) -> tuple[str, float]:
-        """Pure NumPy / ONNX prediction worker with instant garbage collection."""
-        if not self.ort_session:
-            raise RuntimeError("ONNX Session is not initialized yet.")
+        # 1. Load ONNX Vision Model with strict memory limits
+        try:
+            model_path = resolve_file_path("clip_vision_quantized.onnx")
+            opts = ort.SessionOptions()
+            opts.graph_optimization_level = (
+                ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+            )
+            opts.intra_op_num_threads = 1
+            opts.inter_op_num_threads = 1
 
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        pixel_values = self._preprocess_image(image)
+            # Disable RAM Arena allocations to prevent OOM
+            opts.add_session_config_entry("session.enable_cpu_mem_arena", "0")
+            opts.add_session_config_entry(
+                "session.use_device_allocator_for_initializers", "0"
+            )
 
-        input_name = self.ort_session.get_inputs()[0].name
-        outputs = self.ort_session.run(None, {input_name: pixel_values})
+            self.ort_session = ort.InferenceSession(
+                str(model_path),
+                sess_options=opts,
+                providers=["CPUExecutionProvider"],
+            )
+            self.input_name = self.ort_session.get_inputs()[0].name
+        except Exception as e:
+            print(
+                f"[Recognize] Critical Warning: Could not load clip_vision_quantized.onnx ({e})"
+            )
 
-        # Extract pooled image vector
-        query_vec = outputs[1] if len(outputs) > 1 else outputs[0]
+        # 2. Load NumPy Vector Database
+        try:
+            db_path = resolve_file_path("pokemon_db.npz")
+            with np.load(str(db_path)) as db:
+                raw_vectors = np.array(db["vectors"], dtype=np.float32)
+                self.db_names = np.array(db["names"])
 
-        if len(query_vec.shape) == 3:
-            query_vec = query_vec[:, 0, :]
+            norms = np.linalg.norm(raw_vectors, axis=-1, keepdims=True)
+            norms[norms == 0] = 1.0
+            self.db_vectors = raw_vectors / norms
 
-        # L2 Normalization
-        query_vec = query_vec / np.linalg.norm(
-            query_vec, axis=-1, keepdims=True
-        )
+            del raw_vectors, norms
+        except Exception as e:
+            print(
+                f"[Recognize] Critical Warning: Could not load pokemon_db.npz ({e})"
+            )
 
-        # Cosine similarity
-        similarities = np.dot(self.db_vectors, query_vec.T).squeeze()
+        # 3. Load constant JSON data from MongoDB Atlas
+        try:
+            converts_doc = self.constdata.find_one({"_id": "converts"})
+            converts = converts_doc.get("data", {}) if converts_doc else {}
+            self.converts_sorted = sorted(
+                converts.items(), key=lambda x: len(x[0]), reverse=True
+            )
+        except Exception as e:
+            print(
+                f"[Recognize] Warning: Could not load converts from MongoDB ({e})"
+            )
+            self.converts_sorted = []
 
-        best_idx = np.argmax(similarities)
-        best_name = str(self.db_names[best_idx])
-        best_score = float(similarities[best_idx])
+        try:
+            pokevars_doc = self.constdata.find_one({"_id": "pokevars"})
+            pokevars_list = pokevars_doc.get("data", []) if pokevars_doc else []
+            self.pokevars = {name.strip().lower() for name in pokevars_list}
+        except Exception as e:
+            print(
+                f"[Recognize] Warning: Could not load pokevars from MongoDB ({e})"
+            )
+            self.pokevars = set()
 
-        # Force clear local variables & run GC to protect against RAM caps
-        del image, pixel_values, outputs, query_vec, similarities
+        try:
+            pokedex_doc = self.constdata.find_one({"_id": "pokedex"})
+            pokeinfo_raw = pokedex_doc.get("data", {}) if pokedex_doc else {}
+            self.pokeinfo = {
+                k.strip().lower(): v for k, v in pokeinfo_raw.items()
+            }
+        except Exception as e:
+            print(
+                f"[Recognize] Warning: Could not load pokedex from MongoDB ({e})"
+            )
+            self.pokeinfo = {}
+
+        # Force garbage collection to free startup allocations
         gc.collect()
 
-        return best_name, best_score
+    def apply_conversions(self, name: str) -> str:
+        if not self.converts_sorted:
+            return name
 
-    async def _log_misprediction(
-        self,
-        predicted: str,
-        actual: str,
-        confidence: float,
-        image_url: str,
-    ):
-        """Sends misprediction details to the designated log channel."""
-        log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
-        if not log_channel:
-            try:
-                log_channel = await self.bot.fetch_channel(LOG_CHANNEL_ID)
-            except Exception as e:
-                print(f"[Pokétwo Cog] Failed to fetch log channel: {e}")
-                return
+        current_name = name
+        for key, val in self.converts_sorted:
+            if key.lower() in current_name.lower():
+                pattern = re.compile(re.escape(key), re.IGNORECASE)
+                current_name = pattern.sub(val, current_name)
 
-        embed = discord.Embed(
-            title="❌ Misprediction Detected", color=discord.Color.red()
-        )
-        embed.add_field(name="Predicted", value=predicted.title(), inline=True)
-        embed.add_field(name="Actual", value=actual.title(), inline=True)
-        embed.add_field(
-            name="Confidence", value=f"{confidence:.2f}%", inline=True
-        )
-        if image_url:
-            embed.set_thumbnail(url=image_url)
+        return current_name
 
-        await log_channel.send(embed=embed)
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.id != TARGET_USER_ID:
-            return
-
-        channel_id = message.channel.id
-
-        # 1. Handle Catch Result (Congratulations message)
-        if (
-            "Congratulations" in message.content
-            and "You caught a" in message.content
-        ):
-            # Matches: "You caught a Level 8 Vileplume (65.59%)!" or "You caught a Vileplume!"
-            match = re.search(
-                r"You caught a (?:Level \d+ )?([A-Za-z0-9\-\.\'\s]+?)(?:\s*\([\d\.\%]+\))?!",
-                message.content,
+    def predict_from_image_bytes(self, image_bytes: bytes) -> tuple[str, float]:
+        if self.ort_session is None or self.db_vectors is None:
+            raise RuntimeError(
+                "ONNX Session or Database not loaded properly."
             )
-            if match:
-                actual_name = match.group(1).strip()
-                if channel_id in self.pending_predictions:
-                    data = self.pending_predictions.pop(channel_id)
-                    if data["predicted"].lower() != actual_name.lower():
-                        await self._log_misprediction(
-                            predicted=data["predicted"],
-                            actual=actual_name,
-                            confidence=data["confidence"],
-                            image_url=data["url"],
-                        )
-            return
 
-        # 2. Check for Embeds (Spawns or Fled events)
-        if message.embeds:
-            embed = message.embeds[0]
-            if not embed.title:
-                return
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            input_tensor = self._preprocess_image(img, target_size=224)
 
-            title_lower = embed.title.lower()
+        outputs = self.ort_session.run(None, {self.input_name: input_tensor})
+        target_vector = outputs[0]
 
-            # Handle Fled Event (e.g., "Wild Machop fled. A new wild pokémon has appeared!")
-            if "fled" in title_lower:
-                match = re.search(
-                    r"Wild\s+([A-Za-z0-9\-\.\'\s]+?)\s+fled",
-                    embed.title,
-                    re.IGNORECASE,
+        norm = np.linalg.norm(target_vector, axis=-1, keepdims=True)
+        if norm != 0:
+            target_vector = target_vector / norm
+
+        similarities = np.dot(target_vector, self.db_vectors.T).squeeze()
+        best_match_idx = int(np.argmax(similarities))
+        confidence = float(similarities[best_match_idx])
+
+        raw_name = str(self.db_names[best_match_idx])
+        converted_name = self.apply_conversions(raw_name)
+
+        return converted_name, confidence
+
+    async def identify_from_url(
+        self, session: aiohttp.ClientSession, url: str
+    ) -> tuple[str, float]:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise ValueError(
+                    f"Failed to download image. HTTP {resp.status}"
                 )
-                if match:
-                    actual_name = match.group(1).strip()
-                    if channel_id in self.pending_predictions:
-                        data = self.pending_predictions.pop(channel_id)
-                        if data["predicted"].lower() != actual_name.lower():
-                            await self._log_misprediction(
-                                predicted=data["predicted"],
-                                actual=actual_name,
-                                confidence=data["confidence"],
-                                image_url=data["url"],
-                            )
+            image_bytes = await resp.read()
 
-            # Handle New Wild Pokémon Spawn
-            if title_lower.startswith("a wild") or title_lower.startswith(
-                "wild"
-            ):
-                image_url = None
-                if embed.image and embed.image.url:
-                    image_url = embed.image.url
-                elif embed.thumbnail and embed.thumbnail.url:
-                    image_url = embed.thumbnail.url
-
-                if not image_url or not self.session:
-                    return
-
-                try:
-                    async with self.session.get(image_url) as response:
-                        if response.status != 200:
-                            return
-                        image_bytes = await response.read()
-
-                    pokemon_name, confidence = await asyncio.to_thread(
-                        self._predict_pokemon, image_bytes
-                    )
-
-                    accuracy_pct = confidence * 100
-                    formatted_name = str(pokemon_name).title()
-
-                    # Save prediction details for validation
-                    self.pending_predictions[channel_id] = {
-                        "predicted": str(pokemon_name),
-                        "confidence": accuracy_pct,
-                        "url": image_url,
-                    }
-
-                    await message.channel.send(
-                        f"Detected: {formatted_name} ({accuracy_pct:.2f}%)"
-                    )
-
-                except Exception as e:
-                    print(f"[Pokétwo Cog] Error processing image: {e}")
-
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(PokemonRecognizeCog(bot))
+        return await asyncio.to_thread(
+            self.predict_from_image_bytes, image_bytes
+        )

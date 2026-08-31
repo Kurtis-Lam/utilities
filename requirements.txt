@@ -1,5 +1,9 @@
 discord.py
-pytz
-pillow
-numpy
 aiohttp
+Pillow
+numpy
+onnxruntime
+firebase-admin
+pymongo
+certifi
+motor
