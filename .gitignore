@@ -3,3 +3,4 @@ firebase_key.json
 clip_vision_quantized.onnx
 data/
 __pycache__/
+indexer.py
