@@ -1,6 +1,7 @@
 import asyncio
 import re
 import socket
+from pathlib import Path
 
 import aiohttp
 import discord
@@ -35,7 +36,6 @@ class Recognize(commands.Cog):
         if not pings_cog:
             return ""
 
-        # Fetch guild data directly from PokePings MongoDB helper method
         try:
             g_data = await pings_cog._get_guild_doc(str(guild_id))
         except Exception as e:
@@ -47,7 +47,6 @@ class Recognize(commands.Cog):
 
         pok_lower = pokemon_name.strip().lower()
 
-        # Look up Pokémon in dictionary-keyed pokedex.json (case-insensitive lookup)
         info = (
             self.recognizer.pokeinfo.get(pokemon_name.strip())
             or self.recognizer.pokeinfo.get(pok_lower)
@@ -57,36 +56,30 @@ class Recognize(commands.Cog):
             )
         )
 
-        # Extract types
         raw_types = info.get("types", [])
         if isinstance(raw_types, list):
             types = [t.lower() for t in raw_types]
         else:
             types = [t.strip().lower() for t in raw_types.split("\n") if t.strip()]
 
-        # Extract region
         region = (info.get("region") or "").lower()
 
         sh_pings, cl_pings, tp_pings, rp_pings = [], [], [], []
 
-        # 1. Shiny Hunt (sh)
         for uid, target in g_data.get("sh", {}).items():
             if target and target.lower() == pok_lower:
                 sh_pings.append(f"<@{uid}>")
 
-        # 2. Collection (cl)
         for uid, cl_list in g_data.get("cl", {}).items():
             if isinstance(cl_list, list) and any(c.lower() == pok_lower for c in cl_list):
                 cl_pings.append(f"<@{uid}>")
 
-        # 3. Type Pings (tp)
         for uid, tp_list in g_data.get("tp", {}).items():
             if isinstance(tp_list, list):
                 tp_lower = [t.lower() for t in tp_list]
                 if any(t in tp_lower for t in types):
                     tp_pings.append(f"<@{uid}>")
 
-        # 4. Region Pings (rp)
         for uid, rp_list in g_data.get("rp", {}).items():
             if isinstance(rp_list, list):
                 rp_lower = [r.lower() for r in rp_list]
@@ -196,6 +189,35 @@ class Recognize(commands.Cog):
                         full_text += " " + emb.description
 
             actual_pokemon = extract_pokemon_from_text(full_text)
+            target_pokemon_name = actual_pokemon or predicted_name
+
+            # --- Save Spawn Image Logic ---
+            if target_pokemon_name:
+                folder_path = Path("data") / target_pokemon_name.lower()
+                folder_path.mkdir(parents=True, exist_ok=True)
+
+                existing_files = [f for f in folder_path.iterdir() if f.is_file()]
+
+                if len(existing_files) < 12:
+                    existing_numbers = {
+                        int(f.stem) for f in existing_files if f.stem.isdigit()
+                    }
+                    
+                    lowest_num = 1
+                    while lowest_num in existing_numbers:
+                        lowest_num += 1
+
+                    try:
+                        async with self.session.get(image_url) as resp:
+                            if resp.status == 200:
+                                img_bytes = await resp.read()
+                                save_file_path = folder_path / f"{lowest_num}.png"
+                                await asyncio.to_thread(save_file_path.write_bytes, img_bytes)
+                                print(f"[Saved Image] Saved to {save_file_path}")
+                    except Exception as e:
+                        print(f"[Image Save Error] Failed to save image: {e}")
+            # -------------------------------
+
             if not actual_pokemon:
                 return
 
@@ -298,7 +320,6 @@ class Recognize(commands.Cog):
         if not image_url:
             return
 
-        # 1. Inference
         try:
             pokemon_name, confidence = await self.recognizer.identify_from_url(
                 self.session, image_url
@@ -309,7 +330,6 @@ class Recognize(commands.Cog):
 
         self.last_predictions[message.channel.id] = pokemon_name
 
-        # 2. Ping Processing
         pings = ""
         try:
             pings = await self._get_ping_mentions(

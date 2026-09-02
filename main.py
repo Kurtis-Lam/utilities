@@ -7,7 +7,7 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 
 # Remember to keep your bot token secret!
-TOKEN = "MTQ3NTY3MjIwNzU0NjkwODcxMg.Gxo4Zx.bdnqQA1JUmPV2nwEN0Ksy9l0c0dBhjjVvhWGAg"
+TOKEN = "MTMyNzQ4MDgyODc0MTE2MTA3NA.GWPTNO.VttPjVzEFtwUW_6N00NCJUgRCinBm2FsCVcYrg"
 OWNERS = {1250429544486273038, 1281560553130692618, 1528374615720591381, 1432984051341459527, 1432983193681920014}
 
 INTENTS = discord.Intents.default()
@@ -30,7 +30,7 @@ class Utilities(commands.Bot):
         # Stored cogs dictionary as an instance attribute for easy access across the bot
         self.cogs_dict = {
             "cmds": ["categories", "channels", "joins", "members", "messages", "ping", "roles", "utilities"],
-            "poketwo": ["autolock", "catches", "dex", "fled", "hintsolver", "lockconfig", "lockunlock", "pings", "recognizer"],
+            "poketwo": ["dex", "fled", "hintsolver", "lockunlock", "pings", "recognizer", "spawnsconfig"],
             "grinder": ["grinder"]
         }
 
