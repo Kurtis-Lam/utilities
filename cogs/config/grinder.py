@@ -10,6 +10,7 @@ from firebase_admin import credentials, db
 
 from views.common import ConfirmView
 from views.grinderview import AccountsView, ConfigView, GrinderLogsView
+from .base import config_group
 
 # --- CONSTANTS ---
 VALID_MODES = ["autocatch", "spam", "dotcatch", "commaedit", "periodicmsg"]
@@ -32,10 +33,25 @@ if not firebase_admin._apps:
 ref = db.reference("grinder")
 
 
+# --- HELPER: FIREBASE LIST SANITIZER ---
+def _ensure_list(data) -> list:
+    """Ensures Firebase dictionary representation of arrays is safely converted to a Python list."""
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return [x for x in data if x is not None]
+    if isinstance(data, dict):
+        sorted_keys = sorted(data.keys(), key=lambda k: int(k) if str(k).isdigit() else k)
+        return [data[k] for k in sorted_keys if data[k] is not None]
+    return []
+
+
 # --- HELPER: TIME PARSER ---
 def parse_duration(time_str: str):
     """Parses time strings like 30s, 4m, 2h, 1d into seconds."""
-    match = re.match(r"^(\d+)([s m h d])$", time_str.lower())
+    if not time_str or not isinstance(time_str, str):
+        return None
+    match = re.match(r"^(\d+)([smhd])$", time_str.strip().lower())
     if not match:
         return None
     
@@ -46,12 +62,6 @@ def parse_duration(time_str: str):
 
 # --- HELPER: PARSE MULTIPLE INDICES & DURATION ---
 def parse_indices_and_duration(raw_str: str):
-    """
-    Parses arguments for .r / .p commands.
-    Extracts numerical indices and duration string.
-    e.g. "1, 2, 3 9m" -> ([1, 2, 3], "9m")
-         "1, 7"       -> ([1, 7], None)
-    """
     if not raw_str or not raw_str.strip():
         return [], None
 
@@ -68,12 +78,8 @@ def parse_indices_and_duration(raw_str: str):
     return indices, duration
 
 
-# --- HELPER: PARSE TARGET ASPECTS FOR .GC DISPLAY ---
+# --- HELPER: PARSE TARGET ASPECTS FOR DISPLAY ---
 def parse_target_aspects(mode: str, target: str) -> list[tuple[str, str]]:
-    """
-    Parses target arguments into individual labeled aspects.
-    Supports integers for target IDs, json for datafiles, and words for pokemons.
-    """
     if not target:
         return []
 
@@ -114,7 +120,7 @@ def parse_target_aspects(mode: str, target: str) -> list[tuple[str, str]]:
         return aspects
 
     elif mode_lower == "periodicmsg":
-        parts = [p.strip() for p in re.split(r'[,; ]', target) if p.strip()]
+        parts = [p.strip() for p in re.split(r'[,;]', target) if p.strip()]
         labels = ["Chid", "Message", "Time1", "Time2"]
         aspects = []
         for i, part in enumerate(parts):
@@ -132,7 +138,6 @@ def parse_target_aspects(mode: str, target: str) -> list[tuple[str, str]]:
 
 # --- HELPERS FOR CONFIG EDITING ---
 def get_config_details(cfg: dict) -> dict:
-    """Extracts existing parameter field values for a configuration dictionary."""
     mode = cfg.get("mode", "").lower()
     target_str = cfg.get("target", "")
     acc_idx = cfg.get("accIndex", 1)
@@ -160,13 +165,12 @@ def get_config_details(cfg: dict) -> dict:
 
 
 def build_target_string_for_mode(mode: str, fields: dict) -> tuple[str, bool]:
-    """Reconstructs the formatted target string and xnon boolean from field values."""
     mode_lower = mode.lower()
 
     if mode_lower in ["autocatch", "dotcatch", "commaedit"]:
-        target_ids = fields.get("target id", fields.get("chid", "")).strip()
-        pokes = fields.get("pokemons", "").strip()
-        datafile = fields.get("datafile", "").strip()
+        target_ids = str(fields.get("target id", fields.get("chid", "")) or "").strip()
+        pokes = str(fields.get("pokemons", "") or "").strip()
+        datafile = str(fields.get("datafile", "") or "").strip()
 
         target_ids_clean = ", ".join([p.strip() for p in target_ids.split(",") if p.strip()])
         pokes_clean = ", ".join([p.strip() for p in pokes.split(",") if p.strip()])
@@ -182,10 +186,10 @@ def build_target_string_for_mode(mode: str, fields: dict) -> tuple[str, bool]:
         return ", ".join(parts), False
 
     elif mode_lower == "periodicmsg":
-        chid = fields.get("chid", "").strip()
-        msg = fields.get("message", "").strip()
-        t1 = fields.get("time1", "").strip()
-        t2 = fields.get("time2", "").strip()
+        chid = str(fields.get("chid", "") or "").strip()
+        msg = str(fields.get("message", "") or "").strip()
+        t1 = str(fields.get("time1", "") or "").strip()
+        t2 = str(fields.get("time2", "") or "").strip()
 
         parts = [chid, msg]
         if t1:
@@ -195,29 +199,31 @@ def build_target_string_for_mode(mode: str, fields: dict) -> tuple[str, bool]:
         return " ; ".join([p for p in parts if p]), False
 
     elif mode_lower == "spam":
-        target = fields.get("chid", fields.get("target", "")).strip()
+        target = str(fields.get("chid", fields.get("target", "")) or "").strip()
         return target, False
 
     else:
-        target = fields.get("target", "").strip()
+        target = str(fields.get("target", "") or "").strip()
         return target, False
 
 
 # --- HELPER: DECODE DISCORD USER ID FROM TOKEN ---
 def get_user_id_from_token(token: str):
-    """Extracts the Discord User ID from a token's base64-encoded first segment."""
+    if not token or not isinstance(token, str):
+        return None
     try:
         part = token.split('.')[0]
         padded = part + '=' * (-len(part) % 4)
-        decoded = base64.b64decode(padded).decode('utf-8')
+        try:
+            decoded = base64.urlsafe_b64decode(padded.encode('utf-8')).decode('utf-8')
+        except Exception:
+            decoded = base64.b64decode(padded.encode('utf-8')).decode('utf-8')
         return int(decoded) if decoded.isdigit() else None
     except Exception:
         return None
 
 
-# --- HELPER: CHECK CHANNEL ALLOWED ---
 def is_channel_allowed(target_str: str, channel_id: int) -> bool:
-    """Checks if a given channel_id is allowed based on target_str channel IDs."""
     if not target_str:
         return True
     channel_ids = re.findall(r'\d+', target_str)
@@ -228,81 +234,72 @@ def is_channel_allowed(target_str: str, channel_id: int) -> bool:
 
 # --- FIREBASE HELPERS ---
 async def get_global_data():
-    """Fetches globally synced accounts and guilds."""
     data = await asyncio.to_thread(ref.get) or {}
+    if not isinstance(data, dict):
+        data = {}
     return {
-        "accounts": data.get("accounts", []),
-        "guilds": data.get("guilds", [])
+        "accounts": _ensure_list(data.get("accounts")),
+        "guilds": _ensure_list(data.get("guilds"))
     }
 
 
 async def get_autocatch_status():
-    """Fetches real-time autocatch pairs and current catcher turn from Firebase."""
     data = await asyncio.to_thread(ref.child("autocatch").get) or {}
+    if not isinstance(data, dict):
+        data = {}
     return {
-        "pairs": data.get("pairs", []),
-        "current_catcher": data.get("current_catcher", {})
+        "pairs": _ensure_list(data.get("pairs")),
+        "current_catcher": data.get("current_catcher", {}) if isinstance(data.get("current_catcher"), dict) else {}
     }
 
 
 async def save_global_data(data):
-    """Saves globally synced accounts and guilds."""
     await asyncio.to_thread(ref.child("accounts").set, data.get("accounts", []))
     await asyncio.to_thread(ref.child("guilds").set, data.get("guilds", []))
 
 
 async def get_guild_configs(guild_id: str):
-    """Fetches configs specific to a guild."""
-    configs = await asyncio.to_thread(ref.child("configs").child(str(guild_id)).get) or []
-    return configs
+    configs = await asyncio.to_thread(ref.child("configs").child(str(guild_id)).get)
+    return _ensure_list(configs)
 
 
 async def save_guild_configs(guild_id: str, configs: list):
-    """Saves configs specific to a guild."""
     await asyncio.to_thread(ref.child("configs").child(str(guild_id)).set, configs)
 
 
 async def get_guild_excludes(guild_id: str):
-    """Fetches standalone excludes specific to a guild from Firebase."""
-    excludes = await asyncio.to_thread(ref.child("excludes").child(str(guild_id)).get) or []
-    return excludes
+    excludes = await asyncio.to_thread(ref.child("excludes").child(str(guild_id)).get)
+    return _ensure_list(excludes)
 
 
 async def save_guild_excludes(guild_id: str, excludes: list):
-    """Saves standalone excludes specific to a guild in Firebase."""
     await asyncio.to_thread(ref.child("excludes").child(str(guild_id)).set, excludes)
 
 
 async def get_guild_detector_bots(guild_id: str):
-    """Fetches detector bots IDs for a specific guild."""
-    bots = await asyncio.to_thread(ref.child("detector_bots").child(str(guild_id)).get) or []
-    return bots
+    bots = await asyncio.to_thread(ref.child("detector_bots").child(str(guild_id)).get)
+    return _ensure_list(bots)
 
 
 async def save_guild_detector_bots(guild_id: str, bots: list):
-    """Saves detector bots IDs to a specific guild."""
     await asyncio.to_thread(ref.child("detector_bots").child(str(guild_id)).set, bots)
 
 
 async def get_guild_logs(guild_id: str):
-    """Fetches log channel configs specific to a guild."""
     logs = await asyncio.to_thread(ref.child("logs").child(str(guild_id)).get) or {}
-    return logs
+    return logs if isinstance(logs, dict) else {}
 
 
 async def save_guild_log(guild_id: str, log_type: str, channel_id: str):
-    """Saves or overwrites a log channel config for a specific log type in a guild."""
     await asyncio.to_thread(ref.child("logs").child(str(guild_id)).child(log_type).set, channel_id)
 
 
 async def save_guild_logs(guild_id: str, logs: dict):
-    """Saves or overwrites all log channel configs for a specific guild."""
     await asyncio.to_thread(ref.child("logs").child(str(guild_id)).set, logs)
 
 
 # --- HELPER: CHUNK EMBED FIELDS ---
 def add_chunked_field(embed: discord.Embed, title: str, lines: list[str]):
-    """Splits formatted lines across multiple embed fields to respect Discord's 1024-character limit per field."""
     if not lines:
         return
 
@@ -385,8 +382,9 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
             paused = cfg.get("paused", False)
             pause_until = cfg.get("pauseUntil")
             if paused and pause_until:
-                if current_time < pause_until:
-                    line += f" | ⏸️ **PAUSED** (<t:{int(pause_until)}:R>)"
+                pause_until_sec = int(pause_until / 1000) if pause_until > 1e11 else int(pause_until)
+                if current_time < pause_until_sec:
+                    line += f" | ⏸️ **PAUSED** (<t:{pause_until_sec}:R>)"
                 else:
                     line += " | ⏸️ **PAUSED** (Expired)"
             elif paused:
@@ -424,8 +422,9 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
             paused = cfg.get("paused", False)
             pause_until = cfg.get("pauseUntil")
             if paused and pause_until:
-                if current_time < pause_until:
-                    line += f" | ⏸️ **PAUSED** (<t:{int(pause_until)}:R>)"
+                pause_until_sec = int(pause_until / 1000) if pause_until > 1e11 else int(pause_until)
+                if current_time < pause_until_sec:
+                    line += f" | ⏸️ **PAUSED** (<t:{pause_until_sec}:R>)"
                 else:
                     line += " | ⏸️ **PAUSED** (Expired)"
             elif paused:
@@ -450,8 +449,8 @@ async def build_autocatch_configs_embed(guild: discord.Guild, autocatch_data: di
     pairs = autocatch_data.get("pairs", [])
     current_catcher_info = autocatch_data.get("current_catcher", {})
 
-    current_acc_idx = current_catcher_info.get("accIndex")
-    if current_acc_idx and 1 <= current_acc_idx <= len(accounts):
+    current_acc_idx = current_catcher_info.get("accIndex") if isinstance(current_catcher_info, dict) else None
+    if current_acc_idx and isinstance(current_acc_idx, int) and 1 <= current_acc_idx <= len(accounts):
         c_tok = accounts[current_acc_idx - 1]
         c_uid = get_user_id_from_token(c_tok)
         c_mention = f"<@{c_uid}>" if c_uid else "*Unknown Member*"
@@ -463,14 +462,15 @@ async def build_autocatch_configs_embed(guild: discord.Guild, autocatch_data: di
     if pairs:
         for p_idx, pair in enumerate(pairs, 1):
             pair_members = []
-            for p_acc in pair:
-                if 1 <= p_acc <= len(accounts):
-                    p_tok = accounts[p_acc - 1]
-                    p_uid = get_user_id_from_token(p_tok)
-                    p_m = f"<@{p_uid}>" if p_uid else f"Acc #{p_acc}"
-                    pair_members.append(f"Acc #{p_acc} ({p_m})")
-                else:
-                    pair_members.append(f"Acc #{p_acc}")
+            if isinstance(pair, (list, tuple)):
+                for p_acc in pair:
+                    if isinstance(p_acc, int) and 1 <= p_acc <= len(accounts):
+                        p_tok = accounts[p_acc - 1]
+                        p_uid = get_user_id_from_token(p_tok)
+                        p_m = f"<@{p_uid}>" if p_uid else f"Acc #{p_acc}"
+                        pair_members.append(f"Acc #{p_acc} ({p_m})")
+                    else:
+                        pair_members.append(f"Acc #{p_acc}")
             pairs_str_list.append(f"• **Pair #{p_idx}:** {' & '.join(pair_members)}")
         pairs_fmt = "\n".join(pairs_str_list)
     else:
@@ -575,47 +575,60 @@ async def refresh_config_embed(interaction: discord.Interaction, override_page: 
             await interaction.message.edit(embed=embed)
 
 
+# --- CONFIG GROUP SUBCOMMANDS ---
+@config_group.command(name="grinder", aliases=["g", "grind"])
+@commands.is_owner()
+async def grindconfig(ctx: commands.Context):
+    """Shows mode configurations for the current server."""
+    if not ctx.guild:
+        await ctx.send("❌ This command must be used within a server.")
+        return
+
+    guild_id = str(ctx.guild.id)
+    configs = await get_guild_configs(guild_id)
+    g_data = await get_global_data()
+    accounts = g_data.get("accounts", [])
+
+    embed = await build_mode_configs_embed(ctx.guild, configs, accounts)
+    await ctx.send(embed=embed, view=ConfigView(page="modes"))
+
+
+@config_group.command(name="grinderaccounts", aliases=["grindaccounts", "accounts"])
+@commands.is_owner()
+async def grindaccounts_cmd(ctx: commands.Context):
+    """Shows global grinder accounts."""
+    data = await get_global_data()
+    accs = data.get("accounts", [])
+
+    embed = build_accounts_embed(accs)
+    await ctx.send(embed=embed, view=AccountsView())
+
+
+@config_group.command(name="grinderlogs", aliases=["logs"])
+@commands.is_owner()
+async def grinderlogs_cmd(ctx: commands.Context):
+    """Shows log channels for the current server."""
+    if not ctx.guild:
+        await ctx.send("❌ This command must be used within a server.")
+        return
+
+    guild_id = str(ctx.guild.id)
+    logs = await get_guild_logs(guild_id)
+
+    embed = build_logs_embed(ctx.guild, logs)
+    await ctx.send(embed=embed, view=GrinderLogsView())
+
+
 # --- COG DEFINITION ---
 class GrinderCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command(name="grindaccounts", aliases=["ga"])
+    @commands.command(name="grindconfig", aliases=["gc", "g"])
     @commands.is_owner()
-    async def grindaccounts(self, ctx: commands.Context):
-        data = await get_global_data()
-        accs = data.get("accounts", [])
-        
-        embed = build_accounts_embed(accs)
-        await ctx.send(embed=embed, view=AccountsView())
-
-    @commands.command(name="grindconfig", aliases=["gc"])
-    @commands.is_owner()
-    async def grindconfig(self, ctx: commands.Context):
-        if not ctx.guild:
-            await ctx.send("❌ This command must be used within a server.")
-            return
-
-        guild_id = str(ctx.guild.id)
-        configs = await get_guild_configs(guild_id)
-        g_data = await get_global_data()
-        accounts = g_data.get("accounts", [])
-
-        embed = await build_mode_configs_embed(ctx.guild, configs, accounts)
-        await ctx.send(embed=embed, view=ConfigView(page="modes"))
-
-    @commands.command(name="grinderlogs", aliases=["gl"])
-    @commands.is_owner()
-    async def grinderlogs(self, ctx: commands.Context):
-        if not ctx.guild:
-            await ctx.send("❌ This command must be used within a server.")
-            return
-
-        guild_id = str(ctx.guild.id)
-        logs = await get_guild_logs(guild_id)
-
-        embed = build_logs_embed(ctx.guild, logs)
-        await ctx.send(embed=embed, view=GrinderLogsView())
+    async def grindconfig_cog(self, ctx: commands.Context):
+        """Top-level command alias for viewing server configs."""
+        await grindconfig(ctx)
 
     @commands.command(name="edit")
     @commands.is_owner()
@@ -690,10 +703,8 @@ class GrinderCog(commands.Cog):
             if seconds is None:
                 await ctx.send("❌ Invalid duration format! Use e.g. `30s`, `4m`, `2h`, `1d`.")
                 return
-            # Convert to milliseconds for Node.js Date.now() compatibility
             pause_until = int((time.time() + seconds) * 1000)
 
-        # If no numerical indices provided, target ALL configurations in this server
         if not indices:
             target_indices = list(range(1, len(configs) + 1))
         else:
@@ -903,6 +914,5 @@ class GrinderCog(commands.Cog):
         )
 
 
-# Extension setup entrypoint
 async def setup(bot: commands.Bot):
     await bot.add_cog(GrinderCog(bot))

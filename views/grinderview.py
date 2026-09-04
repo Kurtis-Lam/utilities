@@ -3,7 +3,7 @@ import discord
 from discord import ui
 
 from views.common import ConfirmView
-from cogs.grinder import grinder as config
+from cogs.config import grinder as config
 
 
 def fmt_placeholder(val) -> str:
@@ -80,15 +80,32 @@ class AccountsView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @ui.button(label="Add Account", style=discord.ButtonStyle.green, custom_id="acc_add")
+    # --- ROW 0: NAVIGATION BUTTONS ---
+    @ui.button(label="📋 Configs", style=discord.ButtonStyle.grey, custom_id="acc_nav_cfg", row=0)
+    async def nav_configs(self, interaction: discord.Interaction, button: ui.Button):
+        if interaction.guild:
+            configs = await config.get_guild_configs(str(interaction.guild_id))
+            g_data = await config.get_global_data()
+            embed = await config.build_mode_configs_embed(interaction.guild, configs, g_data.get("accounts", []))
+            await interaction.response.edit_message(embed=embed, view=ConfigView(page="modes"))
+
+    @ui.button(label="📜 Logs", style=discord.ButtonStyle.grey, custom_id="acc_nav_logs", row=0)
+    async def nav_logs(self, interaction: discord.Interaction, button: ui.Button):
+        if interaction.guild:
+            logs = await config.get_guild_logs(str(interaction.guild_id))
+            embed = config.build_logs_embed(interaction.guild, logs)
+            await interaction.response.edit_message(embed=embed, view=GrinderLogsView())
+
+    # --- ROW 1: ACTIONS ---
+    @ui.button(label="Add Account", style=discord.ButtonStyle.green, custom_id="acc_add", row=1)
     async def add_btn(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(AddAccountModal())
 
-    @ui.button(label="Delete Account", style=discord.ButtonStyle.red, custom_id="acc_del")
+    @ui.button(label="Delete Account", style=discord.ButtonStyle.red, custom_id="acc_del", row=1)
     async def del_btn(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(DeleteAccountModal())
 
-    @ui.button(label="Edit Account", style=discord.ButtonStyle.blurple, custom_id="acc_edit")
+    @ui.button(label="Edit Account", style=discord.ButtonStyle.blurple, custom_id="acc_edit", row=1)
     async def edit_btn(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(EditAccountModal())
 
@@ -567,7 +584,7 @@ class ConfigView(ui.View):
         super().__init__(timeout=None)
         self.page = page
 
-        # Config tabs: selected tab is blue (blurple), unselected tabs are grey (grey)
+        # Config tabs styling
         self.nav_modes.style = discord.ButtonStyle.blurple if page == "modes" else discord.ButtonStyle.grey
         self.nav_autocatch.style = discord.ButtonStyle.blurple if page == "autocatch" else discord.ButtonStyle.grey
         self.nav_excludes.style = discord.ButtonStyle.blurple if page == "excludes" else discord.ButtonStyle.grey
@@ -597,11 +614,21 @@ class ConfigView(ui.View):
             self.remove_item(self.rem_bot)
 
     async def change_page(self, interaction: discord.Interaction, new_page: str):
-        new_view = ConfigView(page=new_page)
         guild_id = str(interaction.guild_id)
         g_data = await config.get_global_data()
         accounts = g_data.get("accounts", [])
 
+        if new_page == "accounts":
+            embed = config.build_accounts_embed(accounts)
+            await interaction.response.edit_message(embed=embed, view=AccountsView())
+            return
+        elif new_page == "logs":
+            logs = await config.get_guild_logs(guild_id)
+            embed = config.build_logs_embed(interaction.guild, logs)
+            await interaction.response.edit_message(embed=embed, view=GrinderLogsView())
+            return
+
+        new_view = ConfigView(page=new_page)
         if new_page == "modes":
             configs = await config.get_guild_configs(guild_id)
             embed = await config.build_mode_configs_embed(interaction.guild, configs, accounts)
@@ -617,41 +644,51 @@ class ConfigView(ui.View):
 
         await interaction.response.edit_message(embed=embed, view=new_view)
 
-    # --- ROW 0: NAVIGATION BUTTONS ---
-    @ui.button(label="Mode Configs", style=discord.ButtonStyle.grey, custom_id="cfg_nav_modes", row=0)
+    # --- ROW 0: TOP NAVIGATION BUTTONS ---
+    @ui.button(label="⚙️ Accounts", style=discord.ButtonStyle.grey, custom_id="cfg_nav_accounts", row=0)
+    async def nav_accounts(self, interaction: discord.Interaction, button: ui.Button):
+        await self.change_page(interaction, "accounts")
+
+    @ui.button(label="📜 Logs", style=discord.ButtonStyle.grey, custom_id="cfg_nav_logs", row=0)
+    async def nav_logs(self, interaction: discord.Interaction, button: ui.Button):
+        if interaction.guild:
+            await self.change_page(interaction, "logs")
+
+    # --- ROW 1: CONFIG PAGE NAVIGATION ---
+    @ui.button(label="Modes", style=discord.ButtonStyle.grey, custom_id="cfg_nav_modes", row=1)
     async def nav_modes(self, interaction: discord.Interaction, button: ui.Button):
         if interaction.guild:
             await self.change_page(interaction, "modes")
 
-    @ui.button(label="AutoCatch Configs", style=discord.ButtonStyle.grey, custom_id="cfg_nav_autocatch", row=0)
+    @ui.button(label="AutoCatch", style=discord.ButtonStyle.grey, custom_id="cfg_nav_autocatch", row=1)
     async def nav_autocatch(self, interaction: discord.Interaction, button: ui.Button):
         if interaction.guild:
             await self.change_page(interaction, "autocatch")
 
-    @ui.button(label="Excludes Configs", style=discord.ButtonStyle.grey, custom_id="cfg_nav_excludes", row=0)
+    @ui.button(label="Excludes", style=discord.ButtonStyle.grey, custom_id="cfg_nav_excludes", row=1)
     async def nav_excludes(self, interaction: discord.Interaction, button: ui.Button):
         if interaction.guild:
             await self.change_page(interaction, "excludes")
 
-    @ui.button(label="Detector Bots", style=discord.ButtonStyle.grey, custom_id="cfg_nav_bots", row=0)
+    @ui.button(label="Bots", style=discord.ButtonStyle.grey, custom_id="cfg_nav_bots", row=1)
     async def nav_bots(self, interaction: discord.Interaction, button: ui.Button):
         if interaction.guild:
             await self.change_page(interaction, "detector_bots")
 
-    # --- ROW 1: CONFIG ACTION BUTTONS ---
-    @ui.button(label="Add Config", style=discord.ButtonStyle.green, custom_id="cfg_add", row=1)
+    # --- ROW 2: CONFIG ACTION BUTTONS ---
+    @ui.button(label="Add Config", style=discord.ButtonStyle.green, custom_id="cfg_add", row=2)
     async def add_cfg(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(AddConfigModal())
 
-    @ui.button(label="Edit Config", style=discord.ButtonStyle.blurple, custom_id="cfg_edit", row=1)
+    @ui.button(label="Edit Config", style=discord.ButtonStyle.blurple, custom_id="cfg_edit", row=2)
     async def edit_cfg(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(PromptEditConfigModal())
 
-    @ui.button(label="Remove Config", style=discord.ButtonStyle.red, custom_id="cfg_rem", row=1)
+    @ui.button(label="Remove Config", style=discord.ButtonStyle.red, custom_id="cfg_rem", row=2)
     async def rem_cfg(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(RemoveConfigModal())
 
-    @ui.button(label="Reset ALL", style=discord.ButtonStyle.danger, custom_id="cfg_reset_all", row=1)
+    @ui.button(label="Reset ALL", style=discord.ButtonStyle.danger, custom_id="cfg_reset_all", row=2)
     async def reset_all(self, interaction: discord.Interaction, button: ui.Button):
         if not interaction.guild_id or not isinstance(interaction.user, (discord.Member, discord.User)):
             return
@@ -680,20 +717,20 @@ class ConfigView(ui.View):
         else:
             await interaction.followup.send("⏰ Reset request timed out.", ephemeral=True)
 
-    # --- ROW 2: EXCLUDE & BOT ACTION BUTTONS ---
-    @ui.button(label="Add Excludes", style=discord.ButtonStyle.green, custom_id="cfg_add_ex", row=2)
+    # --- ROW 3: EXCLUDE & BOT ACTION BUTTONS ---
+    @ui.button(label="Add Excludes", style=discord.ButtonStyle.green, custom_id="cfg_add_ex", row=3)
     async def add_ex(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(AddExcludeModal())
 
-    @ui.button(label="Remove Excludes", style=discord.ButtonStyle.red, custom_id="cfg_rem_ex", row=2)
+    @ui.button(label="Remove Excludes", style=discord.ButtonStyle.red, custom_id="cfg_rem_ex", row=3)
     async def rem_ex(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(RemoveExcludeModal())
 
-    @ui.button(label="Add Bot", style=discord.ButtonStyle.green, custom_id="cfg_add_bot", row=2)
+    @ui.button(label="Add Bot", style=discord.ButtonStyle.green, custom_id="cfg_add_bot", row=3)
     async def add_bot(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(AddBotModal())
 
-    @ui.button(label="Remove Bot", style=discord.ButtonStyle.red, custom_id="cfg_rem_bot", row=2)
+    @ui.button(label="Remove Bot", style=discord.ButtonStyle.red, custom_id="cfg_rem_bot", row=3)
     async def rem_bot(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(RemoveBotModal())
 
@@ -746,14 +783,30 @@ class GrinderLogsView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @ui.button(label="Set Alerts", style=discord.ButtonStyle.blurple, custom_id="log_alerts")
+    # --- ROW 0: NAVIGATION BUTTONS ---
+    @ui.button(label="📋 Configs", style=discord.ButtonStyle.grey, custom_id="log_nav_cfg", row=0)
+    async def nav_configs(self, interaction: discord.Interaction, button: ui.Button):
+        if interaction.guild:
+            configs = await config.get_guild_configs(str(interaction.guild_id))
+            g_data = await config.get_global_data()
+            embed = await config.build_mode_configs_embed(interaction.guild, configs, g_data.get("accounts", []))
+            await interaction.response.edit_message(embed=embed, view=ConfigView(page="modes"))
+
+    @ui.button(label="⚙️ Accounts", style=discord.ButtonStyle.grey, custom_id="log_nav_acc", row=0)
+    async def nav_accounts(self, interaction: discord.Interaction, button: ui.Button):
+        data = await config.get_global_data()
+        embed = config.build_accounts_embed(data.get("accounts", []))
+        await interaction.response.edit_message(embed=embed, view=AccountsView())
+
+    # --- ROW 1: ACTIONS ---
+    @ui.button(label="Set Alerts", style=discord.ButtonStyle.blurple, custom_id="log_alerts", row=1)
     async def set_alerts(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(SetLogModal("alerts"))
 
-    @ui.button(label="Set Autocatch", style=discord.ButtonStyle.blurple, custom_id="log_autocatch")
+    @ui.button(label="Set Autocatch", style=discord.ButtonStyle.blurple, custom_id="log_autocatch", row=1)
     async def set_autocatch(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(SetLogModal("autocatch"))
 
-    @ui.button(label="Set Switch", style=discord.ButtonStyle.blurple, custom_id="log_switch")
+    @ui.button(label="Set Switch", style=discord.ButtonStyle.blurple, custom_id="log_switch", row=1)
     async def set_switch(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(SetLogModal("switch"))

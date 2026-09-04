@@ -1,7 +1,6 @@
 import re
 import discord
 
-
 def parse_ids(text: str) -> list[int]:
     """Extracts numeric IDs from text or mentions separated by commas or whitespace."""
     if not text:

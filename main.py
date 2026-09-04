@@ -6,7 +6,6 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 
-# Remember to keep your bot token secret!
 TOKEN = "MTMyNzQ4MDgyODc0MTE2MTA3NA.GWPTNO.VttPjVzEFtwUW_6N00NCJUgRCinBm2FsCVcYrg"
 OWNERS = {1250429544486273038, 1281560553130692618, 1528374615720591381, 1432984051341459527, 1432983193681920014}
 
@@ -15,27 +14,24 @@ INTENTS.message_content = True
 INTENTS.guilds = True
 INTENTS.members = True
 
-# --- BOT MAIN CLASS ---
 class Utilities(commands.Bot):
     def __init__(self):
         super().__init__(
             command_prefix=self.get_prefix_with_space, 
             owner_ids=OWNERS, 
             intents=INTENTS,
-            case_insensitive=True  # <--- This makes all commands case-insensitive
+            case_insensitive=True
         )
         self.active_predictions = {}
         self.session = None
 
-        # Stored cogs dictionary as an instance attribute for easy access across the bot
         self.cogs_dict = {
-            "cmds": ["categories", "channels", "joins", "members", "messages", "ping", "roles", "utilities"],
-            "poketwo": ["dex", "fled", "hintsolver", "lockunlock", "pings", "recognizer", "spawnsconfig"],
-            "grinder": ["grinder"]
+            "cmds": ["categories", "channels", "members", "messages", "ping", "roles", "utilities"],
+            "config": ["base"],
+            "poketwo": ["catches", "dex", "fled", "hintsolver", "lockunlock", "pings", "recognizer"]
         }
 
     async def get_prefix_with_space(self, bot, message):
-        # This allows both '.' and '. ' (with a space) alongside bot mentions
         return commands.when_mentioned_or('.', '. ')(bot, message)
 
     async def setup_hook(self):
@@ -64,12 +60,10 @@ bot = Utilities()
 async def on_ready():
     print(f'We have logged in as {bot.user}')
 
-# --- OWNER COMMANDS ---
 @bot.command(name="reload")
 @commands.is_owner()
 async def reload(ctx: commands.Context, cog_name: str = None):
     if cog_name:
-        # Search for matching cog in cogs_dict
         target_ext = None
         for category, cogs in bot.cogs_dict.items():
             if cog_name.lower() in [c.lower() for c in cogs]:
@@ -83,13 +77,12 @@ async def reload(ctx: commands.Context, cog_name: str = None):
         msg = await ctx.send(f"🔄 Reloading `{cog_name}`...")
         try:
             await bot.reload_extension(target_ext)
-            gc.collect()  # Force garbage collection to free memory immediately
+            gc.collect()
             await msg.edit(content=f"✅ Reloaded `{cog_name}`.")
         except Exception as e:
             await msg.edit(content=f"❌ Failed to reload `{cog_name}`: `{e}`")
         return
 
-    # Fallback to reloading all cogs sequentially with live status edits
     reloaded, failed = [], []
     msg = await ctx.send("🔄 Starting reload process...")
 
@@ -102,7 +95,7 @@ async def reload(ctx: commands.Context, cog_name: str = None):
                 reloaded.append(cog)
             except Exception as e:
                 failed.append(f"`{cog}`: {e}")
-            gc.collect()  # Clean up memory after each cog
+            gc.collect()
 
     final_msg = f"🔄 **Reload Complete**\n✅ Successfully reloaded **{len(reloaded)}** cogs."
     if failed:

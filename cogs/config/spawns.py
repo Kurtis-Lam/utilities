@@ -4,7 +4,8 @@ import discord
 from discord.ext import commands
 import motor.motor_asyncio
 
-from views.spawnsconfigview import SpawnsConfigView
+from views.spawnsview import SpawnsConfigView
+from .base import config_group
 
 MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 POKETWO_ID = 716390085896962058
@@ -14,6 +15,25 @@ SENSOR_IDS = {874910942490677270, 854233015475109888, 1250429544486273038}
 async def get_poketwo_target(guild: discord.Guild):
     """Retrieve Poketwo Member object via cache or fetch."""
     return guild.get_member(POKETWO_ID) or await guild.fetch_member(POKETWO_ID)
+
+@config_group.command(
+    name="spawns",
+    aliases=["s"],
+    description="Display and edit server autolock configurations for rares, regionals, and users."
+)
+@commands.has_permissions(administrator=True)
+async def spawnsconfig(ctx: commands.Context):
+    # Retrieve the cog explicitly since the command is defined outside the class
+    cog = ctx.bot.get_cog("SpawnsConfig")
+    
+    # Optional safety check just in case the cog failed to load
+    if cog is None:
+        return await ctx.send("⚠️ Internal error: `SpawnsConfig` cog is not loaded.")
+
+    # Use the retrieved cog instead of ctx.cog
+    embed = await cog.build_config_embed(ctx.guild)
+    view = SpawnsConfigView(cog, author_id=ctx.author.id)
+    await ctx.send(embed=embed, view=view)
 
 
 class UnlockView(discord.ui.View):
@@ -113,46 +133,11 @@ class SpawnsConfig(commands.Cog):
         )
         return embed
 
-    async def _check_target_triggered(self, message: discord.Message, guild_config: dict) -> bool:
-        channel_id = message.channel.id
-        category_id = message.channel.category_id
-        content = message.content
-
-        for key in ("rare", "regional", "user"):
-            for entry in guild_config.get(key, []):
-                target_id = entry.get("target")
-
-                if (r_ch := entry.get("restrict_channels")) and channel_id not in r_ch:
-                    continue
-                if (r_cat := entry.get("restrict_categories")) and category_id not in r_cat:
-                    continue
-                if (x_ch := entry.get("exclude_channels")) and channel_id in x_ch:
-                    continue
-                if (x_cat := entry.get("exclude_categories")) and category_id in x_cat:
-                    continue
-
-                if target_id:
-                    if self._is_target_mentioned(content, target_id):
-                        return True
-                else:
-                    return True
-        return False
-
-    @commands.hybrid_command(
-        name="spawnsconfig",
-        aliases=["sc"],
-        description="Display and edit server autolock configurations for rares, regionals, and users.",
-    )
-    @commands.has_permissions(administrator=True)
-    async def spawnsconfig(self, ctx: commands.Context):
-        embed = await self.build_config_embed(ctx.guild)
-        view = SpawnsConfigView(self, author_id=ctx.author.id)
-        await ctx.send(embed=embed, view=view)
-
     @spawnsconfig.error
-    async def spawnsconfig_error(self, ctx, error):
+    async def spawnsconfig_error(ctx: commands.Context, error: Exception):
+        # Remove 'self' from standalone error handler arguments
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send("❌ You need **Administrator** permissions to use this command.")
+            pass
         else:
             await ctx.send(f"⚠️ Internal error: `{error}`")
 
