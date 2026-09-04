@@ -4,7 +4,7 @@ from typing import List, Tuple, Optional
 import certifi
 import discord
 from discord.ext import commands
-import motor.motor_asyncio  # Replaced pymongo with asynchronous motor
+import motor.motor_asyncio
 
 MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
@@ -18,6 +18,8 @@ REGIONS = [
     "Kanto", "Johto", "Hoenn", "Sinnoh", "Unova",
     "Kalos", "Alola", "Galar", "Hisui", "Paldea"
 ]
+
+EXTRA_RP_CATEGORIES = ["Gmax", "Paradox", "Eevos"]
 
 
 def resolve_file_path(filename: str) -> Path:
@@ -52,7 +54,6 @@ class TypePingButton(discord.ui.Button):
         g_id = str(interaction.guild_id)
         u_id = str(interaction.user.id)
 
-        # AWAITED: Async fetch
         user_types = await view.cog.get_ping_data(g_id, "tp", u_id, default=[])
 
         if self.type_name in user_types:
@@ -62,7 +63,6 @@ class TypePingButton(discord.ui.Button):
             user_types.append(self.type_name)
             self.style = discord.ButtonStyle.green
 
-        # AWAITED: Async write
         await view.cog.set_ping_data(g_id, "tp", u_id, user_types)
         embed = view.make_embed(user_types)
         await interaction.response.edit_message(embed=embed, view=view)
@@ -84,16 +84,16 @@ class TypePingView(discord.ui.View):
         return embed
 
 
-# --- UI Components for Region Pings ---
+# --- UI Components for Region & Special Category Pings ---
 
 class RegionPingButton(discord.ui.Button):
-    def __init__(self, region_name: str, is_active: bool):
+    def __init__(self, category_name: str, is_active: bool):
         super().__init__(
-            label=region_name,
+            label=category_name,
             style=discord.ButtonStyle.green if is_active else discord.ButtonStyle.red,
-            custom_id=f"rp_{region_name}"
+            custom_id=f"rp_{category_name}"
         )
-        self.region_name = region_name
+        self.category_name = category_name
 
     async def callback(self, interaction: discord.Interaction):
         view: RegionPingView = self.view
@@ -103,17 +103,15 @@ class RegionPingButton(discord.ui.Button):
         g_id = str(interaction.guild_id)
         u_id = str(interaction.user.id)
 
-        # AWAITED: Async fetch
         user_regions = await view.cog.get_ping_data(g_id, "rp", u_id, default=[])
 
-        if self.region_name in user_regions:
-            user_regions.remove(self.region_name)
+        if self.category_name in user_regions:
+            user_regions.remove(self.category_name)
             self.style = discord.ButtonStyle.red
         else:
-            user_regions.append(self.region_name)
+            user_regions.append(self.category_name)
             self.style = discord.ButtonStyle.green
 
-        # AWAITED: Async write
         await view.cog.set_ping_data(g_id, "rp", u_id, user_regions)
         embed = view.make_embed(user_regions)
         await interaction.response.edit_message(embed=embed, view=view)
@@ -124,14 +122,19 @@ class RegionPingView(discord.ui.View):
         super().__init__(timeout=180)
         self.cog = cog
         self.user_id = user_id
-        for r in REGIONS:
-            self.add_item(RegionPingButton(r, r in user_regions))
+
+        all_items = REGIONS + EXTRA_RP_CATEGORIES
+        for item in all_items:
+            self.add_item(RegionPingButton(item, item in user_regions))
 
     def make_embed(self, user_regions: list) -> discord.Embed:
-        embed = discord.Embed(title="🌍 Region Pings Configuration", color=discord.Color.blue())
-        embed.description = "\n".join(
-            f"{'✅' if r in user_regions else '❌'} **{r}**" for r in REGIONS
-        )
+        embed = discord.Embed(title="🌍 Region & Special Pings Configuration", color=discord.Color.blue())
+        
+        region_lines = [f"{'✅' if r in user_regions else '❌'} **{r}**" for r in REGIONS]
+        extra_lines = [f"{'✅' if cat in user_regions else '❌'} **{cat}**" for cat in EXTRA_RP_CATEGORIES]
+
+        embed.add_field(name="Regions", value="\n".join(region_lines), inline=True)
+        embed.add_field(name="Special Categories", value="\n".join(extra_lines), inline=True)
         return embed
 
 
@@ -140,14 +143,12 @@ class RegionPingView(discord.ui.View):
 class PokePings(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Async Motor Client
         self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
         self.db = self.mongo_client["utilities"]
         self.collection = self.db["pings"]
         self.pokevars = {}
 
     async def cog_load(self):
-        """Warms up connection and asynchronously loads local pokevars data on boot."""
         try:
             await self.mongo_client.admin.command('ping')
             self.pokevars = self._load_pokevars()
@@ -155,31 +156,38 @@ class PokePings(commands.Cog):
             print(f"PokePings Cog: MongoDB warmup failed: {e}")
 
     async def _get_guild_doc(self, guild_id: str) -> dict:
-        # AWAITED: Non-blocking DB find
         doc = await self.collection.find_one({"_id": guild_id})
-        return doc if doc else {"_id": guild_id, "sh": {}, "cl": {}, "re": {}, "tp": {}, "rp": {}}
+        return doc if doc else {"_id": guild_id, "sh": {}, "cl": {}, "re": {}, "tp": {}, "rp": {}, "roles": {}}
 
     async def get_ping_data(self, guild_id: str, ping_type: str, user_id: str, default=None):
         doc = await self._get_guild_doc(guild_id)
         return doc.get(ping_type, {}).get(user_id, default)
 
     async def set_ping_data(self, guild_id: str, ping_type: str, user_id: str, value):
-        # AWAITED: Non-blocking DB update
         await self.collection.update_one(
             {"_id": guild_id},
             {"$set": {f"{ping_type}.{user_id}": value}},
             upsert=True
         )
 
+    async def get_guild_role(self, guild_id: str, role_key: str) -> Optional[str]:
+        doc = await self._get_guild_doc(guild_id)
+        return doc.get("roles", {}).get(role_key)
+
+    async def set_guild_role(self, guild_id: str, role_key: str, role_id: str):
+        await self.collection.update_one(
+            {"_id": guild_id},
+            {"$set": {f"roles.{role_key}": role_id}},
+            upsert=True
+        )
+
     async def clear_ping_category(self, guild_id: str, ping_type: str, user_id: Optional[str] = None):
         if user_id:
-            # AWAITED
             await self.collection.update_one(
                 {"_id": guild_id},
                 {"$unset": {f"{ping_type}.{user_id}": ""}}
             )
         else:
-            # AWAITED
             await self.collection.update_one(
                 {"_id": guild_id},
                 {"$set": {ping_type: {}}},
@@ -187,7 +195,6 @@ class PokePings(commands.Cog):
             )
 
     def _load_pokevars(self) -> dict:
-        """Loads pokevars dictionary once into memory on startup."""
         if POKEVARS_FILE.exists():
             try:
                 with open(POKEVARS_FILE, "r", encoding="utf-8") as f:
@@ -198,7 +205,6 @@ class PokePings(commands.Cog):
         return {}
 
     def parse_pokemon_list(self, raw_input: str) -> Tuple[List[str], List[str]]:
-        """Splits input and matches Pokémon names directly against memory lookup."""
         names = [p.strip().lower() for p in raw_input.split(",") if p.strip()]
         matched = []
         invalid = []
@@ -211,6 +217,43 @@ class PokePings(commands.Cog):
                 invalid.append(name)
         return matched, invalid
 
+    async def _handle_role_config(self, ctx: commands.Context, role_key: str, category_name: str, role: discord.Role = None):
+        g_id = str(ctx.guild.id)
+        if role is None:
+            current_role_id = await self.get_guild_role(g_id, role_key)
+            if current_role_id:
+                await ctx.send(f"Current **{category_name}** role: <@&{current_role_id}>")
+            else:
+                await ctx.send(f"No role configured for **{category_name}**.")
+        else:
+            await self.set_guild_role(g_id, role_key, str(role.id))
+            await ctx.send(f"Set **{category_name}** ping role to {role.mention}")
+
+    @commands.command(name="rarerole", aliases=["rarole"])
+    @commands.has_permissions(administrator=True)
+    async def rare_role(self, ctx: commands.Context, role: discord.Role = None):
+        await self._handle_role_config(ctx, "rare", "Rare", role)
+
+    @commands.command(name="regionalrole", aliases=["regrole"])
+    @commands.has_permissions(administrator=True)
+    async def regional_role(self, ctx: commands.Context, role: discord.Role = None):
+        await self._handle_role_config(ctx, "regional", "Regional", role)
+
+    @commands.command(name="gigantamaxrole", aliases=["gmaxrole"])
+    @commands.has_permissions(administrator=True)
+    async def gigantamax_role(self, ctx: commands.Context, role: discord.Role = None):
+        await self._handle_role_config(ctx, "gmax", "Gigantamax", role)
+
+    @commands.command(name="paradoxrole", aliases=["pararole"])
+    @commands.has_permissions(administrator=True)
+    async def paradox_role(self, ctx: commands.Context, role: discord.Role = None):
+        await self._handle_role_config(ctx, "paradox", "Paradox", role)
+
+    @commands.command(name="eeveeevolutions", aliases=["eevosrole"])
+    @commands.has_permissions(administrator=True)
+    async def eevos_role(self, ctx: commands.Context, role: discord.Role = None):
+        await self._handle_role_config(ctx, "eevos", "Eevee Evolutions", role)
+
     # --- Shiny Hunt Command ---
 
     @commands.command(name="sh")
@@ -219,7 +262,6 @@ class PokePings(commands.Cog):
         u_id = str(ctx.author.id)
 
         if not pokemon:
-            # AWAITED
             current_sh = await self.get_ping_data(g_id, "sh", u_id)
             if current_sh:
                 await ctx.send(f"✨ Your current Shiny Hunt target is **{current_sh}**.")
@@ -232,7 +274,6 @@ class PokePings(commands.Cog):
             await ctx.send("Pokémon does not exist.")
             return
 
-        # AWAITED
         await self.set_ping_data(g_id, "sh", u_id, matched_name)
         await ctx.send(f"✨ Set your Shiny Hunt target to **{matched_name}** in this server!")
 
@@ -256,7 +297,6 @@ class PokePings(commands.Cog):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
-        # AWAITED
         user_list = await self.get_ping_data(g_id, "cl", u_id, default=[])
         user_set = set(user_list)
         added, already_in = [], []
@@ -269,7 +309,6 @@ class PokePings(commands.Cog):
             else:
                 already_in.append(name)
 
-        # AWAITED
         await self.set_ping_data(g_id, "cl", u_id, user_list)
 
         msg_parts = []
@@ -291,7 +330,6 @@ class PokePings(commands.Cog):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
-        # AWAITED
         user_list = await self.get_ping_data(g_id, "cl", u_id, default=[])
 
         if not user_list:
@@ -313,7 +351,6 @@ class PokePings(commands.Cog):
             not_found = list(raw_targets)
 
         if removed:
-            # AWAITED
             await self.set_ping_data(g_id, "cl", u_id, new_list)
 
         msg_parts = []
@@ -329,7 +366,6 @@ class PokePings(commands.Cog):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
-        # AWAITED
         await self.set_ping_data(g_id, "cl", u_id, [])
         await ctx.send("🧹 Cleared your collection list!")
 
@@ -338,7 +374,6 @@ class PokePings(commands.Cog):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
-        # AWAITED
         user_list = await self.get_ping_data(g_id, "cl", u_id, default=[])
 
         embed = discord.Embed(title=f"📦 {ctx.author.display_name}'s Collection List", color=discord.Color.gold())
@@ -351,7 +386,6 @@ class PokePings(commands.Cog):
     @commands.group(name="reserves", aliases=["reserve", "re"], invoke_without_command=True)
     async def reserves(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
-        # AWAITED
         doc = await self._get_guild_doc(g_id)
         re_data = doc.get("re", {})
 
@@ -378,7 +412,6 @@ class PokePings(commands.Cog):
         g_id = str(ctx.guild.id)
         u_id = str(member.id)
 
-        # AWAITED
         user_list = await self.get_ping_data(g_id, "re", u_id, default=[])
         user_set = set(user_list)
         added, already_in = [], []
@@ -391,7 +424,6 @@ class PokePings(commands.Cog):
             else:
                 already_in.append(name)
 
-        # AWAITED
         await self.set_ping_data(g_id, "re", u_id, user_list)
 
         msg_parts = []
@@ -410,7 +442,6 @@ class PokePings(commands.Cog):
         g_id = str(ctx.guild.id)
         u_id = str(member.id)
 
-        # AWAITED
         user_list = await self.get_ping_data(g_id, "re", u_id, default=[])
 
         if not user_list:
@@ -432,7 +463,6 @@ class PokePings(commands.Cog):
             not_found = list(raw_targets)
 
         if removed:
-            # AWAITED
             await self.set_ping_data(g_id, "re", u_id, new_list)
 
         msg_parts = []
@@ -450,11 +480,9 @@ class PokePings(commands.Cog):
 
         if member:
             u_id = str(member.id)
-            # AWAITED
             await self.set_ping_data(g_id, "re", u_id, [])
             await ctx.send(f"🧹 Cleared all reserves for {member.mention}!")
         else:
-            # AWAITED
             await self.clear_ping_category(g_id, "re")
             await ctx.send("🧹 Cleared **ALL** reserves for this server!")
 
@@ -476,7 +504,6 @@ class PokePings(commands.Cog):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
-        # AWAITED
         user_types = await self.get_ping_data(g_id, "tp", u_id, default=[])
         view = TypePingView(self, ctx.author.id, user_types)
         embed = view.make_embed(user_types)
@@ -487,7 +514,6 @@ class PokePings(commands.Cog):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
-        # AWAITED
         user_regions = await self.get_ping_data(g_id, "rp", u_id, default=[])
         view = RegionPingView(self, ctx.author.id, user_regions)
         embed = view.make_embed(user_regions)

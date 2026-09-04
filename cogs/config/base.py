@@ -6,6 +6,7 @@ async def config_group(ctx: commands.Context):
         await ctx.send_help(ctx.command)
 
 async def setup(bot: commands.Bot):
+    await bot.load_extension("cogs.config.autolockconfig")
     await bot.load_extension("cogs.config.grinder")
     await bot.load_extension("cogs.config.joins")
     await bot.load_extension("cogs.config.spawns")

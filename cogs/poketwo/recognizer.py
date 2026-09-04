@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import socket
 from pathlib import Path
@@ -18,9 +19,32 @@ class Recognize(commands.Cog):
         self.last_predictions = {}
         self.session: aiohttp.ClientSession | None = None
         self.recognizer = PokemonRecognizer()
+        self.category_files = {
+            "rare": "pokes/rare.json",
+            "regional": "pokes/regional.json",
+            "gmax": "pokes/gmax.json",
+            "paradox": "pokes/paradox.json",
+            "eevos": "pokes/eevos.json",
+        }
+        self.category_pokes = {}
+
+    def _load_category_pokes(self):
+        for key, filepath in self.category_files.items():
+            path = Path(filepath)
+            if path.exists():
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        self.category_pokes[key] = {p.strip().lower() for p in data}
+                except Exception as e:
+                    print(f"[Recognizer] Failed to load {filepath}: {e}")
+                    self.category_pokes[key] = set()
+            else:
+                self.category_pokes[key] = set()
 
     async def cog_load(self):
         await asyncio.to_thread(self.recognizer.load_resources)
+        self._load_category_pokes()
         connector = aiohttp.TCPConnector(
             family=socket.AF_INET, ttl_dns_cache=300
         )
@@ -31,7 +55,7 @@ class Recognize(commands.Cog):
             await self.session.close()
 
     async def _get_ping_mentions(self, guild_id: int, pokemon_name: str) -> str:
-        """Determines ping lines for Shiny Hunt, Collection, Type, and Region dynamically from PokePings cog."""
+        """Determines ping lines for Shiny Hunt, Collection, Type, Region/Special, and Guild Role categories."""
         pings_cog = self.bot.get_cog("PokePings")
         if not pings_cog:
             return ""
@@ -83,10 +107,32 @@ class Recognize(commands.Cog):
         for uid, rp_list in g_data.get("rp", {}).items():
             if isinstance(rp_list, list):
                 rp_lower = [r.lower() for r in rp_list]
+                is_match = False
+
                 if region and region in rp_lower:
+                    is_match = True
+                if "gmax" in rp_lower and pok_lower in self.category_pokes.get("gmax", set()):
+                    is_match = True
+                if "paradox" in rp_lower and pok_lower in self.category_pokes.get("paradox", set()):
+                    is_match = True
+                if "eevos" in rp_lower and pok_lower in self.category_pokes.get("eevos", set()):
+                    is_match = True
+
+                if is_match:
                     rp_pings.append(f"<@{uid}>")
 
         lines = []
+
+        # Guild Category Role Pings Check
+        roles = g_data.get("roles", {})
+        for cat_key in ["rare", "regional", "gmax", "paradox", "eevos"]:
+            if pok_lower in self.category_pokes.get(cat_key, set()):
+                role_id = roles.get(cat_key)
+                if role_id:
+                    lines.append(f"<@&{role_id}>")
+                else:
+                    lines.append("no role configured")
+
         if sh_pings:
             lines.append(f"Shiny Hunt Pings: {' '.join(sh_pings)}")
         if cl_pings:
