@@ -47,10 +47,7 @@ class PokemonDataset(Dataset):
             ".png",
             ".jpg",
             ".jpeg",
-            ".webp",
-            ".bmp",
-            ".tiff",
-            ".jfif",
+            ".webp"
         )
 
         if os.path.exists(data_dir):
@@ -127,7 +124,7 @@ def main():
         for images, names in tqdm(dataloader, desc="Processing Batches"):
             if not images:
                 continue
-            
+
             inputs = processor(images=images, return_tensors="pt").to(DEVICE)
 
             outputs = model.get_image_features(**inputs)
