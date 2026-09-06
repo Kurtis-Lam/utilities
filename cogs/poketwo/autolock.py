@@ -19,9 +19,9 @@ async def get_poketwo_target(guild: discord.Guild):
 
 
 def _channel_in_whitelist(channel, whitelist: list) -> bool:
-    """Empty whitelist == applies to every channel. Non-empty == only listed channels/categories."""
+    """Empty whitelist == no channels will autolock."""
     if not whitelist:
-        return True
+        return False
     if channel.id in whitelist:
         return True
     category_id = getattr(channel, "category_id", None)
@@ -31,17 +31,23 @@ def _channel_in_whitelist(channel, whitelist: list) -> bool:
 
 
 class AutoLockUnlockView(discord.ui.View):
-    def __init__(self, cog=None, allowed_unlockers: set[int] | None = None):
+    def __init__(self, cog=None):
         super().__init__(timeout=None)
         self.cog = cog
-        self.allowed_unlockers = allowed_unlockers  # None == anyone can unlock
 
     @discord.ui.button(label="Unlock", style=discord.ButtonStyle.green, emoji="🔓")
     async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.allowed_unlockers is not None and interaction.user.id not in self.allowed_unlockers:
-            return await interaction.response.send_message(
-                "⚠️ Only the user(s) who triggered this lock can unlock this channel.", ephemeral=True
-            )
+        locks_coll = self.cog.collection.database["locked_channels"] if self.cog else None
+        
+        if locks_coll:
+            lock_doc = await locks_coll.find_one({"_id": interaction.channel.id})
+            if lock_doc:
+                allowed = lock_doc.get("allowed_users")
+                if allowed is not None and interaction.user.id not in allowed and not interaction.user.guild_permissions.administrator:
+                    return await interaction.response.send_message(
+                        "⚠️ Only the user(s) who triggered this lock can unlock this channel.", ephemeral=True
+                    )
+                await locks_coll.delete_one({"_id": interaction.channel.id})
 
         target = await get_poketwo_target(interaction.guild)
         await interaction.channel.set_permissions(target, view_channel=True, send_messages=True)
@@ -55,14 +61,10 @@ class AutoLockUnlockView(discord.ui.View):
             f"🔓 **{interaction.channel.mention}** was unlocked by {interaction.user.mention}."
         )
 
-        if self.cog:
-            self.cog.active_locks.pop(interaction.channel.id, None)
-
 
 class AutoLock(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.active_locks = {}
         self.pending_locks = set()
         self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
         self.db = self.mongo_client["utilities"]
@@ -77,15 +79,6 @@ class AutoLock(commands.Cog):
     async def _get_guild_config(self, guild_id: int) -> dict:
         doc = await self.collection.find_one({"_id": str(guild_id)})
         return doc or {}
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if not message.guild:
-            return
-
-        content = message.content.strip()
-        if content and content.split(maxsplit=1)[0].lower() in (".u", ".unlock"):
-            await self._handle_unlock_command(message)
 
     async def process_autolock(
         self,
@@ -122,7 +115,7 @@ class AutoLock(commands.Cog):
         # unless overridden by a restricted personal ping (sh, cl, tp, rp) with pinged users
         allowed_unlockers = None
         if restrict_cats and pinged_user_ids:
-            allowed_unlockers = pinged_user_ids
+            allowed_unlockers = list(pinged_user_ids)
 
         self.pending_locks.add(channel.id)
         status_msg = await channel.send(
@@ -151,6 +144,13 @@ class AutoLock(commands.Cog):
             target = await get_poketwo_target(channel.guild)
             await channel.set_permissions(target, view_channel=False, send_messages=False)
 
+            # Persist lock state to MongoDB to validate unlock permissions globally
+            await self.collection.database["locked_channels"].update_one(
+                {"_id": channel.id},
+                {"$set": {"allowed_users": allowed_unlockers, "guild_id": channel.guild.id}},
+                upsert=True
+            )
+
             if allowed_unlockers is not None:
                 mentions = ", ".join(f"<@{uid}>" for uid in allowed_unlockers)
                 description = (
@@ -164,44 +164,11 @@ class AutoLock(commands.Cog):
                 description=description,
                 color=discord.Color.red(),
             )
-            lock_msg = await channel.send(
-                embed=lock_embed, view=AutoLockUnlockView(cog=self, allowed_unlockers=allowed_unlockers)
+            await channel.send(
+                embed=lock_embed, view=AutoLockUnlockView(cog=self)
             )
-            self.active_locks[channel.id] = {
-                "message": lock_msg,
-                "allowed_unlockers": allowed_unlockers,
-            }
         finally:
             self.pending_locks.discard(channel.id)
-
-    async def _handle_unlock_command(self, message: discord.Message):
-        lock_data = self.active_locks.get(message.channel.id)
-        if not lock_data:
-            return
-
-        allowed = lock_data["allowed_unlockers"]
-        if allowed is not None and message.author.id not in allowed:
-            return
-
-        await self._perform_unlock(message.channel, message.author, lock_data)
-
-    async def _perform_unlock(self, channel: discord.TextChannel, unlocker: discord.Member, lock_data: dict):
-        target = await get_poketwo_target(channel.guild)
-        await channel.set_permissions(target, view_channel=True, send_messages=True)
-
-        lock_msg = lock_data.get("message")
-        if lock_msg:
-            try:
-                view = AutoLockUnlockView(cog=self, allowed_unlockers=lock_data["allowed_unlockers"])
-                view.children[0].disabled = True
-                view.children[0].label = "Unlocked"
-                view.children[0].style = discord.ButtonStyle.secondary
-                await lock_msg.edit(view=view)
-            except discord.HTTPException:
-                pass
-
-        self.active_locks.pop(channel.id, None)
-        await channel.send(f"🔓 **{channel.mention}** was unlocked by {unlocker.mention}")
 
 
 async def setup(bot: commands.Bot):

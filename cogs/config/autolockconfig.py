@@ -227,7 +227,7 @@ class AutoLockConfig(commands.Cog):
 
     def _format_whitelist(self, guild: discord.Guild, whitelist: list) -> str:
         if not whitelist:
-            return "None (applies to *all* channels)"
+            return "None (no whitelist channels configured so no channels will autolock)"
 
         ordered = self._get_ordered_whitelist(guild, whitelist)
         lines = []
