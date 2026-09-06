@@ -69,7 +69,6 @@ class AFK(commands.Cog):
         await ctx.send(embed=embed, view=view)
         
     async def format_ping_list(self, user_ids: set) -> list[str]:
-        """Utility to format ping strings safely without pinging AFK users."""
         if not user_ids:
             return []
         
