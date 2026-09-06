@@ -43,13 +43,6 @@ CATEGORY_DESCRIPTIONS = {
     "cl": "Triggers on Collection (`.cl`) notifications.",
 }
 
-_ID_RE = re.compile(r"\d{15,20}")
-
-
-def _extract_id(raw: str) -> int | None:
-    match = _ID_RE.search(raw or "")
-    return int(match.group()) if match else None
-
 
 # --- Modals ------------------------------------------------------------------
 
@@ -91,8 +84,8 @@ class DelayModal(discord.ui.Modal, title="Set Lock Delay"):
 
 class WhitelistModal(discord.ui.Modal):
     target_input = discord.ui.TextInput(
-        label="Channel or Category ID",
-        placeholder="123456789012345678",
+        label="Channel / Category ID / Index / *",
+        placeholder="e.g. *, #channel, 123456789, or 1, 2",
         required=True,
     )
 
@@ -105,24 +98,28 @@ class WhitelistModal(discord.ui.Modal):
         self.action = action
 
     async def on_submit(self, interaction: discord.Interaction):
-        target_id = _extract_id(str(self.target_input.value))
-        if target_id is None:
-            return await interaction.response.send_message(
-                "⚠️ Could not parse a valid channel/category ID.", ephemeral=True
-            )
+        raw_val = str(self.target_input.value).strip()
+        items = [i.strip() for i in raw_val.split(",") if i.strip()]
 
-        channel = interaction.guild.get_channel(target_id)
-        if channel is None:
+        valid_items = []
+        for item in items:
+            if item == "*":
+                valid_items.append("*")
+            else:
+                clean_id = re.sub(r"\D", "", item)
+                if clean_id or item.isdigit():
+                    valid_items.append(item)
+
+        if not valid_items:
             return await interaction.response.send_message(
-                "⚠️ That ID doesn't match any channel or category in this server.",
-                ephemeral=True,
+                "⚠️ Could not parse a valid channel/category ID, index, or `*`.", ephemeral=True
             )
 
         if self.action == "add":
-            await self.cog.add_whitelist(self.guild_id, self.category, target_id)
+            await self.cog.add_whitelist(self.guild_id, self.category, raw_val)
             verb = "added to"
         else:
-            await self.cog.remove_whitelist(self.guild_id, self.category, target_id)
+            await self.cog.remove_whitelist(interaction.guild, self.category, raw_val)
             verb = "removed from"
 
         embed = await self.cog.build_category_embed(interaction.guild, self.category)
@@ -134,8 +131,7 @@ class WhitelistModal(discord.ui.Modal):
         except discord.HTTPException:
             pass
 
-        label = channel.name if isinstance(channel, discord.CategoryChannel) else channel.mention
-        await interaction.response.send_message(f"✅ {label} {verb} the whitelist.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Input `{raw_val}` {verb} the whitelist.", ephemeral=True)
 
 
 # --- Views ---------------------------------------------------------------------

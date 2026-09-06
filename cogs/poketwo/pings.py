@@ -22,19 +22,6 @@ REGIONS = [
 EXTRA_RP_CATEGORIES = ["Gmax", "Paradox", "Eevos"]
 
 
-def resolve_file_path(filename: str) -> Path:
-    cog_dir_path = Path(__file__).resolve().parent / filename
-    root_dir_path = Path.cwd() / filename
-    if cog_dir_path.exists():
-        return cog_dir_path
-    if root_dir_path.exists():
-        return root_dir_path
-    return cog_dir_path
-
-
-POKEVARS_FILE = resolve_file_path("data/pokevars.json")
-
-
 # --- UI Components for Type Pings ---
 
 class TypePingButton(discord.ui.Button):
@@ -146,12 +133,14 @@ class PokePings(commands.Cog):
         self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
         self.db = self.mongo_client["utilities"]
         self.collection = self.db["pings"]
+        self.constdata_collection = self.db["constdata"]
         self.pokevars = {}
 
     async def cog_load(self):
         try:
             await self.mongo_client.admin.command('ping')
-            self.pokevars = self._load_pokevars()
+            self.pokevars = await self._load_pokevars_from_db()
+            print(f"PokePings Cog: Loaded {len(self.pokevars)} Pokémon targets from MongoDB.")
         except Exception as e:
             print(f"PokePings Cog: MongoDB warmup failed: {e}")
 
@@ -194,15 +183,17 @@ class PokePings(commands.Cog):
                 upsert=True
             )
 
-    def _load_pokevars(self) -> dict:
-        if POKEVARS_FILE.exists():
-            try:
-                with open(POKEVARS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return {name.strip().lower(): name.strip() for name in data}
-            except Exception:
-                return {}
-        return {}
+    async def _load_pokevars_from_db(self) -> dict:
+        pokevars_map = {}
+        try:
+            doc = await self.constdata_collection.find_one({"_id": "pokevars"})
+            if doc and "data" in doc and isinstance(doc["data"], list):
+                for name in doc["data"]:
+                    if isinstance(name, str):
+                        pokevars_map[name.strip().lower()] = name.strip()
+        except Exception as e:
+            print(f"PokePings Cog: Error loading pokevars from DB: {e}")
+        return pokevars_map
 
     def parse_pokemon_list(self, raw_input: str) -> Tuple[List[str], List[str]]:
         names = [p.strip().lower() for p in raw_input.split(",") if p.strip()]

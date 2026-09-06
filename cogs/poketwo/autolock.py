@@ -1,6 +1,4 @@
 import asyncio
-import re
-
 import certifi
 import discord
 from discord.ext import commands
@@ -9,34 +7,10 @@ import motor.motor_asyncio
 MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 POKETWO_ID = 716390085896962058
-SENSOR_IDS = {874910942490677270, 854233015475109888, 1250429544486273038}
-
 DEFAULT_DELAY = 10
 
-# Rare/Regional/Gmax/Paradox/Eevos are role-based: the role is whatever's
-# configured in PokePings via .rarerole/.regionalrole/.gigantamaxrole/
-# .paradoxrole/.eeveeevolutions (stored in the `pings` collection, key
-# matches the category name below). Autolock only reads it.
 ROLE_CATEGORIES = ("rare", "regional", "gmax", "paradox", "eevos")
-
-# Sh/Cl/Tp/Rp are personal ping-subscription based (PokePings' .sh/.cl/.tp/.rp
-# commands), matched by message content since they aren't tied to a single
-# server role. tp = Type Ping, rp = Regional Ping (NOT the same as the
-# role-based "regional" lock above — this is the personal .rp opt-in list).
 RESTRICT_CATEGORIES = {"sh", "cl", "tp", "rp"}
-
-# ---------------------------------------------------------------------------
-# NOTE: The exact wording your ping-bot(s) use for these notifications isn't
-# something we had a sample of, so these regexes are reasonable best guesses.
-# Tweak them to match your server's real ping messages — that's the only
-# thing you should need to change to get detection matching your setup.
-# ---------------------------------------------------------------------------
-TRIGGER_PATTERNS = {
-    "sh": re.compile(r"\bshiny\s*hunt(ed|ing)?\b", re.IGNORECASE),
-    "cl": re.compile(r"\bcollect(ed|ion)?\s*ping(ed)?\b", re.IGNORECASE),
-    "tp": re.compile(r"\btype\s*ping(ed)?\b", re.IGNORECASE),
-    "rp": re.compile(r"\bregional?\s*ping(ed)?\b", re.IGNORECASE),
-}
 
 
 async def get_poketwo_target(guild: discord.Guild):
@@ -45,8 +19,7 @@ async def get_poketwo_target(guild: discord.Guild):
 
 
 def _channel_in_whitelist(channel, whitelist: list) -> bool:
-    """Empty whitelist == applies to every channel. Non-empty == only listed
-    channels/categories are eligible."""
+    """Empty whitelist == applies to every channel. Non-empty == only listed channels/categories."""
     if not whitelist:
         return True
     if channel.id in whitelist:
@@ -57,44 +30,11 @@ def _channel_in_whitelist(channel, whitelist: list) -> bool:
     return False
 
 
-def _detect_categories(message: discord.Message, autolock_doc: dict, ping_roles: dict) -> list[str]:
-    """Returns the list of lock categories activated by this message.
-
-    `autolock_doc` holds per-category {delay, whitelist, restrict_unlockers}.
-    `ping_roles` is the `roles` sub-document from PokePings (`pings`
-    collection), e.g. {"rare": "123...", "gmax": "456...", ...}.
-    """
-    activated = []
-    content = message.content or ""
-
-    for cat in ROLE_CATEGORIES:
-        role_id_raw = ping_roles.get(cat)
-        if not role_id_raw:
-            continue
-        try:
-            role_id = int(role_id_raw)
-        except (TypeError, ValueError):
-            continue
-
-        if any(r.id == role_id for r in message.role_mentions):
-            cfg = autolock_doc.get(cat, {})
-            if _channel_in_whitelist(message.channel, cfg.get("whitelist", [])):
-                activated.append(cat)
-
-    for cat, pattern in TRIGGER_PATTERNS.items():
-        cfg = autolock_doc.get(cat, {})
-        if pattern.search(content) and _channel_in_whitelist(message.channel, cfg.get("whitelist", [])):
-            activated.append(cat)
-
-    return activated
-
-
 class AutoLockUnlockView(discord.ui.View):
     def __init__(self, cog=None, allowed_unlockers: set[int] | None = None):
         super().__init__(timeout=None)
         self.cog = cog
-        # None == anyone can unlock. A set of IDs == only those users can unlock.
-        self.allowed_unlockers = allowed_unlockers
+        self.allowed_unlockers = allowed_unlockers  # None == anyone can unlock
 
     @discord.ui.button(label="Unlock", style=discord.ButtonStyle.green, emoji="🔓")
     async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -122,15 +62,11 @@ class AutoLockUnlockView(discord.ui.View):
 class AutoLock(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # channel_id -> {"message": discord.Message, "allowed_unlockers": set[int] | None}
         self.active_locks = {}
         self.pending_locks = set()
         self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
         self.db = self.mongo_client["utilities"]
         self.collection = self.db["autolock"]
-        # Same collection PokePings writes rare/regional/gmax/paradox/eevos
-        # role IDs to. We only ever read from it.
-        self.pings_collection = self.db["pings"]
 
     async def cog_load(self):
         try:
@@ -142,65 +78,61 @@ class AutoLock(commands.Cog):
         doc = await self.collection.find_one({"_id": str(guild_id)})
         return doc or {}
 
-    async def _get_ping_roles(self, guild_id: int) -> dict:
-        doc = await self.pings_collection.find_one({"_id": str(guild_id)})
-        return (doc or {}).get("roles", {})
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild:
             return
 
         content = message.content.strip()
-
         if content and content.split(maxsplit=1)[0].lower() in (".u", ".unlock"):
             await self._handle_unlock_command(message)
+
+    async def process_autolock(
+        self,
+        channel: discord.TextChannel,
+        activated_categories: list[str],
+        pinged_user_ids: set[int],
+    ):
+        """Called directly by Recognizer when a Pokémon is identified."""
+        if channel.id in self.pending_locks:
             return
 
-        if message.author.id not in SENSOR_IDS or message.channel.id in self.pending_locks:
-            return
-
-        autolock_doc = await self._get_guild_config(message.guild.id)
+        autolock_doc = await self._get_guild_config(channel.guild.id)
         if not autolock_doc:
-            return  # Feature not configured yet for this guild.
-
-        ping_roles = await self._get_ping_roles(message.guild.id)
-
-        activated = _detect_categories(message, autolock_doc, ping_roles)
-        if not activated:
             return
 
-        # If multiple categories fire on the same message, lock on the
-        # shortest configured delay among them.
-        delay = min(autolock_doc.get(cat, {}).get("delay", DEFAULT_DELAY) for cat in activated)
+        # Check whitelist per category
+        whitelisted_cats = [
+            cat for cat in activated_categories
+            if _channel_in_whitelist(channel, autolock_doc.get(cat, {}).get("whitelist", []))
+        ]
 
-        # If any matched sh/cl/tp/rp category has restrict-unlockers enabled,
-        # that overrides the "anyone can unlock" default from
-        # rare/regional/gmax/paradox/eevos.
+        if not whitelisted_cats:
+            return
+
+        delay = min(autolock_doc.get(cat, {}).get("delay", DEFAULT_DELAY) for cat in whitelisted_cats)
+
+        # Check if any active personal ping category requires unlock restriction
         restrict_cats = [
-            cat
-            for cat in activated
+            cat for cat in whitelisted_cats
             if cat in RESTRICT_CATEGORIES and autolock_doc.get(cat, {}).get("restrict_unlockers", False)
         ]
 
+        # Role locks (rare, regional, gmax, paradox, eevos) are unlockable by everyone (None)
+        # unless overridden by a restricted personal ping (sh, cl, tp, rp) with pinged users
         allowed_unlockers = None
-        if restrict_cats:
-            mentioned_ids = {u.id for u in message.mentions}
-            # Only actually restrict if someone was mentioned to restrict to —
-            # otherwise fall back to "anyone can unlock" so the channel never
-            # becomes permanently unlockable by no one.
-            if mentioned_ids:
-                allowed_unlockers = mentioned_ids
+        if restrict_cats and pinged_user_ids:
+            allowed_unlockers = pinged_user_ids
 
-        self.pending_locks.add(message.channel.id)
-        status_msg = await message.channel.send(
-            f"⏳ **Auto-Lock Triggered** (`{'/'.join(activated)}`): Locking in {delay} seconds..."
+        self.pending_locks.add(channel.id)
+        status_msg = await channel.send(
+            f"⏳ **Auto-Lock Triggered** (`{'/'.join(whitelisted_cats)}`): Locking in {delay} seconds..."
         )
 
         def poketwo_check(m: discord.Message) -> bool:
             return (
                 m.author.id == POKETWO_ID
-                and m.channel.id == message.channel.id
+                and m.channel.id == channel.id
                 and m.content.startswith("Congratulations")
             )
 
@@ -216,8 +148,8 @@ class AutoLock(commands.Cog):
             except discord.HTTPException:
                 pass
 
-            target = await get_poketwo_target(message.guild)
-            await message.channel.set_permissions(target, view_channel=False, send_messages=False)
+            target = await get_poketwo_target(channel.guild)
+            await channel.set_permissions(target, view_channel=False, send_messages=False)
 
             if allowed_unlockers is not None:
                 mentions = ", ".join(f"<@{uid}>" for uid in allowed_unlockers)
@@ -232,15 +164,15 @@ class AutoLock(commands.Cog):
                 description=description,
                 color=discord.Color.red(),
             )
-            lock_msg = await message.channel.send(
+            lock_msg = await channel.send(
                 embed=lock_embed, view=AutoLockUnlockView(cog=self, allowed_unlockers=allowed_unlockers)
             )
-            self.active_locks[message.channel.id] = {
+            self.active_locks[channel.id] = {
                 "message": lock_msg,
                 "allowed_unlockers": allowed_unlockers,
             }
         finally:
-            self.pending_locks.discard(message.channel.id)
+            self.pending_locks.discard(channel.id)
 
     async def _handle_unlock_command(self, message: discord.Message):
         lock_data = self.active_locks.get(message.channel.id)
@@ -249,7 +181,6 @@ class AutoLock(commands.Cog):
 
         allowed = lock_data["allowed_unlockers"]
         if allowed is not None and message.author.id not in allowed:
-            # Silently ignore — only whitelisted unlockers may use the command.
             return
 
         await self._perform_unlock(message.channel, message.author, lock_data)

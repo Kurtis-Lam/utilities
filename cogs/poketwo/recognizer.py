@@ -54,20 +54,20 @@ class Recognize(commands.Cog):
         if self.session and not self.session.closed:
             await self.session.close()
 
-    async def _get_ping_mentions(self, guild_id: int, pokemon_name: str) -> str:
-        """Determines ping lines for Shiny Hunt, Collection, Type, Region/Special, and Guild Role categories."""
+    async def _get_ping_info(self, guild_id: int, pokemon_name: str):
+        """Returns tuple of (formatted_ping_string, activated_categories, pinged_user_ids)."""
         pings_cog = self.bot.get_cog("PokePings")
         if not pings_cog:
-            return ""
+            return "", [], set()
 
         try:
             g_data = await pings_cog._get_guild_doc(str(guild_id))
         except Exception as e:
             print(f"[Ping Lookup Error] {e}")
-            return ""
+            return "", [], set()
 
         if not g_data:
-            return ""
+            return "", [], set()
 
         pok_lower = pokemon_name.strip().lower()
 
@@ -81,28 +81,28 @@ class Recognize(commands.Cog):
         )
 
         raw_types = info.get("types", [])
-        if isinstance(raw_types, list):
-            types = [t.lower() for t in raw_types]
-        else:
-            types = [t.strip().lower() for t in raw_types.split("\n") if t.strip()]
-
+        types = [t.lower() for t in raw_types] if isinstance(raw_types, list) else [t.strip().lower() for t in raw_types.split("\n") if t.strip()]
         region = (info.get("region") or "").lower()
 
         sh_pings, cl_pings, tp_pings, rp_pings = [], [], [], []
+        sh_uids, cl_uids, tp_uids, rp_uids = set(), set(), set(), set()
 
         for uid, target in g_data.get("sh", {}).items():
             if target and target.lower() == pok_lower:
                 sh_pings.append(f"<@{uid}>")
+                sh_uids.add(int(uid))
 
         for uid, cl_list in g_data.get("cl", {}).items():
             if isinstance(cl_list, list) and any(c.lower() == pok_lower for c in cl_list):
                 cl_pings.append(f"<@{uid}>")
+                cl_uids.add(int(uid))
 
         for uid, tp_list in g_data.get("tp", {}).items():
             if isinstance(tp_list, list):
                 tp_lower = [t.lower() for t in tp_list]
                 if any(t in tp_lower for t in types):
                     tp_pings.append(f"<@{uid}>")
+                    tp_uids.add(int(uid))
 
         for uid, rp_list in g_data.get("rp", {}).items():
             if isinstance(rp_list, list):
@@ -120,29 +120,44 @@ class Recognize(commands.Cog):
 
                 if is_match:
                     rp_pings.append(f"<@{uid}>")
+                    rp_uids.add(int(uid))
 
         lines = []
-
-        # Guild Category Role Pings Check
-        roles = g_data.get("roles", {})
-        for cat_key in ["rare", "regional", "gmax", "paradox", "eevos"]:
-            if pok_lower in self.category_pokes.get(cat_key, set()):
-                role_id = roles.get(cat_key)
-                if role_id:
-                    lines.append(f"<@&{role_id}>")
-                else:
-                    lines.append("no role configured")
+        activated_categories = []
 
         if sh_pings:
+            activated_categories.append("sh")
             lines.append(f"Shiny Hunt Pings: {' '.join(sh_pings)}")
         if cl_pings:
+            activated_categories.append("cl")
             lines.append(f"Collection Pings: {' '.join(cl_pings)}")
         if tp_pings:
+            activated_categories.append("tp")
             lines.append(f"Type Pings: {' '.join(tp_pings)}")
         if rp_pings:
+            activated_categories.append("rp")
             lines.append(f"Region Pings: {' '.join(rp_pings)}")
 
-        return "\n".join(lines)
+        # Role Category Pings Check
+        roles = g_data.get("roles", {})
+        cat_labels = {
+            "rare": "Rare Ping",
+            "regional": "Regional Ping",
+            "gmax": "Gmax Ping",
+            "paradox": "Paradox Ping",
+            "eevos": "Eevos Ping",
+        }
+        for cat_key, label in cat_labels.items():
+            if pok_lower in self.category_pokes.get(cat_key, set()):
+                activated_categories.append(cat_key)
+                role_id = roles.get(cat_key)
+                if role_id:
+                    lines.append(f"{label}: <@&{role_id}>")
+                else:
+                    lines.append(f"{label}: no role configured")
+
+        pinged_user_ids = sh_uids | cl_uids | tp_uids | rp_uids
+        return "\n".join(lines), activated_categories, pinged_user_ids
 
     async def _send_log_embed(
         self,
@@ -163,31 +178,17 @@ class Recognize(commands.Cog):
             try:
                 channel = await self.bot.fetch_channel(channel_id)
             except discord.HTTPException as e:
-                print(
-                    f"[Log Error] Could not fetch log channel {channel_id}: {e}"
-                )
+                print(f"[Log Error] Could not fetch log channel {channel_id}: {e}")
                 return
 
         color = discord.Color.green() if is_correct else discord.Color.red()
-        status_title = (
-            "✅ Prediction Correct" if is_correct else "❌ Prediction Incorrect"
-        )
+        status_title = "✅ Prediction Correct" if is_correct else "❌ Prediction Incorrect"
 
         embed = discord.Embed(title=status_title, color=color)
-        embed.add_field(
-            name="Predicted", value=f"**{format_name(predicted)}**", inline=True
-        )
-        embed.add_field(
-            name="Actual Pokémon", value=f"**{format_name(actual)}**", inline=True
-        )
-        embed.add_field(
-            name="Confidence", value=f"**{confidence:.2%}**", inline=True
-        )
-        embed.add_field(
-            name="Detection Message",
-            value=f"[Jump to Message]({jump_url})",
-            inline=False,
-        )
+        embed.add_field(name="Predicted", value=f"**{format_name(predicted)}**", inline=True)
+        embed.add_field(name="Actual Pokémon", value=f"**{format_name(actual)}**", inline=True)
+        embed.add_field(name="Confidence", value=f"**{confidence:.2%}**", inline=True)
+        embed.add_field(name="Detection Message", value=f"[Jump to Message]({jump_url})", inline=False)
         embed.set_thumbnail(url=image_url)
 
         try:
@@ -216,15 +217,10 @@ class Recognize(commands.Cog):
                         full_text += " " + emb.description
 
             full_text_lower = full_text.lower()
-            return (
-                "you caught a level" in full_text_lower
-                or "fled" in full_text_lower
-            )
+            return "you caught a level" in full_text_lower or "fled" in full_text_lower
 
         try:
-            msg = await self.bot.wait_for(
-                "message", check=check, timeout=300.0
-            )
+            msg = await self.bot.wait_for("message", check=check, timeout=300.0)
 
             full_text = msg.content
             if msg.embeds:
@@ -236,33 +232,6 @@ class Recognize(commands.Cog):
 
             actual_pokemon = extract_pokemon_from_text(full_text)
             target_pokemon_name = actual_pokemon or predicted_name
-
-            # --- Save Spawn Image Logic ---
-            if target_pokemon_name:
-                folder_path = Path("data") / target_pokemon_name.lower()
-                folder_path.mkdir(parents=True, exist_ok=True)
-
-                existing_files = [f for f in folder_path.iterdir() if f.is_file()]
-
-                if len(existing_files) < 12:
-                    existing_numbers = {
-                        int(f.stem) for f in existing_files if f.stem.isdigit()
-                    }
-                    
-                    lowest_num = 1
-                    while lowest_num in existing_numbers:
-                        lowest_num += 1
-
-                    try:
-                        async with self.session.get(image_url) as resp:
-                            if resp.status == 200:
-                                img_bytes = await resp.read()
-                                save_file_path = folder_path / f"{lowest_num}.png"
-                                await asyncio.to_thread(save_file_path.write_bytes, img_bytes)
-                                print(f"[Saved Image] Saved to {save_file_path}")
-                    except Exception as e:
-                        print(f"[Image Save Error] Failed to save image: {e}")
-            # -------------------------------
 
             if not actual_pokemon:
                 return
@@ -294,9 +263,7 @@ class Recognize(commands.Cog):
             try:
                 ref_msg = ctx.message.reference.cached_message
                 if not ref_msg:
-                    ref_msg = await ctx.channel.fetch_message(
-                        ctx.message.reference.message_id
-                    )
+                    ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
 
                 if ref_msg.attachments:
                     image_url = ref_msg.attachments[0].url
@@ -315,9 +282,7 @@ class Recognize(commands.Cog):
             image_url = ctx.message.attachments[0].url
 
         if not image_url:
-            await ctx.reply(
-                "❌ Please reply to a message containing a Pokémon image or attach an image."
-            )
+            await ctx.reply("❌ Please reply to a message containing a Pokémon image or attach an image.")
             return
 
         try:
@@ -342,10 +307,7 @@ class Recognize(commands.Cog):
                     text_to_check += " " + embed.description.lower()
 
         is_spawn = bool(
-            re.search(
-                r"a\s+(new\s+)?wild\s+pok[eé]mon\s+(has\s+)?appeared",
-                text_to_check,
-            )
+            re.search(r"a\s+(new\s+)?wild\s+pok[eé]mon\s+(has\s+)?appeared", text_to_check)
         )
         if not is_spawn:
             return
@@ -376,13 +338,9 @@ class Recognize(commands.Cog):
 
         self.last_predictions[message.channel.id] = pokemon_name
 
-        pings = ""
-        try:
-            pings = await self._get_ping_mentions(
-                message.guild.id if message.guild else 0, pokemon_name
-            )
-        except Exception as e:
-            print(f"[Ping Processing Error] {e}")
+        pings, activated_categories, pinged_uids = await self._get_ping_info(
+            message.guild.id if message.guild else 0, pokemon_name
+        )
 
         out_text = f"{format_name(pokemon_name)}: {confidence:.3%}"
         if pings:
@@ -392,6 +350,17 @@ class Recognize(commands.Cog):
             detection_msg = await message.reply(out_text)
         except discord.Forbidden:
             return
+
+        # Trigger autolock directly with recognized categories
+        autolock_cog = self.bot.get_cog("AutoLock")
+        if autolock_cog and activated_categories:
+            self.bot.loop.create_task(
+                autolock_cog.process_autolock(
+                    channel=message.channel,
+                    activated_categories=activated_categories,
+                    pinged_user_ids=pinged_uids,
+                )
+            )
 
         self.bot.loop.create_task(
             self._verify_prediction(

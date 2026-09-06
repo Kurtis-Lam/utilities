@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import motor.motor_asyncio
 import certifi
+import re
 
 from views.autolockview import (
     AutoLockMainView,
@@ -18,13 +19,8 @@ MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.n
 
 DEFAULT_DELAY = 10
 
-
 def _default_category() -> dict:
-    # Note: no "role" field. Roles for rare/regional/gmax/paradox/eevos live
-    # in the `pings` collection (managed by PokePings) and are only read from
-    # here, never written.
     return {"delay": DEFAULT_DELAY, "whitelist": [], "restrict_unlockers": False}
-
 
 @config_group.command(
     name="autolock",
@@ -57,8 +53,6 @@ class AutoLockConfig(commands.Cog):
         self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
         self.db = self.mongo_client["utilities"]
         self.collection = self.db["autolock"]
-        # Same collection PokePings (pings.py) writes rare/regional/gmax/
-        # paradox/eevos role IDs to. We only ever read from it.
         self.pings_collection = self.db["pings"]
 
     async def cog_load(self):
@@ -78,8 +72,6 @@ class AutoLockConfig(commands.Cog):
             await self.collection.insert_one(doc)
             return doc
 
-        # Backfill any missing categories/fields so older docs stay compatible
-        # if new categories or settings are added later (e.g. gmax/paradox/eevos).
         needs_update = False
         for cat in CATEGORY_ORDER:
             if cat not in doc:
@@ -90,7 +82,6 @@ class AutoLockConfig(commands.Cog):
                     if key not in doc[cat]:
                         doc[cat][key] = val
                         needs_update = True
-                # Drop any legacy "role" field left over from an older schema.
                 doc[cat].pop("role", None)
 
         if needs_update:
@@ -110,19 +101,71 @@ class AutoLockConfig(commands.Cog):
             {"_id": str(guild_id)}, {"$set": {f"{category}.delay": delay}}, upsert=True
         )
 
-    async def add_whitelist(self, guild_id: int, category: str, target_id: int):
-        await self.get_guild_config(guild_id)
-        await self.collection.update_one(
-            {"_id": str(guild_id)},
-            {"$addToSet": {f"{category}.whitelist": target_id}},
-            upsert=True,
-        )
+    async def add_whitelist(self, guild_id: int, category: str, raw_input: str):
+        cfg = await self.get_category_config(guild_id, category)
+        current = cfg.get("whitelist", [])
+        
+        items = [i.strip() for i in str(raw_input).split(",") if i.strip()]
+        updated = False
 
-    async def remove_whitelist(self, guild_id: int, category: str, target_id: int):
-        await self.get_guild_config(guild_id)
+        for item in items:
+            if item == "*":
+                if "*" not in current:
+                    current.append("*")
+                    updated = True
+            else:
+                # Strip mention syntax (<#123456789> -> 123456789)
+                clean_id = re.sub(r"\D", "", item)
+                if clean_id:
+                    val = int(clean_id)
+                    if val not in current:
+                        current.append(val)
+                        updated = True
+
+        if updated:
+            await self.collection.update_one(
+                {"_id": str(guild_id)},
+                {"$set": {f"{category}.whitelist": current}},
+                upsert=True,
+            )
+
+    async def remove_whitelist(self, guild: discord.Guild, category: str, raw_input: str):
+        guild_id = guild.id
+        cfg = await self.get_category_config(guild_id, category)
+        current = cfg.get("whitelist", [])
+
+        items = [i.strip() for i in str(raw_input).split(",") if i.strip()]
+        ordered = self._get_ordered_whitelist(guild, current)
+        to_remove = set()
+
+        for item in items:
+            if item == "*":
+                to_remove.add("*")
+            elif item.isdigit():
+                val = int(item)
+                # Remove by 1-based display index
+                if 1 <= val <= len(ordered):
+                    to_remove.add(ordered[val - 1])
+                    to_remove.add(str(ordered[val - 1]))
+                # Remove by raw channel ID
+                to_remove.add(val)
+                to_remove.add(str(val))
+            else:
+                # Handle channel mentions (<#123456789>)
+                clean_id = re.sub(r"\D", "", item)
+                if clean_id:
+                    to_remove.add(int(clean_id))
+                    to_remove.add(clean_id)
+
+        # Filter out entries matching either integer or string representation
+        new_whitelist = [
+            x for x in current 
+            if x not in to_remove and str(x) not in to_remove
+        ]
+
         await self.collection.update_one(
             {"_id": str(guild_id)},
-            {"$pull": {f"{category}.whitelist": target_id}},
+            {"$set": {f"{category}.whitelist": new_whitelist}},
             upsert=True,
         )
 
@@ -148,22 +191,61 @@ class AutoLockConfig(commands.Cog):
         except (TypeError, ValueError):
             return None
 
-    # --- embed builders --------------------------------------------------------
+    # --- embed builders & ordering helpers ------------------------------------
+
+    def _get_ordered_whitelist(self, guild: discord.Guild, whitelist: list) -> list:
+        if not whitelist:
+            return []
+
+        categories = []
+        channels = []
+        others = []
+
+        for item in whitelist:
+            if str(item) == "*":
+                others.append("*")
+                continue
+            try:
+                wid = int(item)
+            except (ValueError, TypeError):
+                others.append(item)
+                continue
+
+            ch = guild.get_channel(wid)
+            if ch is None:
+                others.append(wid)
+            elif isinstance(ch, discord.CategoryChannel):
+                categories.append((ch.position, ch.name, wid))
+            else:
+                channels.append((ch.position, ch.name, wid))
+
+        # Sort categories first, then channels by position & name
+        categories.sort(key=lambda x: (x[0], x[1]))
+        channels.sort(key=lambda x: (x[0], x[1]))
+
+        return [cat[2] for cat in categories] + [ch[2] for ch in channels] + others
 
     def _format_whitelist(self, guild: discord.Guild, whitelist: list) -> str:
         if not whitelist:
             return "None (applies to *all* channels)"
 
-        parts = []
-        for wid in whitelist:
-            ch = guild.get_channel(wid)
+        ordered = self._get_ordered_whitelist(guild, whitelist)
+        lines = []
+
+        for idx, item in enumerate(ordered, start=1):
+            if str(item) == "*":
+                lines.append(f"`{idx}.` 🌐 Whole Server (`*`)")
+                continue
+
+            ch = guild.get_channel(item) if isinstance(item, int) or str(item).isdigit() else None
             if ch is None:
-                parts.append(f"`{wid}` (unknown/deleted)")
+                lines.append(f"`{idx}.` `{item}` (unknown/deleted)")
             elif isinstance(ch, discord.CategoryChannel):
-                parts.append(f"📁 {ch.name}")
+                lines.append(f"`{idx}.` 📁 {ch.name}")
             else:
-                parts.append(ch.mention)
-        return "\n".join(parts)
+                lines.append(f"`{idx}.` {ch.mention}")
+
+        return "\n".join(lines)
 
     async def build_main_embed(self, guild: discord.Guild) -> discord.Embed:
         doc = await self.get_guild_config(guild.id)
@@ -176,9 +258,12 @@ class AutoLockConfig(commands.Cog):
 
         for cat in CATEGORY_ORDER:
             cfg = doc.get(cat, _default_category())
+            has_wl = bool(cfg["whitelist"])
+            wl_icon = "✅" if has_wl else "❌"
+
             lines = [
                 f"Delay: `{cfg['delay']}s`",
-                f"Whitelist: `{len(cfg['whitelist'])}` entr{'y' if len(cfg['whitelist']) == 1 else 'ies'}",
+                f"Whitelist {wl_icon}: `{len(cfg['whitelist'])}` entr{'y' if len(cfg['whitelist']) == 1 else 'ies'}",
             ]
             if cat in ROLE_CATEGORIES:
                 role = await self.get_ping_role(guild, cat)
@@ -192,6 +277,8 @@ class AutoLockConfig(commands.Cog):
 
     async def build_category_embed(self, guild: discord.Guild, category: str) -> discord.Embed:
         cfg = await self.get_category_config(guild.id, category)
+        has_wl = bool(cfg["whitelist"])
+        wl_icon = "✅" if has_wl else "❌"
 
         embed = discord.Embed(
             title=f"⚙️ {CATEGORY_LABELS[category]} Settings — {guild.name}",
@@ -202,7 +289,11 @@ class AutoLockConfig(commands.Cog):
             embed.description = CATEGORY_DESCRIPTIONS[category]
 
         embed.add_field(name="Lock Delay", value=f"`{cfg['delay']}` seconds", inline=False)
-        embed.add_field(name="Whitelist", value=self._format_whitelist(guild, cfg["whitelist"]), inline=False)
+        embed.add_field(
+            name=f"Whitelist {wl_icon}",
+            value=self._format_whitelist(guild, cfg["whitelist"]),
+            inline=False,
+        )
 
         if category in ROLE_CATEGORIES:
             role = await self.get_ping_role(guild, category)
