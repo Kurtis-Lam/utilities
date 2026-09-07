@@ -39,7 +39,7 @@ class AutoLockUnlockView(discord.ui.View):
     async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
         locks_coll = self.cog.collection.database["locked_channels"] if self.cog else None
         
-        if locks_coll:
+        if locks_coll is not None:
             lock_doc = await locks_coll.find_one({"_id": interaction.channel.id})
             if lock_doc:
                 allowed = lock_doc.get("allowed_users")
