@@ -2,12 +2,20 @@ import asyncio
 import aiohttp
 import discord
 import gc
+import os
+import platform
+import sys
+import psutil
 from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 
-TOKEN = "MTQ3NTY3MjIwNzU0NjkwODcxMg.GkSu5B.z-SyH2cS3KuFIHBIFimvA3-qen6IrCigJQHqpY"
+import certifi
+import motor.motor_asyncio
+
+TOKEN = "MTMyNzQ4MDgyODc0MTE2MTA3NA.GWPTNO.VttPjVzEFtwUW_6N00NCJUgRCinBm2FsCVcYrg"
 OWNERS = {1250429544486273038, 1281560553130692618, 1528374615720591381, 1432984051341459527, 1432983193681920014}
+MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
@@ -20,10 +28,22 @@ class Utilities(commands.Bot):
             command_prefix=self.get_prefix_with_space, 
             owner_ids=OWNERS, 
             intents=INTENTS,
-            case_insensitive=True
+            case_insensitive=True,
+            chunk_guilds_at_startup=False,                       # Stops bot from downloading full guild caches
+            member_cache_flags=discord.MemberCacheFlags.none()    # Zero member cache footprint
         )
+        self.start_time = datetime.now(timezone.utc)
         self.active_predictions = {}
         self.session = None
+
+        # Shared MongoDB Client for all cogs
+        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
+            MONGO_URI,
+            tlsCAFile=certifi.where(),
+            maxPoolSize=2,
+            minPoolSize=0,
+            serverSelectionTimeoutMS=5000
+        )
 
         self.cogs_dict = {
             "cmds": ["categories", "channels", "members", "messages", "ping", "roles", "utilities"],
@@ -35,7 +55,9 @@ class Utilities(commands.Bot):
         return commands.when_mentioned_or('.', '. ')(bot, message)
 
     async def setup_hook(self):
-        self.session = aiohttp.ClientSession()
+        # Optimized session with reduced connections
+        connector = aiohttp.TCPConnector(limit=5, enable_cleanup_closed=True)
+        self.session = aiohttp.ClientSession(connector=connector)
 
         for category, cogs in self.cogs_dict.items():
             category_path = f'cogs.{category}'
@@ -46,12 +68,14 @@ class Utilities(commands.Bot):
                 except Exception as e:
                     print(f'❌ Failed to load {cog.upper()} cog: {e}')
         
-        await self.tree.sync()
-        print("Application commands synced successfully!")
+        # Free memory immediately after loading extensions
+        gc.collect()
 
     async def close(self):
         if self.session:
             await self.session.close()
+        if self.mongo_client:
+            self.mongo_client.close()
         await super().close()
 
 bot = Utilities()
@@ -59,6 +83,91 @@ bot = Utilities()
 @bot.event
 async def on_ready():
     print(f'We have logged in as {bot.user}')
+
+@bot.command(name="stats", aliases=["botinfo", "system", "info"])
+async def stats(ctx: commands.Context):
+    # Calculate Uptime
+    now = datetime.now(timezone.utc)
+    uptime = now - bot.start_time
+    hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    days, hours = divmod(hours, 24)
+    uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
+
+    # Process Metrics
+    process = psutil.Process(os.getpid())
+    proc_mem = process.memory_info().rss / (1024 ** 2)  # Convert to MB
+    proc_cpu = process.cpu_percent(interval=None)
+
+    # System Metrics
+    sys_mem = psutil.virtual_memory()
+    sys_disk = psutil.disk_usage('/')
+    sys_cpu = psutil.cpu_percent(interval=None)
+    cpu_cores = psutil.cpu_count(logical=True)
+
+    # Discord Entity Counts
+    total_guilds = len(bot.guilds)
+    total_users = sum(g.member_count or 0 for g in bot.guilds)
+    total_channels = sum(len(g.channels) for g in bot.guilds)
+    total_cogs = len(bot.cogs)
+    total_commands = len(bot.commands)
+
+    embed = discord.Embed(
+        title=f"📊 {bot.user.name} Statistics",
+        color=discord.Color.blurple(),
+        timestamp=now
+    )
+    if bot.user.display_avatar:
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+
+    embed.add_field(
+        name="🤖 Bot Metrics",
+        value=(
+            f"**Latency:** `{round(bot.latency * 1000, 2)} ms`\n"
+            f"**Uptime:** `{uptime_str}`\n"
+            f"**Guilds:** `{total_guilds:,}`\n"
+            f"**Users:** `{total_users:,}`\n"
+            f"**Channels:** `{total_channels:,}`\n"
+            f"**Commands:** `{total_commands}`\n"
+            f"**Loaded Cogs:** `{total_cogs}`"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="⚡ Process Hardware",
+        value=(
+            f"**CPU Usage:** `{proc_cpu:.1f}%`\n"
+            f"**RAM Usage:** `{proc_mem:.2f} MB`\n"
+            f"**Threads:** `{process.num_threads()}`\n"
+            f"**Async Tasks:** `{len(asyncio.all_tasks())}`\n"
+            f"**HTTP Session:** `{'Active' if bot.session and not bot.session.closed else 'Closed'}`"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="🖥️ Host System Hardware",
+        value=(
+            f"**CPU Usage:** `{sys_cpu:.1f}%` ({cpu_cores} Cores)\n"
+            f"**RAM Usage:** `{sys_mem.used / (1024**3):.2f} / {sys_mem.total / (1024**3):.2f} GB` (`{sys_mem.percent}%`)\n"
+            f"**Disk Usage:** `{sys_disk.used / (1024**3):.2f} / {sys_disk.total / (1024**3):.2f} GB` (`{sys_disk.percent}%`)"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚙️ Environment",
+        value=(
+            f"**Python Version:** `v{platform.python_version()}`\n"
+            f"**discord.py Version:** `v{discord.__version__}`\n"
+            f"**Operating System:** `{platform.system()} {platform.release()} ({platform.machine()})`"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
 
 @bot.command(name="reload")
 @commands.is_owner()

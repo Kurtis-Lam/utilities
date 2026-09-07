@@ -1,12 +1,8 @@
 import json
 from pathlib import Path
 from typing import List, Tuple, Optional
-import certifi
 import discord
 from discord.ext import commands
-import motor.motor_asyncio
-
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 TYPES = [
     "Normal", "Fire", "Water", "Grass", "Electric", "Ice",
@@ -130,19 +126,16 @@ class RegionPingView(discord.ui.View):
 class PokePings(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
-        self.db = self.mongo_client["utilities"]
-        self.collection = self.db["pings"]
-        self.constdata_collection = self.db["constdata"]
-        self.pokevars = {}
 
-    async def cog_load(self):
-        try:
-            await self.mongo_client.admin.command('ping')
-            self.pokevars = await self._load_pokevars_from_db()
-            print(f"PokePings Cog: Loaded {len(self.pokevars)} Pokémon targets from MongoDB.")
-        except Exception as e:
-            print(f"PokePings Cog: MongoDB warmup failed: {e}")
+    @property
+    def collection(self):
+        """Dynamically retrieves the pings collection using main.py shared pool."""
+        return self.bot.mongo_client["utilities"]["pings"]
+
+    @property
+    def constdata_collection(self):
+        """Dynamically retrieves the constdata collection using main.py shared pool."""
+        return self.bot.mongo_client["utilities"]["constdata"]
 
     async def _get_guild_doc(self, guild_id: str) -> dict:
         doc = await self.collection.find_one({"_id": guild_id})
@@ -183,29 +176,31 @@ class PokePings(commands.Cog):
                 upsert=True
             )
 
-    async def _load_pokevars_from_db(self) -> dict:
-        pokevars_map = {}
-        try:
-            doc = await self.constdata_collection.find_one({"_id": "pokevars"})
-            if doc and "data" in doc and isinstance(doc["data"], list):
-                for name in doc["data"]:
-                    if isinstance(name, str):
-                        pokevars_map[name.strip().lower()] = name.strip()
-        except Exception as e:
-            print(f"PokePings Cog: Error loading pokevars from DB: {e}")
-        return pokevars_map
-
-    def parse_pokemon_list(self, raw_input: str) -> Tuple[List[str], List[str]]:
-        names = [p.strip().lower() for p in raw_input.split(",") if p.strip()]
+    async def parse_pokemon_list(self, raw_input: str) -> Tuple[List[str], List[str]]:
+        requested_names = [p.strip().lower() for p in raw_input.split(",") if p.strip()]
+        
+        pipeline = [
+            {"$match": {"_id": "pokevars"}},
+            {"$project": {
+                "matched": {
+                    "$filter": {
+                        "input": "$data",
+                        "as": "poke",
+                        "cond": {"$in": [{"$toLower": "$$poke"}, requested_names]}
+                    }
+                }
+            }}
+        ]
+        
         matched = []
-        invalid = []
-        for name in names:
-            m = self.pokevars.get(name)
-            if m:
-                if m not in matched:
-                    matched.append(m)
-            else:
-                invalid.append(name)
+        cursor = self.constdata_collection.aggregate(pipeline)
+        async for doc in cursor:
+            matched = doc.get("matched", [])
+            break
+
+        matched_lower = [m.lower() for m in matched]
+        invalid = [name for name in requested_names if name not in matched_lower]
+        
         return matched, invalid
 
     async def _handle_role_config(self, ctx: commands.Context, role_key: str, category_name: str, role: discord.Role = None):
@@ -260,27 +255,28 @@ class PokePings(commands.Cog):
                 await ctx.send("You don't have a Shiny Hunt target set. Usage: `.sh <pokemon>`")
             return
 
-        matched_name = self.pokevars.get(pokemon.strip().lower())
-        if not matched_name:
+        matched_names, _ = await self.parse_pokemon_list(pokemon)
+        if not matched_names:
             await ctx.send("Pokémon does not exist.")
             return
 
+        matched_name = matched_names[0]
         await self.set_ping_data(g_id, "sh", u_id, matched_name)
         await ctx.send(f"✨ Set your Shiny Hunt target to **{matched_name}** in this server!")
 
     # --- Collection List Commands ---
 
     @commands.group(name="cl", invoke_without_command=True)
-    async def collection(self, ctx: commands.Context):
+    async def cl_group(self, ctx: commands.Context):
         await ctx.send("Usage: `.cl add <pokemon1, pokemon2...>`, `.cl remove <pokemon1, pokemon2...>`, `.cl clear`, or `.cl list`")
 
-    @collection.command(name="add", aliases=["a"])
+    @cl_group.command(name="add", aliases=["a"])
     async def cl_add(self, ctx: commands.Context, *, pokemon: str = None):
         if not pokemon:
             await ctx.send("Please specify at least one Pokémon name.")
             return
 
-        matched_names, invalid_names = self.parse_pokemon_list(pokemon)
+        matched_names, invalid_names = await self.parse_pokemon_list(pokemon)
         if not matched_names:
             await ctx.send("None of the specified Pokémon exist.")
             return
@@ -312,7 +308,7 @@ class PokePings(commands.Cog):
 
         await ctx.send("\n".join(msg_parts))
 
-    @collection.command(name="remove", aliases=["r"])
+    @cl_group.command(name="remove", aliases=["r"])
     async def cl_remove(self, ctx: commands.Context, *, pokemon: str = None):
         if not pokemon:
             await ctx.send("Please specify at least one Pokémon name.")
@@ -352,7 +348,7 @@ class PokePings(commands.Cog):
 
         await ctx.send("\n".join(msg_parts))
 
-    @collection.command(name="clear", aliases=["c"])
+    @cl_group.command(name="clear", aliases=["c"])
     async def cl_clear(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
@@ -360,7 +356,7 @@ class PokePings(commands.Cog):
         await self.set_ping_data(g_id, "cl", u_id, [])
         await ctx.send("🧹 Cleared your collection list!")
 
-    @collection.command(name="list", aliases=["l"])
+    @cl_group.command(name="list", aliases=["l"])
     async def cl_list(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
@@ -395,7 +391,7 @@ class PokePings(commands.Cog):
     @reserves.command(name="add", aliases=["a"])
     @commands.has_permissions(administrator=True)
     async def re_add(self, ctx: commands.Context, member: discord.Member, *, pokemon: str):
-        matched_names, invalid_names = self.parse_pokemon_list(pokemon)
+        matched_names, invalid_names = await self.parse_pokemon_list(pokemon)
         if not matched_names:
             await ctx.send("None of the specified Pokémon exist.")
             return

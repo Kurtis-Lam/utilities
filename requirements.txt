@@ -7,3 +7,4 @@ firebase-admin
 pymongo
 certifi
 motor
+psutil
