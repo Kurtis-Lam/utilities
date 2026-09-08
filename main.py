@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import certifi
 import motor.motor_asyncio
 
-TOKEN = "MTQ3NTY3MjIwNzU0NjkwODcxMg.GkSu5B.z-SyH2cS3KuFIHBIFimvA3-qen6IrCigJQHqpY"
+TOKEN = "MTMyNzQ4MDgyODc0MTE2MTA3NA.GWPTNO.VttPjVzEFtwUW_6N00NCJUgRCinBm2FsCVcYrg"
 OWNERS = {1250429544486273038, 1281560553130692618, 1528374615720591381, 1432984051341459527, 1432983193681920014}
 MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
@@ -48,7 +48,7 @@ class Utilities(commands.Bot):
         self.cogs_dict = {
             "cmds": ["categories", "channels", "members", "messages", "ping", "roles", "utilities"],
             "config": ["base"],
-            "poketwo": ["afk", "autolock", "catches", "dex", "fled", "hintsolver", "lockunlock", "pings", "recognizer"]
+            "poketwo": ["afk", "autolock", "dex", "fled", "hintsolver", "lockunlock", "pings", "recognizer"]
         }
 
     async def get_prefix_with_space(self, bot, message):

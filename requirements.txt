@@ -1,10 +1,10 @@
 discord.py
 aiohttp
-Pillow
 numpy
-onnxruntime
 firebase-admin
 pymongo
 certifi
 motor
 psutil
+onnxruntime
+Pillow
