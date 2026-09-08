@@ -132,7 +132,7 @@ class PokemonRecognizer:
 
         # 1. Load ONNX Vision Model with low-memory settings
         try: 
-            model_path = resolve_file_path("clip_vision_quantized.onnx")     
+            model_path = resolve_file_path("models/clip_vision_quantized.onnx")     
             opts = ort.SessionOptions() 
             opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL     
             opts.graph_optimization_level = ( 
@@ -155,12 +155,12 @@ class PokemonRecognizer:
             )     
             self.input_name = self.ort_session.get_inputs()[0].name     
         except Exception as e: 
-            print(f"[Recognize] Warning: Could not load clip_vision_quantized.onnx ({e})")     
+            print(f"[Recognize] Warning: Could not load models/clip_vision_quantized.onnx ({e})")     
 
         # 2. Memory-map vectors directly from disk without consuming RAM
         try: 
-            vectors_path = resolve_file_path("pokemon_db_vectors.npy")
-            names_path = resolve_file_path("pokemon_db_names.json")
+            vectors_path = resolve_file_path("models/pokemon_db_vectors.npy")
+            names_path = resolve_file_path("models/pokemon_db_names.json")
 
             self.db_vectors = np.load(str(vectors_path), mmap_mode="r")
             
@@ -256,4 +256,4 @@ class PokemonRecognizer:
 
         return await asyncio.to_thread( 
             self.predict_from_image_bytes, image_bytes 
-        )     
+        )
