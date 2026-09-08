@@ -35,7 +35,6 @@ ref = db.reference("grinder")
 
 # --- HELPER: FIREBASE LIST SANITIZER ---
 def _ensure_list(data) -> list:
-    """Ensures Firebase dictionary representation of arrays is safely converted to a Python list."""
     if data is None:
         return []
     if isinstance(data, list):
@@ -48,7 +47,6 @@ def _ensure_list(data) -> list:
 
 # --- HELPER: TIME PARSER ---
 def parse_duration(time_str: str):
-    """Parses time strings like 30s, 4m, 2h, 1d into seconds."""
     if not time_str or not isinstance(time_str, str):
         return None
     match = re.match(r"^(\d+)([smhd])$", time_str.strip().lower())
@@ -147,6 +145,7 @@ def get_config_details(cfg: dict) -> dict:
 
     details = {
         "accIndex": acc_idx,
+        "token": cfg.get("token", ""),
         "chid": aspects.get("target id", aspects.get("chid", "")),
         "pokemons": aspects.get("pokemons", ""),
         "datafile": aspects.get("datafile", ""),
@@ -364,12 +363,20 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
 
         lines = []
         for idx, cfg in cfgs:
-            acc_idx = cfg.get("accIndex", 0)
+            tok = cfg.get("token")
+            acc_idx = 0
+            
+            if tok and tok in accounts:
+                acc_idx = accounts.index(tok) + 1
+            elif not tok and "accIndex" in cfg:
+                acc_idx = cfg["accIndex"]
+                if 1 <= acc_idx <= len(accounts):
+                    tok = accounts[acc_idx - 1]
+
             user_mention = "*Unknown Member*"
             display_name = ""
 
-            if 1 <= acc_idx <= len(accounts):
-                tok = accounts[acc_idx - 1]
+            if tok:
                 uid = get_user_id_from_token(tok)
                 if uid:
                     user_mention = f"<@{uid}>"
@@ -377,7 +384,8 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
                     if member:
                         display_name = f" ({member.display_name})"
 
-            line = f"`[#{idx}]` {user_mention}{display_name}"
+            acc_str = f" (Acc #{acc_idx})" if acc_idx > 0 else " (Removed Acc)"
+            line = f"`[#{idx}]` {user_mention}{display_name}{acc_str}"
 
             paused = cfg.get("paused", False)
             pause_until = cfg.get("pauseUntil")
@@ -403,12 +411,20 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
     if other_configs:
         lines = []
         for idx, cfg in other_configs:
-            acc_idx = cfg.get("accIndex", 0)
+            tok = cfg.get("token")
+            acc_idx = 0
+            
+            if tok and tok in accounts:
+                acc_idx = accounts.index(tok) + 1
+            elif not tok and "accIndex" in cfg:
+                acc_idx = cfg["accIndex"]
+                if 1 <= acc_idx <= len(accounts):
+                    tok = accounts[acc_idx - 1]
+
             user_mention = "*Unknown Member*"
             display_name = ""
 
-            if 1 <= acc_idx <= len(accounts):
-                tok = accounts[acc_idx - 1]
+            if tok:
                 uid = get_user_id_from_token(tok)
                 if uid:
                     user_mention = f"<@{uid}>"
@@ -416,8 +432,9 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
                     if member:
                         display_name = f" ({member.display_name})"
 
+            acc_str = f" (Acc #{acc_idx})" if acc_idx > 0 else " (Removed Acc)"
             cfg_mode = cfg.get('mode', 'unknown')
-            line = f"`[#{idx}]` {cfg_mode} | {user_mention}{display_name}"
+            line = f"`[#{idx}]` {cfg_mode} | {user_mention}{display_name}{acc_str}"
 
             paused = cfg.get("paused", False)
             pause_until = cfg.get("pauseUntil")
@@ -640,12 +657,12 @@ class GrinderCog(commands.Cog):
         g_data = await get_global_data()
         accounts = g_data.get("accounts", [])
 
-        user_acc_indices = [
-            idx for idx, token in enumerate(accounts, 1)
+        user_tokens = [
+            token for token in accounts
             if get_user_id_from_token(token) == user.id
         ]
 
-        if not user_acc_indices:
+        if not user_tokens:
             await ctx.send(f"❌ No registered accounts found for {user.mention}.")
             return
 
@@ -668,7 +685,13 @@ class GrinderCog(commands.Cog):
 
         updated_count = 0
         for cfg in configs:
-            if cfg.get("mode", "").lower() == "autocatch" and cfg.get("accIndex") in user_acc_indices:
+            cfg_tok = cfg.get("token")
+            if not cfg_tok and "accIndex" in cfg:
+                acc_idx = cfg["accIndex"]
+                if 1 <= acc_idx <= len(accounts):
+                    cfg_tok = accounts[acc_idx - 1]
+
+            if cfg.get("mode", "").lower() == "autocatch" and cfg_tok in user_tokens:
                 details = get_config_details(cfg)
                 details["datafile"] = combined_files
                 new_target, _ = build_target_string_for_mode("autocatch", details)
@@ -728,17 +751,26 @@ class GrinderCog(commands.Cog):
             lines = []
             for idx in target_indices:
                 cfg = configs[idx - 1]
-                acc_idx = cfg.get("accIndex", 0)
+                tok = cfg.get("token")
+                acc_idx = 0
+                
+                if tok and tok in accounts:
+                    acc_idx = accounts.index(tok) + 1
+                elif not tok and "accIndex" in cfg:
+                    acc_idx = cfg["accIndex"]
+                    if 1 <= acc_idx <= len(accounts):
+                        tok = accounts[acc_idx - 1]
+
                 user_mention = "*Unknown Member*"
-                if 1 <= acc_idx <= len(accounts):
-                    tok = accounts[acc_idx - 1]
+                if tok:
                     uid = get_user_id_from_token(tok)
                     if uid:
                         user_mention = f"<@{uid}>"
 
                 mode = cfg.get("mode", "unknown")
                 arg = cfg.get("target") or "None"
-                lines.append(f"`[#{idx}]` **Account:** {user_mention} (Acc #{acc_idx}) | **Mode:** `{mode}` | **Argument:** `{arg}`")
+                acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
+                lines.append(f"`[#{idx}]` **Account:** {user_mention} ({acc_str}) | **Mode:** `{mode}` | **Argument:** `{arg}`")
 
             embed = discord.Embed(
                 title="⚠️ Confirm Pause Configurations",
@@ -776,15 +808,26 @@ class GrinderCog(commands.Cog):
         await save_guild_configs(guild_id, configs)
 
         mode = configs[cfg_idx].get("mode", "unknown")
-        acc_idx = configs[cfg_idx].get("accIndex", 0)
+        
+        cfg = configs[cfg_idx]
+        tok = cfg.get("token")
+        acc_idx = 0
+        if tok and tok in accounts:
+            acc_idx = accounts.index(tok) + 1
+        elif not tok and "accIndex" in cfg:
+            acc_idx = cfg["accIndex"]
+            if 1 <= acc_idx <= len(accounts):
+                tok = accounts[acc_idx - 1]
+
+        acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
 
         if duration:
             await ctx.send(
-                f"⏸️ Paused Config **#{idx}** (`{mode}` | Acc #{acc_idx}) for **{duration}** "
+                f"⏸️ Paused Config **#{idx}** (`{mode}` | {acc_str}) for **{duration}** "
                 f"(resumes <t:{int(pause_until / 1000)}:R>)."
             )
         else:
-            await ctx.send(f"⏸️ Paused Config **#{idx}** (`{mode}` | Acc #{acc_idx}) indefinitely.")
+            await ctx.send(f"⏸️ Paused Config **#{idx}** (`{mode}` | {acc_str}) indefinitely.")
 
     @commands.command(name="resume", aliases=["r"])
     @commands.is_owner()
@@ -825,17 +868,26 @@ class GrinderCog(commands.Cog):
             lines = []
             for idx in target_indices:
                 cfg = configs[idx - 1]
-                acc_idx = cfg.get("accIndex", 0)
+                tok = cfg.get("token")
+                acc_idx = 0
+                
+                if tok and tok in accounts:
+                    acc_idx = accounts.index(tok) + 1
+                elif not tok and "accIndex" in cfg:
+                    acc_idx = cfg["accIndex"]
+                    if 1 <= acc_idx <= len(accounts):
+                        tok = accounts[acc_idx - 1]
+
                 user_mention = "*Unknown Member*"
-                if 1 <= acc_idx <= len(accounts):
-                    tok = accounts[acc_idx - 1]
+                if tok:
                     uid = get_user_id_from_token(tok)
                     if uid:
                         user_mention = f"<@{uid}>"
 
                 mode = cfg.get("mode", "unknown")
                 arg = cfg.get("target") or "None"
-                lines.append(f"`[#{idx}]` **Account:** {user_mention} (Acc #{acc_idx}) | **Mode:** `{mode}` | **Argument:** `{arg}`")
+                acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
+                lines.append(f"`[#{idx}]` **Account:** {user_mention} ({acc_str}) | **Mode:** `{mode}` | **Argument:** `{arg}`")
 
             embed = discord.Embed(
                 title="⚠️ Confirm Resume Configurations",
@@ -870,8 +922,19 @@ class GrinderCog(commands.Cog):
         await save_guild_configs(guild_id, configs)
 
         mode = configs[cfg_idx].get("mode", "unknown")
-        acc_idx = configs[cfg_idx].get("accIndex", 0)
-        await ctx.send(f"▶️ Resumed Config **#{idx}** (`{mode}` | Acc #{acc_idx}).")
+        
+        cfg = configs[cfg_idx]
+        tok = cfg.get("token")
+        acc_idx = 0
+        if tok and tok in accounts:
+            acc_idx = accounts.index(tok) + 1
+        elif not tok and "accIndex" in cfg:
+            acc_idx = cfg["accIndex"]
+            if 1 <= acc_idx <= len(accounts):
+                tok = accounts[acc_idx - 1]
+
+        acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
+        await ctx.send(f"▶️ Resumed Config **#{idx}** (`{mode}` | {acc_str}).")
 
     @commands.command(name="syncguilds", aliases=["sg"])
     @commands.is_owner()
