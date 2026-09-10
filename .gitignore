@@ -3,7 +3,7 @@ __pycache__/
 *.pyo
 *.pyd
 traindata/
-cogs/poketwo/pokemon_db.npz
+models/pokemon_db.npz
 .DS_Store
 keys.txt
 indexer.py

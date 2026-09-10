@@ -49,7 +49,8 @@ class Utilities(commands.Bot):
             "cmds": ["categories", "channels", "members", "messages", "ping", "roles", "utilities"],
             "config": ["base"],
             "poketwo": ["afk", "autolock", "lockunlock", "pings", "recognizer"],
-            "poketwo-utils": ["dex", "extract", "fled", "hintsolver"]
+            "poketwo-utils": ["dex", "extract", "fled", "hintsolver"],
+            "toggles": ["autolocktoggle"]
         }
 
     async def get_prefix_with_space(self, bot, message):
@@ -85,6 +86,27 @@ bot = Utilities()
 async def on_ready():
     print(f'We have logged in as {bot.user}')
 
+import os
+import platform
+import asyncio
+import psutil
+import discord
+from datetime import datetime, timezone
+from discord.ext import commands
+
+def get_dir_size(path: str = ".") -> int:
+    """Recursively calculate directory size in bytes."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            filepath = os.path.join(root, f)
+            if not os.path.islink(filepath):
+                try:
+                    total += os.path.getsize(filepath)
+                except OSError:
+                    pass
+    return total
+
 @bot.command(name="stats", aliases=["botinfo", "system", "info"])
 async def stats(ctx: commands.Context):
     # Calculate Uptime
@@ -102,9 +124,12 @@ async def stats(ctx: commands.Context):
 
     # System Metrics
     sys_mem = psutil.virtual_memory()
-    sys_disk = psutil.disk_usage('/')
     sys_cpu = psutil.cpu_percent(interval=None)
     cpu_cores = psutil.cpu_count(logical=True)
+    
+    # Bot Directory Storage Calculation (Non-blocking)
+    bot_dir_bytes = await asyncio.to_thread(get_dir_size, ".")
+    bot_dir_mb = bot_dir_bytes / (1024 ** 2)
 
     # Discord Entity Counts
     total_guilds = len(bot.guilds)
@@ -140,6 +165,7 @@ async def stats(ctx: commands.Context):
         value=(
             f"**CPU Usage:** `{proc_cpu:.1f}%`\n"
             f"**RAM Usage:** `{proc_mem:.2f} MB`\n"
+            f"**Bot Directory:** `{bot_dir_mb:.2f} MB`\n"
             f"**Threads:** `{process.num_threads()}`\n"
             f"**Async Tasks:** `{len(asyncio.all_tasks())}`\n"
             f"**HTTP Session:** `{'Active' if bot.session and not bot.session.closed else 'Closed'}`"
@@ -151,8 +177,7 @@ async def stats(ctx: commands.Context):
         name="🖥️ Host System Hardware",
         value=(
             f"**CPU Usage:** `{sys_cpu:.1f}%` ({cpu_cores} Cores)\n"
-            f"**RAM Usage:** `{sys_mem.used / (1024**3):.2f} / {sys_mem.total / (1024**3):.2f} GB` (`{sys_mem.percent}%`)\n"
-            f"**Disk Usage:** `{sys_disk.used / (1024**3):.2f} / {sys_disk.total / (1024**3):.2f} GB` (`{sys_disk.percent}%`)"
+            f"**RAM Usage:** `{sys_mem.used / (1024**3):.2f} / {sys_mem.total / (1024**3):.2f} GB` (`{sys_mem.percent}%`)"
         ),
         inline=False
     )

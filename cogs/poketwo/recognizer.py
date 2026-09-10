@@ -2,6 +2,7 @@ import asyncio
 import json    
 import socket    
 import gc    
+import re
 from pathlib import Path    
 from collections import OrderedDict    
 
@@ -10,6 +11,7 @@ import discord
 from discord.ext import commands    
 
 from .recognize import extract_pokemon_from_text, format_name    
+
 
 class Recognize(commands.Cog):    
     def __init__(self, bot):    
@@ -36,6 +38,7 @@ class Recognize(commands.Cog):
             "eevos": "pokes/eevos.json",    
         }
         self.category_pokes = {}    
+        self.pokedex_cache = {}
         self._background_tasks = set()    
 
     @property
@@ -51,8 +54,9 @@ class Recognize(commands.Cog):
         return self.bot.get_cog("AFK")    
 
     def _load_category_pokes(self):    
+        base_path = Path(__file__).parent
         for key, filepath in self.category_files.items():    
-            path = Path(filepath)    
+            path = base_path / filepath    
             if path.exists():    
                 try:
                     with open(path, "r", encoding="utf-8") as f:    
@@ -63,6 +67,15 @@ class Recognize(commands.Cog):
                     self.category_pokes[key] = frozenset()    
             else:
                 self.category_pokes[key] = frozenset()    
+
+    async def _load_pokedex_cache(self):
+        """Loads Pokémon metadata directly from MongoDB utilities.constdata (_id: pokedex)."""
+        try:
+            doc = await self.bot.mongo_client["utilities"]["constdata"].find_one({"_id": "pokedex"})
+            if doc and "data" in doc:
+                self.pokedex_cache = {str(k).strip().lower(): v for k, v in doc["data"].items()}
+        except Exception as e:
+            print(f"[Recognizer] Failed to load pokedex from MongoDB: {e}")
 
     async def _ensure_model_loaded(self):    
         """Lazy loads heavy weights into RAM only on first usage."""   
@@ -77,6 +90,7 @@ class Recognize(commands.Cog):
 
     async def cog_load(self):    
         self._load_category_pokes()    
+        await self._load_pokedex_cache()
         
         connector = aiohttp.TCPConnector(    
             family=socket.AF_INET,    
@@ -107,19 +121,24 @@ class Recognize(commands.Cog):
             return "", [], set()    
 
         pok_lower = pokemon_name.strip().lower()    
-        pokeinfo_map = getattr(self.recognizer, 'pokeinfo', {}) if self.recognizer else {}    
         
-        info = pokeinfo_map.get(pokemon_name.strip()) or pokeinfo_map.get(pok_lower) or {}    
+        # 1. Fetch metadata from MongoDB pokedex cache or local pokeinfo
+        info = self.pokedex_cache.get(pok_lower, {})
+        if not info and self.recognizer:
+            pokeinfo_map = getattr(self.recognizer, 'pokeinfo', {})
+            info = pokeinfo_map.get(pokemon_name.strip()) or pokeinfo_map.get(pok_lower) or {}
 
+        # 2. Parse Types (handles lists, single strings, commas, slashes, or newlines)
         raw_types = info.get("types", [])    
         if isinstance(raw_types, list):    
-            types = {t.lower() for t in raw_types}    
+            types = {str(t).strip().lower() for t in raw_types}    
         elif isinstance(raw_types, str):    
-            types = {t.strip().lower() for t in raw_types.split("\n") if t.strip()}    
+            types = {t.strip().lower() for t in re.split(r'[,/\n]+', raw_types) if t.strip()}    
         else:
             types = set()    
 
-        region = (info.get("region") or "").lower()    
+        # 3. Resolve Region (e.g. Kanto, Johto, or form fallbacks)
+        region = str(info.get("region") or "").strip().lower()    
         if not region:    
             if "hisuian" in pok_lower or "hisui" in pok_lower:    
                 region = "hisui"    
@@ -130,31 +149,45 @@ class Recognize(commands.Cog):
             elif "paldean" in pok_lower or "paldea" in pok_lower:    
                 region = "paldea"    
 
+        # 4. User Specific Targets (SH, CL, Reserves)
         sh_uids = {int(uid) for uid, target in g_data.get("sh", {}).items() if target and target.lower() == pok_lower}    
         cl_uids = {int(uid) for uid, cl_list in g_data.get("cl", {}).items() if isinstance(cl_list, list) and any(c.lower() == pok_lower for c in cl_list)}    
-        tp_uids = {int(uid) for uid, tp_list in g_data.get("tp", {}).items() if isinstance(tp_list, list) and any(t.lower() in types for t in tp_list)}    
+        re_uids = {int(uid) for uid, re_list in g_data.get("re", {}).items() if isinstance(re_list, list) and any(r.lower() == pok_lower for r in re_list)}
 
-        is_gmax = pok_lower in self.category_pokes.get("gmax", frozenset())    
+        # 5. Type Pings Lookup
+        tp_uids = {
+            int(uid)
+            for uid, tp_list in g_data.get("tp", {}).items()
+            if isinstance(tp_list, list)
+            and any(str(t).strip().lower() in types for t in tp_list)
+        }
+
+        # 6. Special Category Checks
+        is_gmax = pok_lower in self.category_pokes.get("gmax", frozenset()) or "gmax" in pok_lower or "gigantamax" in pok_lower
         is_paradox = pok_lower in self.category_pokes.get("paradox", frozenset())    
         is_eevos = pok_lower in self.category_pokes.get("eevos", frozenset())    
 
+        # 7. Region & Special Pings Lookup
         rp_uids = set()     
         for uid, rp_list in g_data.get("rp", {}).items():    
             if isinstance(rp_list, list):    
-                if any((region and r.lower() == region) or      
-                       (is_gmax and r.lower() == "gmax") or     
-                       (is_paradox and r.lower() == "paradox") or     
-                       (is_eevos and r.lower() == "eevos") for r in rp_list):    
+                if any((region and str(r).strip().lower() == region) or      
+                       (is_gmax and str(r).strip().lower() == "gmax") or     
+                       (is_paradox and str(r).strip().lower() == "paradox") or     
+                       (is_eevos and str(r).strip().lower() == "eevos") for r in rp_list):    
                     rp_uids.add(int(uid))    
 
+        # 8. Format Output Ping Strings
         if self.afk_cog:    
             sh_pings = await self.afk_cog.format_ping_list(sh_uids)    
             cl_pings = await self.afk_cog.format_ping_list(cl_uids)     
+            re_pings = await self.afk_cog.format_ping_list(re_uids)
             tp_pings = await self.afk_cog.format_ping_list(tp_uids)    
             rp_pings = await self.afk_cog.format_ping_list(rp_uids)    
         else:
             sh_pings = [f"<@{uid}>" for uid in sh_uids]    
             cl_pings = [f"<@{uid}>" for uid in cl_uids]    
+            re_pings = [f"<@{uid}>" for uid in re_uids]
             tp_pings = [f"<@{uid}>" for uid in tp_uids]    
             rp_pings = [f"<@{uid}>" for uid in rp_uids]    
 
@@ -167,6 +200,9 @@ class Recognize(commands.Cog):
         if cl_pings:     
             activated_categories.append("cl")    
             lines.append(f"Collection Pings: {' '.join(cl_pings)}")    
+        if re_pings:
+            activated_categories.append("re")
+            lines.append(f"Reserves Pings: {' '.join(re_pings)}")
         if tp_pings:    
             activated_categories.append("tp")    
             lines.append(f"Type Pings: {' '.join(tp_pings)}")    
@@ -174,6 +210,7 @@ class Recognize(commands.Cog):
             activated_categories.append("rp")    
             lines.append(f"Region Pings: {' '.join(rp_pings)}")    
 
+        # 9. Server Role Pings
         roles = g_data.get("roles", {})    
         cat_labels = (    
             ("rare", "Rare Ping"),    
@@ -183,12 +220,26 @@ class Recognize(commands.Cog):
             ("eevos", "Eevos Ping"),    
         )
         for cat_key, label in cat_labels:    
-            if pok_lower in self.category_pokes.get(cat_key, frozenset()):    
+            if pok_lower in self.category_pokes.get(cat_key, frozenset()) or (cat_key == "gmax" and is_gmax):    
                 activated_categories.append(cat_key)    
                 role_id = roles.get(cat_key)    
                 lines.append(f"{label}: <@&{role_id}>" if role_id else f"{label}: no role configured")    
 
-        pinged_user_ids = sh_uids | cl_uids | tp_uids | rp_uids    
+        pinged_user_ids = sh_uids | cl_uids | re_uids | tp_uids | rp_uids    
+
+        # 10. Restricted Unlockers Priority filtering
+        if bool(g_data.get("restricted_unlockers", False)):
+            if re_uids:
+                pinged_user_ids = set(re_uids)
+                activated_categories = [c for c in activated_categories if c == "re"]
+            elif sh_uids:
+                pinged_user_ids = set(sh_uids)
+                activated_categories = [c for c in activated_categories if c == "sh"]
+            else:
+                pinged_user_ids = cl_uids | tp_uids | rp_uids
+                tier3_cats = {"cl", "rp", "tp", "rare", "regional", "gmax", "paradox", "eevos"}
+                activated_categories = [c for c in activated_categories if c in tier3_cats]
+
         return "\n".join(lines), activated_categories, pinged_user_ids    
 
     async def _send_log_embed(self, is_correct: bool, predicted: str, actual: str, confidence: float, image_url: str, jump_url: str):    
@@ -249,20 +300,16 @@ class Recognize(commands.Cog):
                 formatted_name = format_name(pokemon_name)    
 
                 embed = discord.Embed(    
-                    title="🔍 Recognition Result",    
+                    title=f"{formatted_name}: {confidence:.2%}",    
                     color=discord.Color.blue()    
                 )
-                embed.add_field(name="Pokémon", value=f"**{formatted_name}**", inline=True)    
-                embed.add_field(name="Confidence", value=f"**{confidence:.2%}**", inline=True)    
                 
                 if pings:    
-                    embed.add_field(name="Matched Pings", value=pings, inline=False)    
-
-                embed.set_thumbnail(url=image_url)    
+                    embed.add_field(name="Pings", value=pings, inline=False)    
 
                 await ctx.send(    
                     embed=embed,    
-                    allowed_mentions=discord.AllowedMentions.none()    
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=True)    
                 )
             except Exception as e:    
                 await ctx.send(f"❌ Recognition failed: `{e}`")    
@@ -375,5 +422,6 @@ class Recognize(commands.Cog):
             self._background_tasks.add(task1)    
             task1.add_done_callback(self._background_tasks.discard)    
 
+
 async def setup(bot):    
-    await bot.add_cog(Recognize(bot))    
+    await bot.add_cog(Recognize(bot))

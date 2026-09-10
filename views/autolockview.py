@@ -17,14 +17,9 @@ CATEGORY_LABELS = {
 }
 CATEGORY_ORDER = ("rare", "regional", "gmax", "paradox", "eevos", "sh", "cl", "tp", "rp")
 
-# Rare/Regional/Gmax/Paradox/Eevos are role-based, but the ROLE ITSELF is
-# managed entirely by the PokePings cog (.rarerole, .regionalrole,
-# .gigantamaxrole, .paradoxrole, .eeveeevolutions) — autolock only reads it,
-# it never sets it. Sh/Cl/Tp/Rp instead get "restrict unlockers".
 ROLE_CATEGORIES = {"rare", "regional", "gmax", "paradox", "eevos"}
 RESTRICT_CATEGORIES = {"sh", "cl", "tp", "rp"}
 
-# Shown in the category embed so admins know where to actually set the role.
 ROLE_COMMAND_HINTS = {
     "rare": "`.rarerole` (alias `.rarole`)",
     "regional": "`.regionalrole` (alias `.regrole`)",
@@ -33,9 +28,6 @@ ROLE_COMMAND_HINTS = {
     "eevos": "`.eeveeevolutions` (alias `.eevosrole`)",
 }
 
-# tp = Type Ping (the .tp opt-in list), rp = Regional Ping (the .rp opt-in
-# list) — both are personal ping subscriptions from PokePings, distinct from
-# the role-based Rare/Regional/Gmax/Paradox/Eevos locks above.
 CATEGORY_DESCRIPTIONS = {
     "tp": "Triggers on Type Ping (`.tp`) notifications.",
     "rp": "Triggers on Regional Ping (`.rp`) notifications.",
@@ -137,9 +129,7 @@ class WhitelistModal(discord.ui.Modal):
 # --- Views ---------------------------------------------------------------------
 
 class CategoryConfigView(discord.ui.View):
-    """Config page for a single category. No role-setting here — roles for
-    rare/regional/gmax/paradox/eevos are managed via PokePings' own commands
-    and are only ever *read* by autolock."""
+    """Config page for a single category."""
 
     def __init__(self, cog, guild_id: int, author_id: int, category: str):
         super().__init__(timeout=180)
@@ -148,16 +138,21 @@ class CategoryConfigView(discord.ui.View):
         self.author_id = author_id
         self.category = category
 
-        self.add_item(self._make_button("Set Delay", discord.ButtonStyle.blurple, self._set_delay))
-        self.add_item(self._make_button("Add Whitelist", discord.ButtonStyle.green, self._add_whitelist))
-        self.add_item(self._make_button("Remove Whitelist", discord.ButtonStyle.red, self._remove_whitelist))
+        # Row 0: Configuration controls
+        self.add_item(self._make_button("Set Delay", discord.ButtonStyle.blurple, self._set_delay, row=0))
+        self.add_item(self._make_button("Add Whitelist", discord.ButtonStyle.green, self._add_whitelist, row=0))
+        self.add_item(self._make_button("Remove Whitelist", discord.ButtonStyle.red, self._remove_whitelist, row=0))
+
+        # Row 1: Toggles directly below whitelist controls
+        self.add_item(self._make_button("Toggle", discord.ButtonStyle.primary, self._toggle_lock, row=1))
 
         if category in RESTRICT_CATEGORIES:
             self.add_item(
-                self._make_button("Toggle Restrict Unlockers", discord.ButtonStyle.gray, self._toggle_restrict)
+                self._make_button("Toggle Restrict Unlockers", discord.ButtonStyle.gray, self._toggle_restrict, row=1)
             )
 
-        self.add_item(self._make_button("Back", discord.ButtonStyle.gray, self._back, row=1))
+        # Row 2: Navigation
+        self.add_item(self._make_button("Back", discord.ButtonStyle.gray, self._back, row=2))
 
     def _make_button(self, label, style, callback, row=0):
         button = discord.ui.Button(label=label, style=style, row=row)
@@ -186,6 +181,14 @@ class CategoryConfigView(discord.ui.View):
         await interaction.response.send_modal(
             WhitelistModal(self.cog, self.guild_id, self.category, interaction.message, action="remove")
         )
+
+    async def _toggle_lock(self, interaction: discord.Interaction):
+        await self.cog.toggle_lock(self.guild_id, self.category)
+        embed = await self.cog.build_category_embed(interaction.guild, self.category)
+        view = CategoryConfigView(
+            self.cog, guild_id=self.guild_id, author_id=self.author_id, category=self.category
+        )
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def _toggle_restrict(self, interaction: discord.Interaction):
         await self.cog.toggle_restrict(self.guild_id, self.category)

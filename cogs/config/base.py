@@ -9,6 +9,5 @@ async def setup(bot: commands.Bot):
     await bot.load_extension("cogs.config.autolockconfig")
     await bot.load_extension("cogs.config.grinder")
     await bot.load_extension("cogs.config.joins")
-    #await bot.load_extension("cogs.config.spawns")
 
     bot.add_command(config_group)
