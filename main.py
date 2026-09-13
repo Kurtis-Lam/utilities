@@ -48,9 +48,9 @@ class Utilities(commands.Bot):
         self.cogs_dict = {
             "cmds": ["categories", "channels", "members", "messages", "ping", "roles", "utilities"],
             "config": ["base"],
-            "poketwo": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer"],
+            "poketwo": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer", "setafk"],
             "poketwo-utils": ["dex", "extract", "fled", "hintsolver"],
-            "toggles": ["autolocktoggle"]
+            "poketwo-management": ["autolocktoggle"]
         }
 
     async def get_prefix_with_space(self, bot, message):

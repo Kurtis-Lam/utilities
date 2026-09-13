@@ -51,21 +51,47 @@ class Recognize(commands.Cog):
 
     @property
     def afk_cog(self):    
-        return self.bot.get_cog("AFK")    
+        return self.bot.get_cog("SetAFK")    
+
+    def _normalize_name(self, name: str) -> str:
+        """Removes all non-alphanumeric characters for strict equality matching."""
+        return re.sub(r'[^a-z0-9]', '', name.strip().lower())
 
     def _load_category_pokes(self):    
-        base_path = Path(__file__).parent
+        # Search relative to cog directory as well as the root working directory
+        possible_bases = [Path(__file__).parent, Path.cwd()]
+        
         for key, filepath in self.category_files.items():    
-            path = base_path / filepath    
-            if path.exists():    
+            path = None
+            for base in possible_bases:
+                candidate = base / filepath
+                if candidate.exists():
+                    path = candidate
+                    break
+            
+            if path and path.exists():    
                 try:
                     with open(path, "r", encoding="utf-8") as f:    
                         data = json.load(f)    
-                        self.category_pokes[key] = frozenset(p.strip().lower() for p in data if isinstance(p, str))    
+                        raw_items = []
+                        if isinstance(data, list):
+                            raw_items = [p for p in data if isinstance(p, str)]
+                        elif isinstance(data, dict):
+                            raw_items = list(data.keys())
+
+                        normalized_set = set()
+                        for p in raw_items:
+                            clean_p = p.strip().lower()
+                            normalized_set.add(clean_p)
+                            normalized_set.add(self._normalize_name(clean_p))
+
+                        self.category_pokes[key] = frozenset(normalized_set)
+                        print(f"[Recognizer] Loaded {len(raw_items)} entries for category '{key}' from {path}")
                 except Exception as e:    
                     print(f"[Recognizer] Failed to load {filepath}: {e}")    
                     self.category_pokes[key] = frozenset()    
             else:
+                print(f"[Recognizer] Warning: {filepath} not found in paths {[str(b / filepath) for b in possible_bases]}")
                 self.category_pokes[key] = frozenset()    
 
     async def _load_pokedex_cache(self):
@@ -121,6 +147,7 @@ class Recognize(commands.Cog):
             return "", [], set()    
 
         pok_lower = pokemon_name.strip().lower()    
+        pok_norm = self._normalize_name(pokemon_name)
         
         # 1. Fetch metadata from MongoDB pokedex cache or local pokeinfo
         info = self.pokedex_cache.get(pok_lower, {})
@@ -137,7 +164,7 @@ class Recognize(commands.Cog):
         else:
             types = set()    
 
-        # 3. Resolve Region (e.g. Kanto, Johto, or form fallbacks)
+        # 3. Resolve Region (e.g. Kanto, Johto, Hoenn, etc.) for .rp Region Pings
         region = str(info.get("region") or "").strip().lower()    
         if not region:    
             if "hisuian" in pok_lower or "hisui" in pok_lower:    
@@ -154,7 +181,7 @@ class Recognize(commands.Cog):
         cl_uids = {int(uid) for uid, cl_list in g_data.get("cl", {}).items() if isinstance(cl_list, list) and any(c.lower() == pok_lower for c in cl_list)}    
         re_uids = {int(uid) for uid, re_list in g_data.get("re", {}).items() if isinstance(re_list, list) and any(r.lower() == pok_lower for r in re_list)}
 
-        # 5. Type Pings Lookup
+        # 5. Type Pings Lookup (.tp)
         tp_uids = {
             int(uid)
             for uid, tp_list in g_data.get("tp", {}).items()
@@ -162,12 +189,18 @@ class Recognize(commands.Cog):
             and any(str(t).strip().lower() in types for t in tp_list)
         }
 
-        # 6. Special Category Checks
-        is_gmax = pok_lower in self.category_pokes.get("gmax", frozenset()) or "gmax" in pok_lower or "gigantamax" in pok_lower
-        is_paradox = pok_lower in self.category_pokes.get("paradox", frozenset())    
-        is_eevos = pok_lower in self.category_pokes.get("eevos", frozenset())    
+        # 6. Special Category File Checks (JSON files)
+        def _check_cat(cat_key: str) -> bool:
+            cat_set = self.category_pokes.get(cat_key, frozenset())
+            return pok_lower in cat_set or pok_norm in cat_set
 
-        # 7. Region & Special Pings Lookup
+        is_rare = _check_cat("rare")
+        is_regional = _check_cat("regional")  # Pings for Pokémon listed in pokes/regional.json
+        is_gmax = _check_cat("gmax") or "gmax" in pok_lower or "gigantamax" in pok_lower
+        is_paradox = _check_cat("paradox")    
+        is_eevos = _check_cat("eevos")    
+
+        # 7. Region Pings Lookup (.rp for Kanto, Johto, Sinnoh, Gmax, Paradox, Eevos)
         rp_uids = set()     
         for uid, rp_list in g_data.get("rp", {}).items():    
             if isinstance(rp_list, list):    
@@ -177,13 +210,13 @@ class Recognize(commands.Cog):
                        (is_eevos and str(r).strip().lower() == "eevos") for r in rp_list):    
                     rp_uids.add(int(uid))    
 
-        # 8. Format Output Ping Strings
+        # 8. Format Output Ping Strings with Guild ID & Specific Ping Categories
         if self.afk_cog:    
-            sh_pings = await self.afk_cog.format_ping_list(sh_uids)    
-            cl_pings = await self.afk_cog.format_ping_list(cl_uids)     
-            re_pings = await self.afk_cog.format_ping_list(re_uids)
-            tp_pings = await self.afk_cog.format_ping_list(tp_uids)    
-            rp_pings = await self.afk_cog.format_ping_list(rp_uids)    
+            sh_pings = await self.afk_cog.format_ping_list(sh_uids, guild_id, "sh")    
+            cl_pings = await self.afk_cog.format_ping_list(cl_uids, guild_id, "cl")     
+            re_pings = await self.afk_cog.format_ping_list(re_uids, guild_id, "re")
+            tp_pings = await self.afk_cog.format_ping_list(tp_uids, guild_id, "tp")    
+            rp_pings = await self.afk_cog.format_ping_list(rp_uids, guild_id, "rp")    
         else:
             sh_pings = [f"<@{uid}>" for uid in sh_uids]    
             cl_pings = [f"<@{uid}>" for uid in cl_uids]    
@@ -210,17 +243,17 @@ class Recognize(commands.Cog):
             activated_categories.append("rp")    
             lines.append(f"Region Pings: {' '.join(rp_pings)}")    
 
-        # 9. Server Role Pings
+        # 9. Server Category Role Pings (Rare, Regional, Gmax, Paradox, Eevos)
         roles = g_data.get("roles", {})    
-        cat_labels = (    
-            ("rare", "Rare Ping"),    
-            ("regional", "Regional Ping"),    
-            ("gmax", "Gmax Ping"),    
-            ("paradox", "Paradox Ping"),    
-            ("eevos", "Eevos Ping"),    
+        cat_checks = (    
+            ("rare", "Rare Ping", is_rare),    
+            ("regional", "Regional Ping", is_regional),    
+            ("gmax", "Gmax Ping", is_gmax),    
+            ("paradox", "Paradox Ping", is_paradox),    
+            ("eevos", "Eevos Ping", is_eevos),    
         )
-        for cat_key, label in cat_labels:    
-            if pok_lower in self.category_pokes.get(cat_key, frozenset()) or (cat_key == "gmax" and is_gmax):    
+        for cat_key, label, is_active in cat_checks:    
+            if is_active:    
                 activated_categories.append(cat_key)    
                 role_id = roles.get(cat_key)    
                 lines.append(f"{label}: <@&{role_id}>" if role_id else f"{label}: no role configured")    
@@ -303,11 +336,10 @@ class Recognize(commands.Cog):
                     title=f"{formatted_name}: {confidence:.2%}",    
                     color=discord.Color.blue()    
                 )
-                
-                if pings:    
-                    embed.add_field(name="Pings", value=pings, inline=False)    
 
+                # Send pings in main message content so Discord triggers push/role notifications
                 await ctx.send(    
+                    content=pings if pings else None,
                     embed=embed,    
                     allowed_mentions=discord.AllowedMentions(roles=True, users=True)    
                 )
@@ -398,7 +430,10 @@ class Recognize(commands.Cog):
             out_text += f"\n{pings}"    
 
         try:
-            detection_msg = await message.reply(out_text)    
+            detection_msg = await message.reply(
+                out_text,
+                allowed_mentions=discord.AllowedMentions(roles=True, users=True)
+            )    
         except discord.Forbidden:    
             return
 
