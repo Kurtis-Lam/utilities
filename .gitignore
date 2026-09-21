@@ -2,9 +2,11 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.DS_Store
+
+assets/
 traindata/
 models/pokemon_db.npz
-.DS_Store
 
 firebase_key.json
 keys.json
