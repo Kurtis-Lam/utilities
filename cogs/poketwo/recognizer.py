@@ -136,15 +136,15 @@ class Recognize(commands.Cog):
 
     async def _get_ping_info(self, guild_id: int, pokemon_name: str):    
         if not self.pings_cog:    
-            return "", [], set()    
+            return "", [], {}    
 
         try:
             g_data = await self.pings_cog._get_guild_doc(str(guild_id))    
         except Exception:    
-            return "", [], set()    
+            return "", [], {}    
 
         if not g_data:    
-            return "", [], set()    
+            return "", [], {}    
 
         pok_lower = pokemon_name.strip().lower()    
         pok_norm = self._normalize_name(pokemon_name)
@@ -258,22 +258,28 @@ class Recognize(commands.Cog):
                 role_id = roles.get(cat_key)    
                 lines.append(f"{label}: <@&{role_id}>" if role_id else f"{label}: no role configured")    
 
-        pinged_user_ids = sh_uids | cl_uids | re_uids | tp_uids | rp_uids    
+        # 10. Users pinged per activated category. AutoLock uses this (together with each lock's
+        #     own "restrict unlockers" setting and the res > sh > cl > others priority) to decide
+        #     who may unlock. Role-based categories (rare, regional, ...) have no users.
+        all_users = {"re": re_uids, "sh": sh_uids, "cl": cl_uids, "tp": tp_uids, "rp": rp_uids}
+        category_users = {c: set(all_users[c]) for c in activated_categories if c in all_users}
 
-        # 10. Restricted Unlockers Priority filtering
-        if bool(g_data.get("restricted_unlockers", False)):
-            if re_uids:
-                pinged_user_ids = set(re_uids)
-                activated_categories = [c for c in activated_categories if c == "re"]
-            elif sh_uids:
-                pinged_user_ids = set(sh_uids)
-                activated_categories = [c for c in activated_categories if c == "sh"]
-            else:
-                pinged_user_ids = cl_uids | tp_uids | rp_uids
-                tier3_cats = {"cl", "rp", "tp", "rare", "regional", "gmax", "paradox", "eevos"}
-                activated_categories = [c for c in activated_categories if c in tier3_cats]
+        return "\n".join(lines), activated_categories, category_users
 
-        return "\n".join(lines), activated_categories, pinged_user_ids    
+    def _mentions_to_names(self, guild, text: str) -> str:
+        """Embed titles don't render mentions (they'd show as raw <@id>), so show @names instead."""
+        def role_sub(m):
+            role = guild.get_role(int(m.group(1))) if guild else None
+            return f"@{role.name}" if role else m.group(0)
+
+        def user_sub(m):
+            uid = int(m.group(1))
+            member = guild.get_member(uid) if guild else None
+            user = member or self.bot.get_user(uid)
+            return f"@{user.display_name}" if user else m.group(0)
+
+        text = re.sub(r"<@&(\d+)>", role_sub, text)
+        return re.sub(r"<@!?(\d+)>", user_sub, text)
 
     async def _send_log_embed(self, is_correct: bool, predicted: str, actual: str, confidence: float, image_url: str, jump_url: str):    
         channel_id = self.correct_log_channel_id if is_correct else self.wrong_log_channel_id    
@@ -329,20 +335,17 @@ class Recognize(commands.Cog):
                     pokemon_name, confidence = await self.recognizer.identify_from_url(self.session, image_url)    
                 
                 pings, _, _ = await self._get_ping_info(ctx.guild.id if ctx.guild else 0, pokemon_name)    
-                
-                formatted_name = format_name(pokemon_name)    
 
-                embed = discord.Embed(    
-                    title=f"{formatted_name}: {confidence:.2%}",    
-                    color=discord.Color.blue()    
-                )
+                # Same text as the automatic recognition message, but everything (pings included)
+                # lives in the embed title, so .rec never actually pings anyone.
+                title = f"{format_name(pokemon_name)}: {confidence:.3%}"
+                if pings:
+                    title += "\n" + self._mentions_to_names(ctx.guild, pings)
+                if len(title) > 256:
+                    title = title[:255] + "…"
 
-                # Send pings in main message content so Discord triggers push/role notifications
-                await ctx.send(    
-                    content=pings if pings else None,
-                    embed=embed,    
-                    allowed_mentions=discord.AllowedMentions(roles=True, users=True)    
-                )
+                embed = discord.Embed(title=title, color=discord.Color.blue())
+                await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             except Exception as e:    
                 await ctx.send(f"❌ Recognition failed: `{e}`")    
 
@@ -421,7 +424,7 @@ class Recognize(commands.Cog):
             print(f"[ONNX Inference Error] {e}")    
             return
 
-        pings, activated_categories, pinged_uids = await self._get_ping_info(    
+        pings, activated_categories, category_users = await self._get_ping_info(    
             message.guild.id if message.guild else 0, pokemon_name    
         )
 
@@ -451,7 +454,7 @@ class Recognize(commands.Cog):
                 self.autolock_cog.process_autolock(    
                     channel=message.channel,     
                     activated_categories=activated_categories,    
-                    pinged_user_ids=pinged_uids,    
+                    category_users=category_users,    
                 )
             )
             self._background_tasks.add(task1)    
