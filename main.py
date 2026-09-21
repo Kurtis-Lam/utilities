@@ -3,6 +3,7 @@ import aiohttp
 import discord
 import gc
 import os
+import json
 import platform
 import sys
 import psutil
@@ -13,9 +14,17 @@ from datetime import datetime, timedelta, timezone
 import certifi
 import motor.motor_asyncio
 
-TOKEN = "MTMyNzQ4MDgyODc0MTE2MTA3NA.GWPTNO.VttPjVzEFtwUW_6N00NCJUgRCinBm2FsCVcYrg"
+# Load configuration secrets from keys.json
+if os.path.exists("keys.json"):
+    with open("keys.json", "r", encoding="utf-8") as f:
+        config = json.load(f)
+        TOKEN = config.get("TOKEN")
+        MONGO_URI = config.get("MONGO_URI")
+else:
+    print("❌ Error: 'keys.json' file not found.")
+    sys.exit(1)
+
 OWNERS = {1250429544486273038, 1281560553130692618, 1528374615720591381, 1432984051341459527, 1432983193681920014}
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
