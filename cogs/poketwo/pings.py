@@ -222,31 +222,6 @@ class PokePings(commands.Cog):
             await self.set_guild_role(g_id, role_key, str(role.id))
             await ctx.reply(f"Set **{category_name}** ping role to {role.mention}", mention_author=False)
 
-    @commands.command(name="rarerole", aliases=["rarole"])
-    @commands.has_permissions(administrator=True)
-    async def rare_role(self, ctx: commands.Context, role: discord.Role = None):
-        await self._handle_role_config(ctx, "rare", "Rare", role)
-
-    @commands.command(name="regionalrole", aliases=["regrole"])
-    @commands.has_permissions(administrator=True)
-    async def regional_role(self, ctx: commands.Context, role: discord.Role = None):
-        await self._handle_role_config(ctx, "regional", "Regional", role)
-
-    @commands.command(name="gigantamaxrole", aliases=["gmaxrole"])
-    @commands.has_permissions(administrator=True)
-    async def gigantamax_role(self, ctx: commands.Context, role: discord.Role = None):
-        await self._handle_role_config(ctx, "gmax", "Gigantamax", role)
-
-    @commands.command(name="paradoxrole", aliases=["pararole"])
-    @commands.has_permissions(administrator=True)
-    async def paradox_role(self, ctx: commands.Context, role: discord.Role = None):
-        await self._handle_role_config(ctx, "paradox", "Paradox", role)
-
-    @commands.command(name="eeveeevolutions", aliases=["eevosrole"])
-    @commands.has_permissions(administrator=True)
-    async def eevos_role(self, ctx: commands.Context, role: discord.Role = None):
-        await self._handle_role_config(ctx, "eevos", "Eevee Evolutions", role)
-
     # --- Shiny Hunt Command ---
 
     @commands.command(name="sh")
