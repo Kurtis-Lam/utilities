@@ -336,16 +336,16 @@ class Recognize(commands.Cog):
                 
                 pings, _, _ = await self._get_ping_info(ctx.guild.id if ctx.guild else 0, pokemon_name)    
 
-                # Same text as the automatic recognition message, but everything (pings included)
-                # lives in the embed title, so .rec never actually pings anyone.
                 title = f"{format_name(pokemon_name)}: {confidence:.3%}"
-                if pings:
-                    title += "\n" + self._mentions_to_names(ctx.guild, pings)
-                if len(title) > 256:
-                    title = title[:255] + "…"
-
-                embed = discord.Embed(title=title, color=discord.Color.blue())
-                await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                embed = discord.Embed(
+                    title=title,
+                    description=pings if pings else None,
+                    color=discord.Color.blue()
+                )
+                await ctx.send(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=True)
+                )
             except Exception as e:    
                 await ctx.send(f"❌ Recognition failed: `{e}`")    
 
