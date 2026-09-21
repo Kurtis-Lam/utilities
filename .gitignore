@@ -6,7 +6,7 @@ traindata/
 models/pokemon_db.npz
 .DS_Store
 
-firebase_keys.json
+firebase_key.json
 keys.json
 
 keys.txt
