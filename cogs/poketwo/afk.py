@@ -1,9 +1,6 @@
 import discord
 from discord.ext import commands
-import motor.motor_asyncio
-import certifi
 
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 class AFKButton(discord.ui.Button):
     def __init__(self, is_afk: bool):
@@ -37,6 +34,7 @@ class AFKButton(discord.ui.Button):
         
         await interaction.response.edit_message(embed=embed, view=view)
 
+
 class AFKView(discord.ui.View):
     def __init__(self, cog, user_id: int, is_afk: bool):
         super().__init__(timeout=180)
@@ -44,12 +42,19 @@ class AFKView(discord.ui.View):
         self.user_id = user_id
         self.add_item(AFKButton(is_afk))
 
+
 class AFK(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
-        self.db = self.mongo_client["utilities"]
-        self.afk_collection = self.db["afk"]
+
+    # Retrieves database and collection dynamically via main.py's bot.mongo_client
+    @property
+    def db(self):
+        return self.bot.mongo_client["utilities"]
+
+    @property
+    def afk_collection(self):
+        return self.db["afk"]
 
     def make_embed(self, is_afk: bool) -> discord.Embed:
         embed = discord.Embed(
@@ -82,6 +87,7 @@ class AFK(commands.Cog):
             else:
                 formatted.append(f"<@{uid}>")
         return formatted
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AFK(bot))
