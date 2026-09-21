@@ -5,6 +5,7 @@ import discord
 # --- Shared constants -------------------------------------------------------
 
 CATEGORY_LABELS = {
+    "re": "Res Lock",
     "rare": "Rare Lock",
     "regional": "Regional Lock",
     "gmax": "Gmax Lock",
@@ -15,20 +16,26 @@ CATEGORY_LABELS = {
     "tp": "Tp Lock",
     "rp": "Rp Lock",
 }
-CATEGORY_ORDER = ("rare", "regional", "gmax", "paradox", "eevos", "sh", "cl", "tp", "rp")
+# Unlock priority order: res > sh > cl > everything else (the rest are equal)
+CATEGORY_ORDER = ("re", "sh", "cl", "tp", "rp", "rare", "regional", "gmax", "paradox", "eevos")
+
+# Same limits as `.set lockdelay` (autolockset.py). To lock instantly, turn the delay OFF instead.
+MIN_DELAY = 1
+MAX_DELAY = 600
 
 ROLE_CATEGORIES = {"rare", "regional", "gmax", "paradox", "eevos"}
-RESTRICT_CATEGORIES = {"sh", "cl", "tp", "rp"}
+RESTRICT_CATEGORIES = {"re", "sh", "cl", "tp", "rp"}
 
 ROLE_COMMAND_HINTS = {
-    "rare": "`.rarerole` (alias `.rarole`)",
-    "regional": "`.regionalrole` (alias `.regrole`)",
-    "gmax": "`.gigantamaxrole` (alias `.gmaxrole`)",
-    "paradox": "`.paradoxrole` (alias `.pararole`)",
-    "eevos": "`.eeveeevolutions` (alias `.eevosrole`)",
+    "rare": "`.set rarerole` (alias `.set rarole`)",
+    "regional": "`.set regionalrole` (alias `.set regrole`)",
+    "gmax": "`.set gigantamaxrole` (alias `.set gmaxrole`)",
+    "paradox": "`.set paradoxrole` (alias `.set pararole`)",
+    "eevos": "`.set eeveelutionsrole` (alias `.set eevosroles`)",
 }
 
 CATEGORY_DESCRIPTIONS = {
+    "re": "Triggers on Reserves (`.re`) notifications. Highest unlock priority (res > sh > cl > others).",
     "tp": "Triggers on Type Ping (`.tp`) notifications.",
     "rp": "Triggers on Regional Ping (`.rp`) notifications.",
     "sh": "Triggers on Shiny Hunt (`.sh`) notifications.",
@@ -41,7 +48,7 @@ CATEGORY_DESCRIPTIONS = {
 class DelayModal(discord.ui.Modal, title="Set Lock Delay"):
     delay_seconds = discord.ui.TextInput(
         label="Delay (seconds)",
-        placeholder="e.g. 10",
+        placeholder=f"e.g. 10 ({MIN_DELAY}-{MAX_DELAY})",
         required=True,
         max_length=5,
     )
@@ -60,8 +67,16 @@ class DelayModal(discord.ui.Modal, title="Set Lock Delay"):
                 "⚠️ Please enter a whole number of seconds.", ephemeral=True
             )
 
-        delay = max(0, int(raw))
+        delay = int(raw)
+        if not (MIN_DELAY <= delay <= MAX_DELAY):
+            return await interaction.response.send_message(
+                f"⚠️ Delay must be between `{MIN_DELAY}` and `{MAX_DELAY}` seconds. "
+                "To lock instantly, use **Toggle Delay** to turn the delay off.",
+                ephemeral=True,
+            )
+
         await self.cog.set_delay(self.guild_id, self.category, delay)
+        cfg = await self.cog.get_category_config(self.guild_id, self.category)
 
         embed = await self.cog.build_category_embed(interaction.guild, self.category)
         view = CategoryConfigView(
@@ -71,7 +86,8 @@ class DelayModal(discord.ui.Modal, title="Set Lock Delay"):
             await self.parent_message.edit(embed=embed, view=view)
         except discord.HTTPException:
             pass
-        await interaction.response.send_message(f"✅ Lock delay set to `{delay}s`.", ephemeral=True)
+        note = "" if cfg.get("delay_enabled", True) else " (Delay is currently **off**, so this lock still fires instantly.)"
+        await interaction.response.send_message(f"✅ Lock delay set to `{delay}s`.{note}", ephemeral=True)
 
 
 class WhitelistModal(discord.ui.Modal):
@@ -145,6 +161,7 @@ class CategoryConfigView(discord.ui.View):
 
         # Row 1: Toggles directly below whitelist controls
         self.add_item(self._make_button("Toggle", discord.ButtonStyle.primary, self._toggle_lock, row=1))
+        self.add_item(self._make_button("Toggle Delay", discord.ButtonStyle.gray, self._toggle_delay, row=1))
 
         if category in RESTRICT_CATEGORIES:
             self.add_item(
@@ -184,6 +201,14 @@ class CategoryConfigView(discord.ui.View):
 
     async def _toggle_lock(self, interaction: discord.Interaction):
         await self.cog.toggle_lock(self.guild_id, self.category)
+        embed = await self.cog.build_category_embed(interaction.guild, self.category)
+        view = CategoryConfigView(
+            self.cog, guild_id=self.guild_id, author_id=self.author_id, category=self.category
+        )
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def _toggle_delay(self, interaction: discord.Interaction):
+        await self.cog.toggle_delay(self.guild_id, self.category)
         embed = await self.cog.build_category_embed(interaction.guild, self.category)
         view = CategoryConfigView(
             self.cog, guild_id=self.guild_id, author_id=self.author_id, category=self.category
