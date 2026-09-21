@@ -121,7 +121,7 @@ class Recognize(commands.Cog):
         connector = aiohttp.TCPConnector(    
             family=socket.AF_INET,    
             ttl_dns_cache=300,    
-            limit=2,    
+            limit=10,    
             enable_cleanup_closed=True    
         )
         timeout = aiohttp.ClientTimeout(total=5, connect=2)    
