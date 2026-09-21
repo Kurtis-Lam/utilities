@@ -377,7 +377,7 @@ class PokePings(commands.Cog):
 
     # --- Reserves Commands ---
 
-    @commands.group(name="reserves", aliases=["reserve", "re"], invoke_without_command=True)
+    @commands.group(name="reserves", aliases=["reserve", "res", "re"], invoke_without_command=True)
     async def reserves(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
         doc = await self._get_guild_doc(g_id)
