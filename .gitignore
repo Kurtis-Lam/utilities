@@ -5,6 +5,10 @@ __pycache__/
 traindata/
 models/pokemon_db.npz
 .DS_Store
+
+firebase_keys.json
+keys.json
+
 keys.txt
 indexer.py
 birthday.html
