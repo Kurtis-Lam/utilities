@@ -1,9 +1,6 @@
 import discord
 from discord.ext import commands
-import motor.motor_asyncio
-import certifi
 
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 class PingToggleButton(discord.ui.Button):
     def __init__(self, ping_key: str, label: str, is_active: bool):
@@ -61,10 +58,23 @@ class SetAFKView(discord.ui.View):
 class SetAFK(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
-        self.db = self.mongo_client["utilities"]
-        self.afk_collection = self.db["afk"]
-        self.afk_settings = self.db["afk_settings"]
+
+    # Retrieves MongoDB connection dynamically via main.py's bot.mongo_client
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
+    @property
+    def db(self):
+        return self.mongo_client["utilities"]
+
+    @property
+    def afk_collection(self):
+        return self.db["afk"]
+
+    @property
+    def afk_settings(self):
+        return self.db["afk_settings"]
 
     def make_embed(self, view: SetAFKView) -> discord.Embed:
         statuses = []

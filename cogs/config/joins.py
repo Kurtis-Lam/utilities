@@ -1,12 +1,9 @@
 import discord
 from discord.ext import commands
-import motor.motor_asyncio 
-import certifi
 
 from views.joinsview import WelcomeConfigView, get_welcome_embed
 from .base import config_group
 
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 # Attached to config_group at module level without 'self'
 @config_group.command(
@@ -25,12 +22,23 @@ async def joinsconfig(ctx: commands.Context):
     view = WelcomeConfigView(cog.collection, config)
     await ctx.send(embed=embed, view=view)
 
+
 class Joins(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
-        self.db = self.mongo_client["utilities"]
-        self.collection = self.db["joins_config"] 
+
+    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
+    @property
+    def db(self):
+        return self.mongo_client["utilities"]
+
+    @property
+    def collection(self):
+        return self.db["joins_config"]
 
     async def cog_load(self):
         try:
@@ -103,6 +111,7 @@ class Joins(commands.Cog):
                     await member.add_roles(*roles_to_add, reason="Automatic role assignment on join")
                 except (discord.Forbidden, discord.HTTPException):
                     pass
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Joins(bot))

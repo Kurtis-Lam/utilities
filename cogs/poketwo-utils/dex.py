@@ -1,11 +1,7 @@
 import io
 
-import certifi
 import discord
 from discord.ext import commands
-import motor.motor_asyncio  # Replaced pymongo with asynchronous motor
-
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 TYPE_EMOJIS = {
     "normal": "🔘",
@@ -33,13 +29,24 @@ class Dex(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        # Async Motor Client
-        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
-        self.db = self.mongo_client["utilities"]
-        self.collection = self.db["constdata"]
-        self.img_collection = self.db["pokeimgs"]  # Image collection
         self.pokedex = {}
-        # Removed synchronous load_pokedex() from here
+
+    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
+    @property
+    def db(self):
+        return self.mongo_client["utilities"]
+
+    @property
+    def collection(self):
+        return self.db["constdata"]
+
+    @property
+    def img_collection(self):
+        return self.db["pokeimgs"]
 
     async def cog_load(self):
         """Warms up the database connection and loads the Pokédex asynchronously on boot."""
@@ -52,7 +59,6 @@ class Dex(commands.Cog):
     async def load_pokedex(self):
         """Loads pokedex document from MongoDB Atlas into memory asynchronously."""
         try:
-            # AWAITED: Non-blocking fetch
             doc = await self.collection.find_one({"_id": "pokedex"})
             if doc and "data" in doc:
                 self.pokedex = doc["data"]
@@ -99,7 +105,6 @@ class Dex(commands.Cog):
             color=0xdbbe00
         )
 
-        # AWAITED: Retrieve image binary from MongoDB pokeimgs collection asynchronously
         img_doc = await self.img_collection.find_one({"_id": matched_name.lower()})
         file = None
 
@@ -107,11 +112,9 @@ class Dex(commands.Cog):
             image_bytes = img_doc["image"]
             filename = f"{matched_name.lower()}.png"
 
-            # Wrap bytes in BytesIO buffer and create Discord File
             image_stream = io.BytesIO(image_bytes)
             file = discord.File(fp=image_stream, filename=filename)
 
-            # Set top-right thumbnail pointing to the attachment
             embed.set_thumbnail(url=f"attachment://{filename}")
 
         # 1. Types
@@ -194,7 +197,6 @@ class Dex(commands.Cog):
             name="Hatch Time", value=data.get("hatch_time", "N/A"), inline=True
         )
 
-        # Reply with embed and image file attachment
         if file:
             await ctx.reply(embed=embed, file=file)
         else:

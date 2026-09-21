@@ -3,17 +3,12 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import certifi
 import discord
 from discord.ext import commands
-import motor.motor_asyncio
-# We still import these from pymongo as Motor relies on them for operations
-from pymongo import ASCENDING, DESCENDING, UpdateOne 
+from pymongo import ASCENDING, DESCENDING, UpdateOne
 
 POKETWO_ID = 716390085896962058
 HKT = timezone(timedelta(hours=8))
-
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 TIMEFRAME_CONFIG = {
     "daily": {
@@ -98,20 +93,30 @@ def get_next_reset_unix(tf_key: str) -> Optional[int]:
 class Catches(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Async Motor Client
-        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
-        self.db = self.mongo_client["utilities"]
-        self.collection = self.db["catches"]
-        self.links_collection = self.db["guild_links"]
-
         self.guild_cache: dict[str, str] = {}
-        
+
+    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
+    @property
+    def db(self):
+        return self.mongo_client["utilities"]
+
+    @property
+    def collection(self):
+        return self.db["catches"]
+
+    @property
+    def links_collection(self):
+        return self.db["guild_links"]
+
     async def cog_load(self):
         """Warms up connection and asynchronously builds indexes."""
         try:
-            await self.mongo_client.admin.command('ping')
-            
-            # AWAITED: Motor requires index creation to be awaited
+            await self.mongo_client.admin.command("ping")
+
             await self.collection.create_index(
                 [
                     ("user_id", ASCENDING),
@@ -129,18 +134,18 @@ class Catches(commands.Cog):
                     ("count", DESCENDING),
                 ]
             )
-            await self.links_collection.create_index([("guild_id", ASCENDING)], unique=True)
-            
+            await self.links_collection.create_index(
+                [("guild_id", ASCENDING)], unique=True
+            )
+
         except Exception as e:
             print(f"Catches Cog: MongoDB warmup failed: {e}")
 
-    # AWAITED: Made this method async because it queries the DB
     async def get_group_id(self, guild_id: str) -> str:
         guild_id_str = str(guild_id)
         if guild_id_str in self.guild_cache:
             return self.guild_cache[guild_id_str]
 
-        # AWAITED: Non-blocking DB fetch
         doc = await self.links_collection.find_one({"guild_id": guild_id_str})
         group_id = doc["group_id"] if doc else guild_id_str
         self.guild_cache[guild_id_str] = group_id
@@ -174,13 +179,10 @@ class Catches(commands.Cog):
 
         caught_user = message.mentions[0]
         user_id_str = str(caught_user.id)
-        
-        # AWAITED: Async fetch
+
         group_id = await self.get_group_id(str(message.guild.id))
 
-        await message.channel.send(
-            f"**{caught_user.name}** caught a Pokémon!"
-        )
+        await message.channel.send(f"**{caught_user.name}** caught a Pokémon!")
 
         daily_k, weekly_k, monthly_k = get_hkt_period_keys()
 
@@ -227,7 +229,6 @@ class Catches(commands.Cog):
             ),
         ]
 
-        # AWAITED: Non-blocking bulk write
         await self.collection.bulk_write(operations)
 
     @commands.hybrid_command(
@@ -241,7 +242,6 @@ class Catches(commands.Cog):
                 ctx, "❌ You cannot link a guild to itself!"
             )
 
-        # AWAITED: Async calls to the DB/cache
         group1 = await self.get_group_id(guild_id_1)
         group2 = await self.get_group_id(guild_id_2)
 
@@ -253,7 +253,6 @@ class Catches(commands.Cog):
         target_group = group1
         old_group = group2
 
-        # AWAITED: Async DB updates
         await self.links_collection.update_many(
             {"group_id": old_group}, {"$set": {"group_id": target_group}}
         )
@@ -275,9 +274,10 @@ class Catches(commands.Cog):
         self.guild_cache[str(guild_id_1)] = target_group
         self.guild_cache[str(guild_id_2)] = target_group
 
-        # AWAITED: Motor cursors require `.to_list()`
-        old_docs = await self.collection.find({"group_id": old_group}).to_list(length=None)
-        
+        old_docs = await self.collection.find({"group_id": old_group}).to_list(
+            length=None
+        )
+
         if old_docs:
             merge_operations = []
             for doc in old_docs:
@@ -294,10 +294,8 @@ class Catches(commands.Cog):
                     )
                 )
             if merge_operations:
-                # AWAITED
                 await self.collection.bulk_write(merge_operations)
 
-            # AWAITED
             await self.collection.delete_many({"group_id": old_group})
 
         await self._send_and_clean(
@@ -332,13 +330,13 @@ class Catches(commands.Cog):
             "alltime": "all",
         }
 
-        # AWAITED
         group_id = await self.get_group_id(str(ctx.guild.id))
         user_id_str = str(ctx.author.id)
 
-        # AWAITED: .to_list() formatting
-        user_docs = await self.collection.find({"user_id": user_id_str, "group_id": group_id}).to_list(length=None)
-        
+        user_docs = await self.collection.find(
+            {"user_id": user_id_str, "group_id": group_id}
+        ).to_list(length=None)
+
         counts = {"daily": 0, "weekly": 0, "monthly": 0, "alltime": 0}
 
         for doc in user_docs:
@@ -414,17 +412,19 @@ class Catches(commands.Cog):
         active_key = tf_config["key"]
         search_key = keys_map[active_key]
 
-        # AWAITED
         group_id = await self.get_group_id(str(ctx.guild.id))
 
-        # AWAITED: Motor limits and sorts on the cursor, then awaits compilation to list
-        top_catches = await self.collection.find(
-            {"group_id": group_id, "timeframe": active_key, "key": search_key}
-        ).sort("count", DESCENDING).limit(10).to_list(length=10)
+        top_catches = (
+            await self.collection.find(
+                {"group_id": group_id, "timeframe": active_key, "key": search_key}
+            )
+            .sort("count", DESCENDING)
+            .limit(10)
+            .to_list(length=10)
+        )
 
         author_id_str = str(ctx.author.id)
-        
-        # AWAITED
+
         author_doc = await self.collection.find_one(
             {
                 "user_id": author_id_str,
@@ -436,7 +436,6 @@ class Catches(commands.Cog):
         author_count = author_doc["count"] if author_doc else 0
 
         if author_count > 0:
-            # AWAITED
             higher_count = await self.collection.count_documents(
                 {
                     "group_id": group_id,
@@ -458,8 +457,11 @@ class Catches(commands.Cog):
         reset_str = f"⏱️ Period resets <t:{reset_unix}:R>\n\n" if reset_unix else ""
 
         if not top_catches:
-            embed.description = f"{reset_str}*No catch data available for this timeframe yet.*"
+            embed.description = (
+                f"{reset_str}*No catch data available for this timeframe yet.*"
+            )
         else:
+
             async def resolve_username(user_id: int) -> str:
                 user = self.bot.get_user(user_id)
                 if user:

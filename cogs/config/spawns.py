@@ -1,13 +1,10 @@
 import asyncio
-import certifi
 import discord
 from discord.ext import commands
-import motor.motor_asyncio
 
 from views.spawnsview import SpawnsConfigView
 from .base import config_group
 
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 POKETWO_ID = 716390085896962058
 SENSOR_IDS = {874910942490677270, 854233015475109888, 1250429544486273038}
 
@@ -15,6 +12,7 @@ SENSOR_IDS = {874910942490677270, 854233015475109888, 1250429544486273038}
 async def get_poketwo_target(guild: discord.Guild):
     """Retrieve Poketwo Member object via cache or fetch."""
     return guild.get_member(POKETWO_ID) or await guild.fetch_member(POKETWO_ID)
+
 
 @config_group.command(
     name="spawns",
@@ -64,9 +62,19 @@ class SpawnsConfig(commands.Cog):
         self.bot = bot
         self.active_locks = {}
         self.pending_locks = set()
-        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
-        self.db = self.mongo_client["utilities"]
-        self.collection = self.db["config"]
+
+    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
+    @property
+    def db(self):
+        return self.mongo_client["utilities"]
+
+    @property
+    def collection(self):
+        return self.db["config"]
 
     async def cog_load(self):
         try:
