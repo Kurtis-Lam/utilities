@@ -2,25 +2,30 @@ import os
 import re
 import secrets
 import time
-import certifi
 import discord
 from discord.ext import commands, tasks
-import motor.motor_asyncio # Replaced pymongo with asynchronous motor
-
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 # Compile regex once at module level to avoid recompiling on every command call
 TIME_PATTERN = re.compile(r"^(\d+)([smhd])$")
 
+
 class Utilities(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Use Motor for asynchronous, non-blocking MongoDB access
-        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
-        self.db = self.mongo_client["utilities"]
-        self.collection = self.db["reminders"]
-
         self.check_reminders.start()
+
+    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
+    @property
+    def db(self):
+        return self.mongo_client["utilities"]
+
+    @property
+    def collection(self):
+        return self.db["reminders"]
 
     async def cog_load(self):
         """Warms up the database connection when the bot starts."""
@@ -36,8 +41,6 @@ class Utilities(commands.Cog):
     async def check_reminders(self):
         current_time = time.time()
         
-        # AWAITED: Changed to async iteration format using to_list()
-        # This prevents the loop from blocking other bot functions every 10 seconds
         due_reminders = await self.collection.find({"ends_at": {"$lte": current_time}}).to_list(length=None)
 
         if not due_reminders:
@@ -47,12 +50,10 @@ class Utilities(commands.Cog):
             try:
                 channel = self.bot.get_channel(rem["channel_id"]) or await self.bot.fetch_channel(rem["channel_id"])
                 if channel:
-                    # Avoid fetching user over API; direct raw mention uses 0 RAM/API calls
                     await channel.send(f"<@{rem['user_id']}> ⏰ **Reminder:** {rem['message']}")
             except Exception as e:
                 print(f"Failed to send reminder {rem['id']}: {e}")
 
-            # AWAITED: Delete the processed reminder asynchronously
             await self.collection.delete_one({"_id": rem["_id"]})
 
     @check_reminders.before_loop
@@ -65,11 +66,9 @@ class Utilities(commands.Cog):
         if amt <= 0:
             return await ctx.send("Amount must be greater than 0.")
 
-        # Stream text with generator expressions to avoid creating large list objects in RAM
         result = " ".join(f"#{i}" for i in range(1, amt + 1))
         formatted_result = f"```\n{result}\n```"
 
-        # Prevent Discord HTTP 400 errors if string exceeds 2000 character limit
         if len(formatted_result) > 2000:
             return await ctx.send("Result is too long to fit in a single Discord message (2000 char limit).")
 
@@ -91,7 +90,6 @@ class Utilities(commands.Cog):
 
             final_content = f"{replied_message.content}\n\n{replied_message.jump_url}"
 
-            # Append image/file URLs instead of downloading raw bytes into RAM via to_file()
             if replied_message.attachments:
                 attachment_urls = "\n".join(a.url for a in replied_message.attachments)
                 final_content += f"\n\n**Attachments:**\n{attachment_urls}"
@@ -129,7 +127,6 @@ class Utilities(commands.Cog):
             "message": message,
         }
 
-        # AWAITED: Insert asynchronously so setting a reminder doesn't block other commands
         await self.collection.insert_one(reminder_data)
 
         await ctx.send(f"I will remind you in **{time_str}** (ID: `{reminder_id}`): {message}")
@@ -137,7 +134,6 @@ class Utilities(commands.Cog):
     @commands.group(name="reminders", invoke_without_command=True, description="View your active reminders.")
     @commands.is_owner()
     async def reminders(self, ctx):
-        # AWAITED: Used async .to_list() format
         user_reminders = await self.collection.find({"user_id": ctx.author.id}).to_list(length=None)
         
         if not user_reminders:
@@ -170,7 +166,6 @@ class Utilities(commands.Cog):
     @reminders.command(name="remove", aliases=["r"], description="Remove a reminder by its ID.")
     @commands.is_owner()
     async def reminders_remove(self, ctx, reminder_id: str):
-        # AWAITED: Non-blocking deletion
         result = await self.collection.delete_one({"id": reminder_id, "user_id": ctx.author.id})
 
         if result.deleted_count > 0:

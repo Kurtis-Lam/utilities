@@ -1,24 +1,29 @@
 import asyncio
 import typing
-import certifi
 import discord
 from discord import app_commands
 from discord.ext import commands
-import motor.motor_asyncio # Replaced pymongo with motor!
 
 # Import ConfirmView from views/common.py
 from views.common import ConfirmView
 
-# Friendly reminder: Don't share this URI publicly when you launch!
-MONGO_URI = "mongodb+srv://KurtisLam:CsHLOnDqihiU5uYG@cluster0.7rwx3oc.mongodb.net/?appName=Cluster0"
 
 class Messages(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Async Motor Client
-        self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
-        self.db = self.mongo_client["utilities"]
-        self.collection = self.db["sticks"]
+
+    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
+    @property
+    def db(self):
+        return self.mongo_client["utilities"]
+
+    @property
+    def collection(self):
+        return self.db["sticks"]
 
     async def cog_load(self):
         """Warms up the database connection when the bot starts so commands are fast instantly."""
@@ -290,6 +295,7 @@ class Messages(commands.Cog):
                 await msg.edit(embed=timeout_embed, view=None)
             except discord.HTTPException:
                 pass
+
 
 async def setup(bot):
     await bot.add_cog(Messages(bot))
