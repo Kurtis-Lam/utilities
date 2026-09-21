@@ -50,7 +50,7 @@ class Utilities(commands.Bot):
             "config": ["base"],
             "poketwo": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer", "setafk"],
             "poketwo-utils": ["dex", "extract", "fled", "hintsolver"],
-            "poketwo-management": ["autolocktoggle"]
+            "poketwo-management": ["autolocktoggle", "autolockset"]
         }
 
     async def get_prefix_with_space(self, bot, message):
