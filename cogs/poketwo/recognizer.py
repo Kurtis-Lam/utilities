@@ -433,7 +433,7 @@ class Recognize(commands.Cog):
             out_text += f"\n{pings}"    
 
         catch_cmd = f"@Pokétwo#8236 c {pokemon_name.lower()}"
-        out_text += f"\n**Mobile Copypasta:** `{catch_cmd}`\n**PC Copypasta:**```{catch_cmd}```"
+        out_text += f"\n\n**Mobile Copypasta:** `{catch_cmd}`\n**PC Copypasta:**```{catch_cmd}```"
 
         try:
             detection_msg = await message.reply(
