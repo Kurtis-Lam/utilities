@@ -428,9 +428,12 @@ class Recognize(commands.Cog):
             message.guild.id if message.guild else 0, pokemon_name    
         )
 
-        out_text = f"{format_name(pokemon_name)}: {confidence:.3%}"    
+        out_text = f"# {format_name(pokemon_name)}: {confidence:.3%}"    
         if pings:    
             out_text += f"\n{pings}"    
+
+        catch_cmd = f"@Pokétwo#8236 c {pokemon_name.lower()}"
+        out_text += f"\n**Mobile Copypasta:** `{catch_cmd}`\n**PC Copypasta:**```{catch_cmd}```"
 
         try:
             detection_msg = await message.reply(
