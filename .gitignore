@@ -9,7 +9,7 @@ traindata/
 models/pokemon_db.npz
 
 firebase_key.json
-keys.json
+config.json
 
 keys.txt
 indexer.py
