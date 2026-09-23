@@ -14,14 +14,15 @@ from datetime import datetime, timedelta, timezone
 import certifi
 import motor.motor_asyncio
 
-# Load configuration secrets from keys.json
-if os.path.exists("keys.json"):
-    with open("keys.json", "r", encoding="utf-8") as f:
+# Load configuration secrets from config.json
+if os.path.exists("config.json"):
+    with open("config.json", "r", encoding="utf-8") as f:
         config = json.load(f)
         TOKEN = config.get("TOKEN")
         MONGO_URI = config.get("MONGO_URI")
+        PREFIX = config.get("PREFIX", ".")  # Defaults to '!' if not specified
 else:
-    print("❌ Error: 'keys.json' file not found.")
+    print("❌ Error: 'config.json' file not found.")
     sys.exit(1)
 
 OWNERS = {1250429544486273038, 1281560553130692618, 1528374615720591381, 1432984051341459527, 1432983193681920014}
@@ -32,7 +33,8 @@ INTENTS.guilds = True
 INTENTS.members = True
 
 class Utilities(commands.Bot):
-    def __init__(self):
+    def __init__(self, prefix: str = "!"):
+        self.prefix_str = prefix
         super().__init__(
             command_prefix=self.get_prefix_with_space, 
             owner_ids=OWNERS, 
@@ -63,7 +65,7 @@ class Utilities(commands.Bot):
         }
 
     async def get_prefix_with_space(self, bot, message):
-        return commands.when_mentioned_or('.', '. ')(bot, message)
+        return commands.when_mentioned_or(self.prefix_str, f"{self.prefix_str} ")(bot, message)
 
     async def setup_hook(self):
         # Optimized session with reduced connections
@@ -89,19 +91,11 @@ class Utilities(commands.Bot):
             self.mongo_client.close()
         await super().close()
 
-bot = Utilities()
+bot = Utilities(prefix=PREFIX)
 
 @bot.event
 async def on_ready():
     print(f'We have logged in as {bot.user}')
-
-import os
-import platform
-import asyncio
-import psutil
-import discord
-from datetime import datetime, timezone
-from discord.ext import commands
 
 def get_dir_size(path: str = ".") -> int:
     """Recursively calculate directory size in bytes."""
