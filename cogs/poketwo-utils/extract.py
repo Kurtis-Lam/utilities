@@ -1,4 +1,3 @@
-import asyncio
 import re
 import discord
 from discord.ext import commands
@@ -10,17 +9,17 @@ class PokemonExtractor(commands.Cog):
     @commands.command(name="extract", aliases=["ex"])
     async def extract(self, ctx):
         if not ctx.message.reference:
-            await ctx.send("❌ Please reply to a Pokétwo message to use this command.")
+            await ctx.reply("❌ Please reply to a Pokétwo message to use this command.", mention_author=False)
             return
 
         try:
             replied_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
         except discord.HTTPException:
-            await ctx.send("❌ Unable to fetch the replied message.")
+            await ctx.reply("❌ Unable to fetch the replied message.", mention_author=False)
             return
 
         if not replied_message.embeds:
-            await ctx.send("❌ The replied message does not contain an embed.")
+            await ctx.reply("❌ The replied message does not contain an embed.", mention_author=False)
             return
 
         embed = replied_message.embeds[0]
@@ -36,23 +35,42 @@ class PokemonExtractor(commands.Cog):
 
         content = "\n".join(content_parts)
 
-        # Matches Pokémon entries (e.g., "<:emoji:> Bulbasaur #1", "**Charmander #4**")
-        # Ignores milestone range headers like "(#1-#809)"
-        pokedex_names = re.findall(
-            r'(?:<a?:[^\n:]+:\d+>\s*)?\*?\*?([A-Za-z0-9.\- \'\u0080-\uffff]+?)\*?\*?\s+#\d+(?!\d|-|\))',
+        # Captures Group 1: Pokemon Name, Group 2: Dex Number (e.g., standard Pokedex entries)
+        pokedex_matches = re.findall(
+            r'(?:<a?:[^\n:]+:\d+>\s*)?\*?\*?([A-Za-z0-9.\- \'\u0080-\uffff]+?)\*?\*?\s+#(\d+)(?!\d|-|\))',
             content
         )
 
-        # Matches list IDs formatted in codeblocks (e.g., "`76307`")
-        pokemon_ids = re.findall(r'`(\d+)`', content)
+        # Captures Group 1: List ID, Group 2: Pokemon Name (e.g., "`77823` <emoji> **Gastly**♂...")
+        list_matches = re.findall(
+            r'`(\d+)`\s*(?:<a?:[^\n:]+:\d+>\s*)?\*?\*?([A-Za-z0-9.\- \'\u0080-\uffff]+?)\*?\*?\s*[♂♀]?',
+            content
+        )
 
-        if pokedex_names:
-            clean_names = [name.strip() for name in pokedex_names]
-            await ctx.send(", ".join(clean_names))
-        elif pokemon_ids:
-            await ctx.send(" ".join(pokemon_ids))
+        if pokedex_matches:
+            names = [match[0].strip() for match in pokedex_matches]
+            dex_numbers = [match[1] for match in pokedex_matches]
+
+            names_str = ", ".join(names)
+            numbers_str = " ".join(dex_numbers)
+
+            await replied_message.reply(
+                f"Names:\n```\n{names_str}\n```\nDex Numbers:\n```\n{numbers_str}\n```",
+                mention_author=False
+            )
+        elif list_matches:
+            pokemon_ids = [match[0] for match in list_matches]
+            names = [match[1].strip() for match in list_matches]
+
+            ids_str = " ".join(pokemon_ids)
+            names_str = ", ".join(names)
+
+            await replied_message.reply(
+                f"Pokemon IDs:\n```\n{ids_str}\n```\nPokemon Names:\n```\n{names_str}\n```",
+                mention_author=False
+            )
         else:
-            await ctx.send("❌ No Pokémon IDs or Pokédex entries found in that embed.")
+            await replied_message.reply("❌ No Pokémon IDs or Pokédex entries found in that embed.", mention_author=False)
 
 
 async def setup(bot):
