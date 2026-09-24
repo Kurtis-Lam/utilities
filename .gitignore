@@ -5,7 +5,7 @@ __pycache__/
 .DS_Store
 
 assets/
-traindata/
+train/
 models/pokemon_db.npz
 
 firebase_key.json
