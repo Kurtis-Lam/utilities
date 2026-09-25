@@ -24,43 +24,49 @@ class PokemonExtractor(commands.Cog):
 
         embed = replied_message.embeds[0]
 
-        # Extract content from description, field names, and field values
+        # Extract content from description and fields
         content_parts = []
         if embed.description:
             content_parts.append(embed.description)
 
         for field in embed.fields:
-            content_parts.append(field.name)   # Pokédex names live here
+            content_parts.append(field.name)
             content_parts.append(field.value)
 
         content = "\n".join(content_parts)
 
-        # Captures Group 1: Pokemon Name, Group 2: Dex Number (e.g., standard Pokedex entries)
+        # Captures Group 1: Name, Group 2: Dex Number (e.g., standard Pokédex entries)
         pokedex_matches = re.findall(
             r'(?:<a?:[^\n:]+:\d+>\s*)?\*?\*?([A-Za-z0-9.\- \'\u0080-\uffff]+?)\*?\*?\s+#(\d+)(?!\d|-|\))',
             content
         )
 
-        # Captures Group 1: List ID, Group 2: Pokemon Name (e.g., "`77823` <emoji> **Gastly**♂...")
-        list_matches = re.findall(
-            r'`(\d+)`\s*(?:<a?:[^\n:]+:\d+>\s*)?\*?\*?([A-Za-z0-9.\- \'\u0080-\uffff]+?)\*?\*?\s*[♂♀]?',
-            content
-        )
+        # Captures Group 1: List ID, Group 2: Raw bolded string (e.g., "Level 36 Zubat ♀")
+        list_matches = re.findall(r'`(\d+)`[^\n]*?\*\*(.*?)\*\*', content)
 
         if pokedex_matches:
             names = [match[0].strip() for match in pokedex_matches]
             dex_numbers = [match[1] for match in pokedex_matches]
 
             names_str = ", ".join(names)
-            numbers_str = " ".join(dex_numbers)
+            numbers_str = ", ".join([f"#{num}" for num in dex_numbers])
 
             await replied_message.reply(
                 f"Names:\n```\n{names_str}\n```\nDex Numbers:\n```\n{numbers_str}\n```",
                 mention_author=False
             )
         elif list_matches:
-            pokemon_ids = [match[0] for match in list_matches]
-            names = [match[1].strip() for match in list_matches]
+            pokemon_ids = []
+            names = []
+
+            for pokemon_id, raw_name in list_matches:
+                # Strip leading "Level 36", "✨", and spaces
+                clean_name = re.sub(r'^(?:✨|Level\s+\d+|\s)+', '', raw_name, flags=re.IGNORECASE)
+                # Strip trailing gender symbols ♂/♀ and trailing spaces
+                clean_name = re.sub(r'[\s♂♀]+$', '', clean_name)
+
+                pokemon_ids.append(pokemon_id)
+                names.append(clean_name.strip())
 
             ids_str = " ".join(pokemon_ids)
             names_str = ", ".join(names)
@@ -71,7 +77,6 @@ class PokemonExtractor(commands.Cog):
             )
         else:
             await replied_message.reply("❌ No Pokémon IDs or Pokédex entries found in that embed.", mention_author=False)
-
 
 async def setup(bot):
     await bot.add_cog(PokemonExtractor(bot))
