@@ -24,7 +24,7 @@ class PokemonExtractor(commands.Cog):
 
         embed = replied_message.embeds[0]
 
-        # Extract content from description and fields
+        # Extract content from description, field names, and field values
         content_parts = []
         if embed.description:
             content_parts.append(embed.description)
@@ -35,13 +35,13 @@ class PokemonExtractor(commands.Cog):
 
         content = "\n".join(content_parts)
 
-        # Captures Group 1: Name, Group 2: Dex Number (e.g., standard Pokédex entries)
+        # Captures Group 1: Pokemon Name, Group 2: Dex Number (e.g., standard Pokédex entries)
         pokedex_matches = re.findall(
             r'(?:<a?:[^\n:]+:\d+>\s*)?\*?\*?([A-Za-z0-9.\- \'\u0080-\uffff]+?)\*?\*?\s+#(\d+)(?!\d|-|\))',
             content
         )
 
-        # Captures Group 1: List ID, Group 2: Raw bolded string (e.g., "Level 36 Zubat ♀")
+        # Captures Group 1: List ID, Group 2: Raw bolded content inside **...**
         list_matches = re.findall(r'`(\d+)`[^\n]*?\*\*(.*?)\*\*', content)
 
         if pokedex_matches:
@@ -60,13 +60,20 @@ class PokemonExtractor(commands.Cog):
             names = []
 
             for pokemon_id, raw_name in list_matches:
-                # Strip leading "Level 36", "✨", and spaces
-                clean_name = re.sub(r'^(?:✨|Level\s+\d+|\s)+', '', raw_name, flags=re.IGNORECASE)
-                # Strip trailing gender symbols ♂/♀ and trailing spaces
-                clean_name = re.sub(r'[\s♂♀]+$', '', clean_name)
+                # 1. Strip Discord custom emojis (<:emoji:123>) and shortcodes (:_:, :male:, :female:)
+                clean = re.sub(r'<a?:[^\n:]+:\d+>|:[a-zA-Z0-9_]+:', '', raw_name)
 
-                pokemon_ids.append(pokemon_id)
-                names.append(clean_name.strip())
+                # 2. Strip "Level XX", "Lvl XX", shiny stars (✨), and leading whitespace
+                clean = re.sub(r'^(?:✨|\s|Level\s+\d+|Lvl\s+\d+)+', '', clean, flags=re.IGNORECASE)
+
+                # 3. Strip trailing gender symbols (♂/♀) and trailing whitespace
+                clean = re.sub(r'[\s♂♀]+$', '', clean)
+
+                clean_name = clean.strip()
+
+                if clean_name:
+                    pokemon_ids.append(pokemon_id)
+                    names.append(clean_name)
 
             ids_str = " ".join(pokemon_ids)
             names_str = ", ".join(names)
