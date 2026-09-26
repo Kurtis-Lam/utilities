@@ -522,6 +522,7 @@ class AIChat(commands.Cog):
             await ctx.send("Memory is already empty.")
 
     @commands.command(name="ai-info", help="Displays model status, daily usage limits, and account balances for configured keys.")
+    @commands.has_permissions(administrator=True)
     async def ai_info(self, ctx: commands.Context):
         """Fetches OpenRouter key metadata, free daily limits, balance, and usage for all keys."""
         timeout = aiohttp.ClientTimeout(total=15)
@@ -551,13 +552,13 @@ class AIChat(commands.Cog):
                         res = await resp.json()
                         data = res.get("data", {})
 
-                        label = data.get("label", "Unnamed Key") 
-                        usage_usd = data.get("usage", 0.0) 
-                        is_free_tier = data.get("is_free_tier", True) 
-                        rate_limit = data.get("rate_limit", {}) 
+                        label = data.get("label", "Unnamed Key")
+                        usage_usd = data.get("usage", 0.0)
+                        is_free_tier = data.get("is_free_tier", True)
+                        rate_limit = data.get("rate_limit", {})
 
-                        if rate_limit and rate_limit.get("requests") and rate_limit.get("interval"): 
-                            daily_free_usage = f"{rate_limit.get('requests')} req / {rate_limit.get('interval')}" 
+                        if rate_limit and rate_limit.get("requests") and rate_limit.get("interval"):
+                            daily_free_usage = f"{rate_limit.get('requests')} req / {rate_limit.get('interval')}"
                         else:
                             daily_free_usage = "50 req/day" if is_free_tier else "1,000 req/day"
 
@@ -576,6 +577,11 @@ class AIChat(commands.Cog):
                     embed.add_field(name=role_label, value=f"❌ Network Error: `{e}`", inline=False)
 
         await ctx.send(embed=embed)
+
+    @ai_info.error
+    async def ai_info_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send("❌ You must have Administrator permissions to use this command.")
 
     # -- main listener -------------------------------------------------------
 
