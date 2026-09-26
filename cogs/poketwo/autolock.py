@@ -266,7 +266,6 @@ class AutoLock(commands.Cog):
             description = (
                 f"Only {mentions} can unlock this channel "
                 f"(`{'/'.join(SHORT_NAMES.get(c, c) for c in restrict_cats)}` lock). "
-                "Server admins can also unlock."
             )
         else:
             description = "Use `.u` or the button to unlock!"
