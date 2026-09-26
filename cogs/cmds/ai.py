@@ -47,14 +47,14 @@ class AIChat(commands.Cog):
         self.openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
         self.key_info_url = "https://openrouter.ai/api/v1/key"
         self.api_key = OPENROUTER_API_KEY
-        self.current_model = "meta-llama/llama-3.3-70b-instruct"
+        self.current_model = "deepseek/deepseek-v4-flash-vision-exp"
         # Memory store: channel_id -> list of message dicts
         self.history = defaultdict(list)
         self.max_history = 10  # Store up to 10 back-and-forth messages
 
     def generate_bot_capabilities_prompt(self) -> str:
         """Inspects all cogs and commands dynamically to build system context."""
-        capabilities = ["Here is a summary of commands and capabilities you can explain to users:\n"]
+        capabilities = ["Here is a summary of available server commands you can explain to users:\n"]
 
         for cog_name, cog in self.bot.cogs.items():
             capabilities.append(f"### Cog: {cog_name}")
@@ -138,7 +138,7 @@ class AIChat(commands.Cog):
         if message.author.bot or message.channel.id != AI_CHANNEL_ID:
             return
 
-        # Ignore messages starting with the command prefix so commands like !reset and !ai-info process normally
+        # Ignore messages starting with the command prefix so commands process normally
         if message.content.startswith(BOT_PREFIX):
             return
 
@@ -146,8 +146,13 @@ class AIChat(commands.Cog):
             capabilities_info = self.generate_bot_capabilities_prompt()
 
             system_instruction = (
-                "You are an assistant bot in a Discord server. "
-                "Answer user questions accurately and help them navigate server features.\n\n"
+                "You are Utilities, a dedicated Discord bot for server management and Pokétwo assistance. "
+                "Your main capabilities include:\n"
+                "- Server moderation and utility operations.\n"
+                "- Pokétwo assistance: automatically identifying and naming spawned Pokémon.\n"
+                "- Supporting shiny hunting, Pokémon collection tracking, and rare/regional spawn pings.\n\n"
+                "Answer user questions accurately, maintain a friendly and helpful tone, and guide users "
+                "on how to navigate server features and bot commands.\n\n"
                 f"{capabilities_info}"
             )
 
@@ -165,7 +170,7 @@ class AIChat(commands.Cog):
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://your-site-or-repo.com",
-                "X-Title": "Discord Bot Assistant"
+                "X-Title": "Utilities Discord Bot Assistant"
             }
 
             payload = {
