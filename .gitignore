@@ -6,7 +6,7 @@ __pycache__/
 
 assets/
 train/
-models/
+models/pokemon_db.npz
 
 firebase_key.json
 config.json
