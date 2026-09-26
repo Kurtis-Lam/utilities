@@ -34,13 +34,44 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
 PROJECT_ROOT = os.path.dirname(CONFIG_PATH)
 
 BOT_PREFIX = config.get("PREFIX", "!")
-AI_CHANNEL_ID = int(config["AI_CHATBOT_CHANNELID"])
-OPENROUTER_API_KEY = config["AI_CHATBOT"]
+AI_CHATBOT_CHANNELID = int(config["AI_CHATBOT_CHANNELID"])
 OWNER_IDS = set(config.get("OWNER_IDS", []))
 
-MAX_TOOL_ITERATIONS = 15     # was 5 — too low for multi-step file edits
-TOOL_CALL_MAX_TOKENS = 4096  # was 1500 — full source files need more room
-CHAT_MAX_TOKENS = 1500
+# --- API keys ----------------------------------------------------------
+# New format: "AI_CHATBOT_KEYS": ["primary-key", "worker-key-1", "worker-key-2", ...]
+# The FIRST key is always the primary key used for the main conversation.
+# Any additional keys are a pool used only for parallel, read-only
+# "delegate_subtasks" investigations (see get_owner_tools below), so they
+# get their own OpenRouter rate-limit bucket instead of queueing behind the
+# primary key.
+#
+# Old format ("AI_CHATBOT": "single-key-string") still works and is treated
+# as a single-key list, so existing configs don't break.
+_raw_keys = config.get("AI_CHATBOT_KEYS")
+if not _raw_keys:
+    _legacy_key = config.get("AI_CHATBOT")
+    if not _legacy_key:
+        raise ValueError(
+            "config.json needs either 'AI_CHATBOT_KEYS' (a list of OpenRouter API keys, "
+            "first one primary) or the legacy 'AI_CHATBOT' (a single key string)."
+        )
+    _raw_keys = [_legacy_key]
+if isinstance(_raw_keys, str):
+    _raw_keys = [_raw_keys]
+
+OPENROUTER_API_KEYS = [k for k in _raw_keys if k]
+if not OPENROUTER_API_KEYS:
+    raise ValueError("No usable OpenRouter API keys found in config.json.")
+
+MAX_TOOL_ITERATIONS = 30       # was 5 — too low for multi-step file edits
+TOOL_CALL_MAX_TOKENS = 500    # was 1500 — reasoning models can burn the whole budget before acting
+CHAT_MAX_TOKENS = 500
+REQUEST_TIMEOUT_SECONDS = 180  # was 90 — large refactors / slower free models need more headroom
+
+# Sub-agents spawned by delegate_subtasks get a smaller, separate budget
+# since each one is meant to answer one narrow, self-contained question.
+SUBTASK_MAX_ITERATIONS = 6
+SUBTASK_MAX_TOKENS = 500
 
 
 def split_message(text: str, limit: int = 2000) -> list[str]:
@@ -70,7 +101,12 @@ class AIChat(commands.Cog):
         self.bot = bot
         self.openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
         self.key_info_url = "https://openrouter.ai/api/v1/key"
-        self.api_key = OPENROUTER_API_KEY
+
+        self.api_keys = OPENROUTER_API_KEYS
+        self.primary_key = self.api_keys[0]
+        self.worker_keys = self.api_keys[1:]  # possibly empty
+        self._worker_key_cycle_idx = 0
+
         self.current_model = "deepseek/deepseek-v4-flash-vision-exp"
         # Memory store: channel_id -> list of message dicts
         self.history = defaultdict(list)
@@ -91,6 +127,55 @@ class AIChat(commands.Cog):
         root = os.path.abspath(PROJECT_ROOT)
         return abs_target == root or abs_target.startswith(root + os.sep)
 
+    # -- API key pool --------------------------------------------------------
+
+    def _next_worker_key(self) -> str:
+        """Round-robins across configured worker keys for parallel subtasks.
+        Falls back to the primary key if no extra keys were configured — the
+        feature still works, it just won't get true concurrency since every
+        subtask then shares one key's rate limit."""
+        pool = self.worker_keys or [self.primary_key]
+        key = pool[self._worker_key_cycle_idx % len(pool)]
+        self._worker_key_cycle_idx += 1
+        return key
+
+    # -- low-level OpenRouter call --------------------------------------------
+
+    async def _call_openrouter(
+        self, key: str, messages: list, tools: list | None, max_tokens: int
+    ) -> dict:
+        """Sends one chat-completions request and returns the parsed JSON.
+        Raises RuntimeError with a human-readable message on any failure
+        (non-200 status or timeout) so callers can just try/except this
+        instead of re-checking status codes everywhere."""
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://your-site-or-repo.com",
+            "X-Title": "Utilities Discord Bot Assistant",
+        }
+        payload = {
+            "model": self.current_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = tools
+
+        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(self.openrouter_url, headers=headers, json=payload) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        raise RuntimeError(f"OpenRouter error ({resp.status}): {error_text}")
+                    return await resp.json()
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"OpenRouter didn't respond within {REQUEST_TIMEOUT_SECONDS}s "
+                "(the model may be overloaded or slow right now — try again)."
+            ) from e
+
     # -- prompt / tool definitions ------------------------------------------
 
     def generate_bot_capabilities_prompt(self, is_owner: bool) -> str:
@@ -109,12 +194,19 @@ class AIChat(commands.Cog):
             capabilities.append("")
 
         if is_owner:
+            worker_note = (
+                f"{len(self.worker_keys)} worker key(s) configured"
+                if self.worker_keys
+                else "no extra worker keys configured — delegate_subtasks will still work but "
+                "will not run truly in parallel"
+            )
             capabilities.append(
                 "DEVELOPER / OWNER MODE ENABLED:\n"
                 "The user messaging you is the owner/developer of this bot. "
                 "You have access to tools (`list_files`, `read_file`, `write_file`, `delete_file`, "
-                "`load_extension`, `unload_extension`, `reload_extension`, `restart_bot`) which let you "
-                "inspect, modify, and reload/restart your own code when requested.\n\n"
+                "`load_extension`, `unload_extension`, `reload_extension`, `restart_bot`, "
+                "`delegate_subtasks`) which let you inspect, modify, and reload/restart your own "
+                f"code when requested. ({worker_note}.)\n\n"
                 "Guidelines for self-editing tasks:\n"
                 "- All paths are relative to the project root (where config.json lives), regardless of "
                 "the process's current working directory.\n"
@@ -129,6 +221,14 @@ class AIChat(commands.Cog):
                 "to files that aren't cogs, like config loading or the main entrypoint) — prefer "
                 "reload_extension/unload_extension/load_extension for cog changes since they apply "
                 "instantly without dropping the connection.\n"
+                "- When a task involves inspecting or reasoning about SEVERAL independent files before "
+                "you write anything (e.g. reading multiple cogs to plan a merge), use "
+                "`delegate_subtasks` to investigate them at the same time instead of one by one — it "
+                "runs each sub-question on its own API key. Each sub-agent can only `list_files`/"
+                "`read_file`; it can never write, delete, or reload anything. ALWAYS perform every "
+                "actual write_file/delete_file/reload_extension step yourself, one at a time, after "
+                "the subtasks report back — never in parallel — since concurrent writes/reloads can "
+                "corrupt files or leave the bot in a half-loaded state.\n"
                 "- After finishing file edits and reload/restart, always send the user a short plain "
                 "text summary of what you did."
             )
@@ -248,8 +348,60 @@ class AIChat(commands.Cog):
                     ),
                     "parameters": {"type": "object", "properties": {}}
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delegate_subtasks",
+                    "description": (
+                        "Runs one or more independent, READ-ONLY investigation subtasks in parallel, "
+                        "each on its own OpenRouter API key so they don't wait on each other or on the "
+                        "main conversation. Each subtask can only use list_files/read_file — it cannot "
+                        "write, delete, load, unload, reload, or restart anything. Use this to "
+                        "investigate several files/extensions at once before you plan or make changes "
+                        "(e.g. one subtask per file you need summarized). Do NOT use this for the "
+                        "actual write_file/delete_file/reload_extension steps — do those yourself, one "
+                        "at a time, after reading the subtasks' findings."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tasks": {
+                                "type": "array",
+                                "description": "The independent subtasks to run concurrently.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "Short label for this subtask, used in the result."
+                                        },
+                                        "instructions": {
+                                            "type": "string",
+                                            "description": (
+                                                "Self-contained instructions for this one subtask, e.g. "
+                                                "'Read cogs/poketwo-management/autolockset.py and summarize "
+                                                "its commands, config keys, and structure.'"
+                                            )
+                                        }
+                                    },
+                                    "required": ["id", "instructions"]
+                                }
+                            }
+                        },
+                        "required": ["tasks"]
+                    }
+                }
             }
         ]
+
+    def get_worker_tools(self) -> list[dict]:
+        """Read-only subset of the owner tools, given only to subtasks spawned
+        by delegate_subtasks. Keeping writes/deletes/reloads out of their
+        hands means concurrent subtasks can never race on mutating the
+        filesystem or live bot state."""
+        read_only_names = {"list_files", "read_file"}
+        return [t for t in self.get_owner_tools() if t["function"]["name"] in read_only_names]
 
     # -- tool execution -------------------------------------------------------
 
@@ -345,14 +497,93 @@ class AIChat(commands.Cog):
             asyncio.create_task(_delayed_restart())
             return "Restart scheduled in ~2 seconds. The process will relaunch itself."
 
+        elif fn_name == "delegate_subtasks":
+            tasks = args.get("tasks", [])
+            if not isinstance(tasks, list) or not tasks:
+                return "Error: 'tasks' must be a non-empty list of {id, instructions} objects."
+
+            valid_tasks = [t for t in tasks if isinstance(t, dict) and t.get("instructions")]
+            if not valid_tasks:
+                return "Error: no valid tasks with non-empty 'instructions' were provided."
+
+            coros = [
+                self._run_subtask(
+                    str(t.get("id", f"task{i}")), t["instructions"], self._next_worker_key()
+                )
+                for i, t in enumerate(valid_tasks)
+            ]
+            results = await asyncio.gather(*coros)
+
+            combined = "\n\n".join(
+                f"### Subtask '{t.get('id', f'task{i}')}' result:\n{res}"
+                for i, (t, res) in enumerate(zip(valid_tasks, results))
+            )
+
+            if not self.worker_keys:
+                combined += (
+                    "\n\n(Note: only one API key is configured, so all subtasks shared the same "
+                    "key/rate limit rather than running with true independent concurrency. Add more "
+                    "keys to 'AI_CHATBOT_KEYS' in config.json for real parallelism.)"
+                )
+            return combined
+
         return f"Unknown tool function: {fn_name}"
+
+    async def _run_subtask(self, task_id: str, instructions: str, key: str) -> str:
+        """Runs one delegated, read-only investigation subtask to completion
+        (or until it hits its own small iteration cap) using its own
+        dedicated key, so it doesn't compete with the primary conversation
+        loop or other subtasks for the same rate limit."""
+        sub_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a focused sub-agent helping a primary assistant investigate part of a "
+                    "larger task. You may only use list_files and read_file — you cannot write, "
+                    "delete, load, unload, reload, or restart anything. Investigate exactly what "
+                    "you're asked, then reply with a plain-text summary of your findings. Do not ask "
+                    "questions back; if something is missing or unclear, just note that in your summary."
+                ),
+            },
+            {"role": "user", "content": instructions},
+        ]
+
+        for _ in range(SUBTASK_MAX_ITERATIONS):
+            try:
+                data = await self._call_openrouter(
+                    key, sub_messages, self.get_worker_tools(), SUBTASK_MAX_TOKENS
+                )
+            except RuntimeError as e:
+                return f"[subtask failed: {e}]"
+
+            if "choices" not in data or not data["choices"]:
+                return "[subtask failed: empty response from OpenRouter]"
+
+            choice_message = data["choices"][0]["message"]
+            tool_calls = choice_message.get("tool_calls")
+
+            if tool_calls:
+                sub_messages.append(choice_message)
+                for tool_call in tool_calls:
+                    result = await self.execute_tool_call(tool_call)
+                    sub_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": result,
+                    })
+                continue
+
+            content = (choice_message.get("content") or "").strip()
+            return content or "[subtask returned no text]"
+
+        return f"[subtask hit its iteration limit ({SUBTASK_MAX_ITERATIONS}) without finishing]"
 
     # -- commands -------------------------------------------------------
 
     @commands.command(name="reset", help="Clears the AI chatbot memory for this channel.")
     async def reset_memory(self, ctx: commands.Context):
         """Resets stored conversation history for the channel."""
-        if ctx.channel.id != AI_CHANNEL_ID:
+        if ctx.channel.id != AI_CHATBOT_CHANNELID:
             await ctx.send("The AI Chatbot is not active in this channel.")
             return
 
@@ -364,14 +595,31 @@ class AIChat(commands.Cog):
 
     @commands.command(name="ai-info", help="Displays current active AI model and API key usage details.")
     async def ai_info(self, ctx: commands.Context):
-        """Fetches AI model information and spending/usage stats from OpenRouter."""
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        """Fetches AI model information and spending/usage stats for every configured key."""
         timeout = aiohttp.ClientTimeout(total=15)
 
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(self.key_info_url, headers=headers) as resp:
-                    if resp.status == 200:
+        embed = discord.Embed(title="🤖 AI Chatbot Information & Usage", color=discord.Color.blue())
+        embed.add_field(name="Active Model", value=f"`{self.current_model}`", inline=False)
+        embed.add_field(
+            name="Configured Keys",
+            value=f"`{len(self.api_keys)}` total — `1` primary + `{len(self.worker_keys)}` worker",
+            inline=False,
+        )
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for idx, key in enumerate(self.api_keys):
+                role_label = "Primary" if idx == 0 else f"Worker {idx}"
+                headers = {"Authorization": f"Bearer {key}"}
+                try:
+                    async with session.get(self.key_info_url, headers=headers) as resp:
+                        if resp.status != 200:
+                            error_text = await resp.text()
+                            print(f"OpenRouter Usage Error ({resp.status}) for {role_label}: {error_text}")
+                            embed.add_field(
+                                name=f"{role_label} Key", value=f"❌ Failed (status {resp.status})", inline=False
+                            )
+                            continue
+
                         res = await resp.json()
                         data = res.get("data", {})
 
@@ -379,41 +627,29 @@ class AIChat(commands.Cog):
                         usage_usd = data.get("usage", 0.0)
                         limit = data.get("limit")
                         limit_remaining = data.get("limit_remaining")
-                        limit_reset = data.get("limit_reset")
-                        is_free_tier = data.get("is_free_tier", False)
-
                         limit_str = f"${limit:.4f}" if limit is not None else "Unlimited"
                         remaining_str = f"${limit_remaining:.4f}" if limit_remaining is not None else "Unlimited"
-                        reset_str = limit_reset.title() if limit_reset else "No automatic reset"
 
-                        embed = discord.Embed(
-                            title="🤖 AI Chatbot Information & Usage",
-                            color=discord.Color.blue()
+                        embed.add_field(
+                            name=f"{role_label} Key (`{label}`)",
+                            value=(
+                                f"Usage: `${usage_usd:.4f}` | Limit: `{limit_str}` | "
+                                f"Remaining: `{remaining_str}`"
+                            ),
+                            inline=False,
                         )
-                        embed.add_field(name="Active Model", value=f"`{self.current_model}`", inline=False)
-                        embed.add_field(name="Key Label", value=f"`{label}`", inline=False)
-                        embed.add_field(name="Total Usage", value=f"`${usage_usd:.4f}` USD", inline=True)
-                        embed.add_field(name="Credit Limit", value=f"`{limit_str}`", inline=True)
-                        embed.add_field(name="Remaining Budget", value=f"`{remaining_str}`", inline=True)
-                        embed.add_field(name="Limit Reset Policy", value=f"`{reset_str}`", inline=True)
-                        embed.add_field(name="Free Tier Account", value=f"`{is_free_tier}`", inline=True)
+                except Exception as e:
+                    print(f"Usage Exception for {role_label}: {e}")
+                    embed.add_field(name=f"{role_label} Key", value="❌ Network error", inline=False)
 
-                        await ctx.send(embed=embed)
-                    else:
-                        error_text = await resp.text()
-                        print(f"OpenRouter Usage Error ({resp.status}): {error_text}")
-                        await ctx.send(f"❌ Failed to retrieve API usage details (Status {resp.status}).")
-
-        except Exception as e:
-            print(f"Usage Exception: {e}")
-            await ctx.send("❌ Encountered a network error while fetching AI details.")
+        await ctx.send(embed=embed)
 
     # -- main listener -------------------------------------------------------
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         # Ignore messages from bots or outside the configured AI channel
-        if message.author.bot or message.channel.id != AI_CHANNEL_ID:
+        if message.author.bot or message.channel.id != AI_CHATBOT_CHANNELID:
             return
 
         # Ignore messages starting with the command prefix so commands process normally
@@ -482,91 +718,86 @@ class AIChat(commands.Cog):
             # Keep recent history within limits
             self.history[channel_id] = self.history[channel_id][-self.max_history:]
 
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://your-site-or-repo.com",
-                "X-Title": "Utilities Discord Bot Assistant"
-            }
-
-            timeout = aiohttp.ClientTimeout(total=90)
-
             current_payload_messages = [{"role": "system", "content": system_instruction}] + self.history[channel_id]
 
             reply_sent = False
 
             for iteration in range(MAX_TOOL_ITERATIONS):
-                payload = {
-                    "model": self.current_model,
-                    "messages": current_payload_messages,
-                    "max_tokens": TOOL_CALL_MAX_TOKENS if is_owner else CHAT_MAX_TOKENS,
-                }
+                tools_for_call = self.get_owner_tools() if is_owner else None
+                max_tokens_for_call = TOOL_CALL_MAX_TOKENS if is_owner else CHAT_MAX_TOKENS
 
-                if is_owner:
-                    payload["tools"] = self.get_owner_tools()
+                try:
+                    data = await self._call_openrouter(
+                        self.primary_key, current_payload_messages, tools_for_call, max_tokens_for_call
+                    )
+                except RuntimeError as e:
+                    print(f"OpenRouter request failed: {e}")
+                    await message.reply(f"❌ {e}")
+                    reply_sent = True
+                    break
 
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(self.openrouter_url, headers=headers, json=payload) as resp:
-                        if resp.status != 200:
-                            error_text = await resp.text()
-                            print(f"OpenRouter Error ({resp.status}): {error_text}")
-                            await message.reply("Sorry, I had trouble generating a response.")
-                            reply_sent = True
-                            break
+                if "choices" not in data or not data["choices"]:
+                    print(f"OpenRouter returned no choices: {data}")
+                    await message.reply("Sorry, I got an empty response from the AI backend.")
+                    reply_sent = True
+                    break
 
-                        data = await resp.json()
+                choice = data["choices"][0]
+                choice_message = choice["message"]
+                finish_reason = choice.get("finish_reason")
 
-                        if "choices" not in data or not data["choices"]:
-                            print(f"OpenRouter returned no choices: {data}")
-                            await message.reply("Sorry, I got an empty response from the AI backend.")
-                            reply_sent = True
-                            break
+                # A response can get cut off two different ways: mid tool-call
+                # (arguments truncated), or the model spends its whole budget
+                # on internal reasoning and never emits a tool call OR text.
+                # Both are finish_reason == "length"; handle both explicitly
+                # instead of letting the second case fall through to the
+                # generic "no text summary" message below.
+                if finish_reason == "length":
+                    if choice_message.get("tool_calls"):
+                        await message.reply(
+                            "⚠️ The AI's response was cut off before it finished (likely writing a "
+                            f"large file). Try again with a narrower request, or raise "
+                            f"TOOL_CALL_MAX_TOKENS (currently {TOOL_CALL_MAX_TOKENS})."
+                        )
+                    else:
+                        await message.reply(
+                            "⚠️ The AI ran out of tokens before it could act on your request — it "
+                            f"likely spent its whole budget (currently {max_tokens_for_call}) on "
+                            "internal reasoning before making a tool call or replying. Try raising "
+                            "TOOL_CALL_MAX_TOKENS, or ask it to break the task into smaller steps."
+                        )
+                    reply_sent = True
+                    break
 
-                        choice = data["choices"][0]
-                        choice_message = choice["message"]
-                        finish_reason = choice.get("finish_reason")
+                tool_calls = choice_message.get("tool_calls")
+                if tool_calls and is_owner:
+                    current_payload_messages.append(choice_message)
+                    for tool_call in tool_calls:
+                        tool_result = await self.execute_tool_call(tool_call)
+                        current_payload_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": tool_result
+                        })
+                    # Loop back to let model process tool outputs and provide final response
+                    continue
 
-                        # If the model got cut off mid tool-call (arguments
-                        # truncated), tell the user instead of silently
-                        # continuing on broken JSON.
-                        if finish_reason == "length" and choice_message.get("tool_calls"):
-                            await message.reply(
-                                "⚠️ The AI's response was cut off before it finished (likely writing a "
-                                f"large file). Try again with a narrower request, or raise "
-                                f"TOOL_CALL_MAX_TOKENS (currently {TOOL_CALL_MAX_TOKENS})."
-                            )
-                            reply_sent = True
-                            break
+                # Standard text response (Safe handling for null/None content)
+                reply_text = choice_message.get("content") or ""
+                if reply_text.strip():
+                    self.history[channel_id].append({"role": "assistant", "content": reply_text})
 
-                        tool_calls = choice_message.get("tool_calls")
-                        if tool_calls and is_owner:
-                            current_payload_messages.append(choice_message)
-                            for tool_call in tool_calls:
-                                tool_result = await self.execute_tool_call(tool_call)
-                                current_payload_messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tool_call["id"],
-                                    "content": tool_result
-                                })
-                            # Loop back to let model process tool outputs and provide final response
-                            continue
-
-                        # Standard text response (Safe handling for null/None content)
-                        reply_text = choice_message.get("content") or ""
-                        if reply_text.strip():
-                            self.history[channel_id].append({"role": "assistant", "content": reply_text})
-
-                            chunks = split_message(reply_text)
-                            for i, chunk in enumerate(chunks):
-                                if i == 0:
-                                    await message.reply(chunk)
-                                else:
-                                    await message.channel.send(chunk)
+                    chunks = split_message(reply_text)
+                    for i, chunk in enumerate(chunks):
+                        if i == 0:
+                            await message.reply(chunk)
                         else:
-                            await message.reply("⚠️ Action completed, but no text summary was generated by the AI.")
+                            await message.channel.send(chunk)
+                else:
+                    await message.reply("⚠️ Action completed, but no text summary was generated by the AI.")
 
-                        reply_sent = True
-                        break
+                reply_sent = True
+                break
             else:
                 # The for-loop exhausted MAX_TOOL_ITERATIONS without ever
                 # breaking (i.e. the model kept calling tools). Previously
