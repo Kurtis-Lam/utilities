@@ -107,7 +107,7 @@ class AIChat(commands.Cog):
         self.worker_keys = self.api_keys[1:]  # possibly empty
         self._worker_key_cycle_idx = 0
 
-        self.current_model = "deepseek/deepseek-v4-flash-vision-exp"
+        self.current_model = "openrouter/free"
         # Memory store: channel_id -> list of message dicts
         self.history = defaultdict(list)
         self.max_history = 10  # Store up to 10 back-and-forth messages
@@ -229,8 +229,8 @@ class AIChat(commands.Cog):
                 "actual write_file/delete_file/reload_extension step yourself, one at a time, after "
                 "the subtasks report back — never in parallel — since concurrent writes/reloads can "
                 "corrupt files or leave the bot in a half-loaded state.\n"
-                "- After finishing file edits and reload/restart, always send the user a short plain "
-                "text summary of what you did."
+                "- MANDATORY: After completing all file edits, deletions, or extension reloads, you MUST "
+                "send the user a plain text summary detailing what changes you made."
             )
 
         return "\n".join(capabilities)
@@ -573,7 +573,7 @@ class AIChat(commands.Cog):
                     })
                 continue
 
-            content = (choice_message.get("content") or "").strip()
+            content = (choice_message.get("content") or choice_message.get("reasoning") or "").strip()
             return content or "[subtask returned no text]"
 
         return f"[subtask hit its iteration limit ({SUBTASK_MAX_ITERATIONS}) without finishing]"
@@ -782,8 +782,35 @@ class AIChat(commands.Cog):
                     # Loop back to let model process tool outputs and provide final response
                     continue
 
-                # Standard text response (Safe handling for null/None content)
-                reply_text = choice_message.get("content") or ""
+                # Standard text response (Safe handling for null/None content & reasoning/thinking keys)
+                reply_text = (
+                    choice_message.get("content")
+                    or choice_message.get("reasoning")
+                    or choice_message.get("thinking")
+                    or ""
+                )
+
+                # Fallback: If tools were executed but the final text is empty, explicitly request a summary
+                if not reply_text.strip() and current_payload_messages and current_payload_messages[-1].get("role") == "tool":
+                    current_payload_messages.append({
+                        "role": "user",
+                        "content": "All tool actions are completed. Please provide a brief plain text summary of what changes were made."
+                    })
+                    try:
+                        summary_data = await self._call_openrouter(
+                            self.primary_key, current_payload_messages, None, CHAT_MAX_TOKENS
+                        )
+                        if "choices" in summary_data and summary_data["choices"]:
+                            summary_msg = summary_data["choices"][0]["message"]
+                            reply_text = (
+                                summary_msg.get("content")
+                                or summary_msg.get("reasoning")
+                                or summary_msg.get("thinking")
+                                or ""
+                            )
+                    except Exception as e:
+                        print(f"Failed to retrieve fallback summary: {e}")
+
                 if reply_text.strip():
                     self.history[channel_id].append({"role": "assistant", "content": reply_text})
 
