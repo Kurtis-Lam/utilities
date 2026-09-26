@@ -19,6 +19,8 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
 BOT_PREFIX = config.get("PREFIX", "!")
 AI_CHANNEL_ID = int(config["AI_CHATBOT_CHANNELID"])
 OPENROUTER_API_KEY = config["AI_CHATBOT"]
+OWNER_IDS = set(config.get("OWNER_IDS", []))  # Optional list of user IDs in config.json
+
 
 def split_message(text: str, limit: int = 2000) -> list[str]:
     """Splits a long message string into chunks under Discord's character limit."""
@@ -41,6 +43,7 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
 
     return chunks
 
+
 class AIChat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -52,7 +55,13 @@ class AIChat(commands.Cog):
         self.history = defaultdict(list)
         self.max_history = 10  # Store up to 10 back-and-forth messages
 
-    def generate_bot_capabilities_prompt(self) -> str:
+    def _is_safe_path(self, target_path: str) -> bool:
+        """Security check to ensure code modifications stay inside the project directory."""
+        root_dir = os.path.abspath(os.getcwd())
+        abs_target = os.path.abspath(target_path)
+        return abs_target.startswith(root_dir)
+
+    def generate_bot_capabilities_prompt(self, is_owner: bool) -> str:
         """Inspects all cogs and commands dynamically to build system context."""
         capabilities = ["Here is a summary of available server commands you can explain to users:\n"]
 
@@ -61,13 +70,133 @@ class AIChat(commands.Cog):
             for cmd in cog.get_commands():
                 if cmd.hidden:
                     continue
-                
+
                 desc = cmd.help or cmd.brief or "No description provided."
                 signature = f"{BOT_PREFIX}{cmd.name} {cmd.signature}".strip()
                 capabilities.append(f"- `{signature}`: {desc}")
             capabilities.append("")
 
+        if is_owner:
+            capabilities.append(
+                "DEVELOPER / OWNER MODE ENABLED:\n"
+                "The user messaging you is the owner/developer of this bot. "
+                "You have access to tools (`read_file`, `write_file`, `list_files`, `reload_extension`) "
+                "which allow you to inspect, modify, and reload your own code when requested."
+            )
+
         return "\n".join(capabilities)
+
+    def get_owner_tools(self) -> list[dict]:
+        """Tool definitions passed to OpenRouter for code self-editing."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "Lists files and subdirectories in the bot codebase.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Relative directory path (default is '.')."}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Reads the content of a file in the bot project directory.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string", "description": "Relative file path."}
+                        },
+                        "required": ["file_path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "Modifies or creates a source code file in the bot project.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string", "description": "Relative file path."},
+                            "content": {"type": "string", "description": "Full new code/content for the file."}
+                        },
+                        "required": ["file_path", "content"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "reload_extension",
+                    "description": "Reloads a bot cog/extension dynamically so changes take effect immediately.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "extension_name": {"type": "string", "description": "Cog module path (e.g. 'cogs.ai_chat')."}
+                        },
+                        "required": ["extension_name"]
+                    }
+                }
+            }
+        ]
+
+    async def execute_tool_call(self, tool_call: dict) -> str:
+        """Executes the tool call requested by OpenRouter and returns the result string."""
+        fn_name = tool_call["function"]["name"]
+        try:
+            args = json.loads(tool_call["function"].get("arguments", "{}"))
+        except json.JSONDecodeError:
+            return "Error: Invalid JSON arguments passed."
+
+        if fn_name == "list_files":
+            path = args.get("path", ".")
+            if not self._is_safe_path(path):
+                return "Error: Permission denied (Path outside working directory)."
+            try:
+                files = os.listdir(path)
+                return json.dumps(files, indent=2)
+            except Exception as e:
+                return f"Error listing directory: {e}"
+
+        elif fn_name == "read_file":
+            path = args.get("file_path", "")
+            if not self._is_safe_path(path):
+                return "Error: Permission denied (Path outside working directory)."
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception as e:
+                return f"Error reading file '{path}': {e}"
+
+        elif fn_name == "write_file":
+            path = args.get("file_path", "")
+            content = args.get("content", "")
+            if not self._is_safe_path(path):
+                return "Error: Permission denied (Path outside working directory)."
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return f"Successfully updated/written file: {path}"
+            except Exception as e:
+                return f"Error writing file '{path}': {e}"
+
+        elif fn_name == "reload_extension":
+            ext = args.get("extension_name", "")
+            try:
+                await self.bot.reload_extension(ext)
+                return f"Successfully reloaded extension '{ext}'!"
+            except Exception as e:
+                return f"Error reloading extension '{ext}': {e}"
+
+        return f"Unknown tool function: {fn_name}"
 
     @commands.command(name="reset", help="Clears the AI chatbot memory for this channel.")
     async def reset_memory(self, ctx: commands.Context):
@@ -85,10 +214,7 @@ class AIChat(commands.Cog):
     @commands.command(name="ai-info", help="Displays current active AI model and API key usage details.")
     async def ai_info(self, ctx: commands.Context):
         """Fetches AI model information and spending/usage stats from OpenRouter."""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}"
-        }
-
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         timeout = aiohttp.ClientTimeout(total=15)
 
         try:
@@ -105,7 +231,6 @@ class AIChat(commands.Cog):
                         limit_reset = data.get("limit_reset")
                         is_free_tier = data.get("is_free_tier", False)
 
-                        # Parse limits formatting
                         limit_str = f"${limit:.4f}" if limit is not None else "Unlimited"
                         remaining_str = f"${limit_remaining:.4f}" if limit_remaining is not None else "Unlimited"
                         reset_str = limit_reset.title() if limit_reset else "No automatic reset"
@@ -143,7 +268,10 @@ class AIChat(commands.Cog):
             return
 
         async with message.channel.typing():
-            capabilities_info = self.generate_bot_capabilities_prompt()
+            # Check if sender is bot owner
+            is_owner = (await self.bot.is_owner(message.author)) or (message.author.id in OWNER_IDS)
+
+            capabilities_info = self.generate_bot_capabilities_prompt(is_owner)
 
             system_instruction = (
                 "You are Utilities, a dedicated Discord bot for server management and Pokétwo assistance. "
@@ -156,15 +284,30 @@ class AIChat(commands.Cog):
                 f"{capabilities_info}"
             )
 
-            # Append new user message to local history
+            # Build user content payload (Handling Text + Images)
+            image_urls = [
+                att.url for att in message.attachments
+                if (att.content_type and att.content_type.startswith("image/"))
+                or att.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+            ]
+
+            if image_urls:
+                user_content = []
+                text_prompt = message.content.strip() if message.content else "Please look at the attached image(s)."
+                user_content.append({"type": "text", "text": text_prompt})
+
+                for url in image_urls:
+                    user_content.append({"type": "image_url", "image_url": {"url": url}})
+
+                user_message_dict = {"role": "user", "content": user_content}
+            else:
+                user_message_dict = {"role": "user", "content": message.content}
+
             channel_id = message.channel.id
-            self.history[channel_id].append({"role": "user", "content": message.content})
+            self.history[channel_id].append(user_message_dict)
 
-            # Keep only the last N messages to fit within token limits
+            # Keep recent history within limits
             self.history[channel_id] = self.history[channel_id][-self.max_history:]
-
-            # Combine system instruction with conversation history
-            payload_messages = [{"role": "system", "content": system_instruction}] + self.history[channel_id]
 
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
@@ -173,37 +316,65 @@ class AIChat(commands.Cog):
                 "X-Title": "Utilities Discord Bot Assistant"
             }
 
-            payload = {
-                "model": self.current_model,
-                "messages": payload_messages
-            }
+            timeout = aiohttp.ClientTimeout(total=90)
 
-            timeout = aiohttp.ClientTimeout(total=60)
+            # Function calling loop (allows model to call tools up to 5 iterations)
+            current_payload_messages = [{"role": "system", "content": system_instruction}] + self.history[channel_id]
 
-            try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(self.openrouter_url, headers=headers, json=payload) as resp:
-                        if resp.status == 200:
+            for _ in range(5):
+                payload = {
+                    "model": self.current_model,
+                    "messages": current_payload_messages,
+                    "max_tokens": 1500
+                }
+
+                if is_owner:
+                    payload["tools"] = self.get_owner_tools()
+
+                try:
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.post(self.openrouter_url, headers=headers, json=payload) as resp:
+                            if resp.status != 200:
+                                error_text = await resp.text()
+                                print(f"OpenRouter Error ({resp.status}): {error_text}")
+                                await message.reply("Sorry, I had trouble generating a response.")
+                                return
+
                             data = await resp.json()
-                            reply_text = data['choices'][0]['message']['content']
-                            
-                            # Append assistant response to history
-                            self.history[channel_id].append({"role": "assistant", "content": reply_text})
+                            choice_message = data['choices'][0]['message']
 
-                            chunks = split_message(reply_text)
-                            for i, chunk in enumerate(chunks):
-                                if i == 0:
-                                    await message.reply(chunk)
-                                else:
-                                    await message.channel.send(chunk)
-                        else:
-                            error_text = await resp.text()
-                            print(f"OpenRouter Error ({resp.status}): {error_text}")
-                            await message.reply("Sorry, I had trouble generating a response.")
+                            # Check if the AI wants to execute code-editing tools
+                            tool_calls = choice_message.get("tool_calls")
+                            if tool_calls and is_owner:
+                                current_payload_messages.append(choice_message)
+                                for tool_call in tool_calls:
+                                    tool_result = await self.execute_tool_call(tool_call)
+                                    current_payload_messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call["id"],
+                                        "content": tool_result
+                                    })
+                                # Loop back to let model process tool outputs and provide final response
+                                continue
 
-            except Exception as e:
-                await message.reply("Sorry, I encountered a network issue.")
-                print(f"Request Exception: {e}")
+                            # Standard text response
+                            reply_text = choice_message.get('content', '')
+                            if reply_text:
+                                self.history[channel_id].append({"role": "assistant", "content": reply_text})
+
+                                chunks = split_message(reply_text)
+                                for i, chunk in enumerate(chunks):
+                                    if i == 0:
+                                        await message.reply(chunk)
+                                    else:
+                                        await message.channel.send(chunk)
+                            break
+
+                except Exception as e:
+                    await message.reply("Sorry, I encountered a network issue.")
+                    print(f"Request Exception: {e}")
+                    break
+
 
 async def setup(bot):
     await bot.add_cog(AIChat(bot))
