@@ -551,13 +551,13 @@ class AIChat(commands.Cog):
                         res = await resp.json()
                         data = res.get("data", {})
 
-                        label = data.get("label", "Unnamed Key")[cite: 1]
-                        usage_usd = data.get("usage", 0.0)[cite: 1]
-                        is_free_tier = data.get("is_free_tier", True)[cite: 1]
-                        rate_limit = data.get("rate_limit", {})[cite: 1]
+                        label = data.get("label", "Unnamed Key") 
+                        usage_usd = data.get("usage", 0.0) 
+                        is_free_tier = data.get("is_free_tier", True) 
+                        rate_limit = data.get("rate_limit", {}) 
 
-                        if rate_limit and rate_limit.get("requests") and rate_limit.get("interval"):[cite: 1]
-                            daily_free_usage = f"{rate_limit.get('requests')} req / {rate_limit.get('interval')}"[cite: 1]
+                        if rate_limit and rate_limit.get("requests") and rate_limit.get("interval"): 
+                            daily_free_usage = f"{rate_limit.get('requests')} req / {rate_limit.get('interval')}" 
                         else:
                             daily_free_usage = "50 req/day" if is_free_tier else "1,000 req/day"
 
