@@ -4,6 +4,7 @@ import os
 import sys
 import traceback
 from collections import defaultdict
+from datetime import datetime, timezone
 
 import aiohttp
 import discord
@@ -95,6 +96,22 @@ class AIChat(commands.Cog):
         self.max_history = 10
         self._channel_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+        # Usage tracking per key
+        self.key_usage_today = defaultdict(int)
+        self.last_usage_reset_date = datetime.now(timezone.utc).date()
+
+    def _check_daily_reset(self):
+        """Resets key usage counts at midnight UTC."""
+        today = datetime.now(timezone.utc).date()
+        if today != self.last_usage_reset_date:
+            self.key_usage_today.clear()
+            self.last_usage_reset_date = today
+
+    def _record_key_use(self, key: str):
+        """Increments the daily request count for the specified key."""
+        self._check_daily_reset()
+        self.key_usage_today[key] += 1
+
     # -- path safety -------------------------------------------------------
 
     def _resolve_path(self, relative_path: str) -> str:
@@ -122,6 +139,7 @@ class AIChat(commands.Cog):
         self, key: str, messages: list, tools: list | None, max_tokens: int
     ) -> dict:
         """Sends one chat-completions request using a specific key."""
+        self._record_key_use(key)
         headers = {
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
@@ -525,6 +543,7 @@ class AIChat(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def ai_info(self, ctx: commands.Context):
         """Fetches OpenRouter key metadata, free daily limits, balance, and usage for all keys."""
+        self._check_daily_reset()
         timeout = aiohttp.ClientTimeout(total=15)
 
         embed = discord.Embed(title="🤖 AI Key Pool & Usage Status", color=discord.Color.blue())
@@ -554,13 +573,10 @@ class AIChat(commands.Cog):
 
                         label = data.get("label", "Unnamed Key")
                         usage_usd = data.get("usage", 0.0)
-                        is_free_tier = data.get("is_free_tier", True)
-                        rate_limit = data.get("rate_limit", {})
 
-                        if rate_limit and rate_limit.get("requests") and rate_limit.get("interval"):
-                            daily_free_usage = f"{rate_limit.get('requests')} req / {rate_limit.get('interval')}"
-                        else:
-                            daily_free_usage = "50 req/day" if is_free_tier else "1,000 req/day"
+                        # Extract API request count or default to internal tracker
+                        reqs_used = data.get("requests_today") or data.get("usage_requests") or self.key_usage_today[key]
+                        daily_free_usage = f"{reqs_used} / 50 requests today"
 
                         fields = [
                             f"**Label:** `{label}`",
