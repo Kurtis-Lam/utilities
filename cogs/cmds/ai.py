@@ -27,6 +27,7 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     config = json.load(f)
 
 PROJECT_ROOT = os.path.dirname(CONFIG_PATH)
+USAGE_FILE_PATH = os.path.join(PROJECT_ROOT, "key_usage.json")
 
 BOT_PREFIX = config.get("PREFIX", "!")
 AI_CHATBOT_CHANNELID = int(config["AI_CHATBOT_CHANNELID"])
@@ -56,6 +57,36 @@ REQUEST_TIMEOUT_SECONDS = 180  # timeout for OpenRouter responses
 
 SUBTASK_MAX_ITERATIONS = 6
 SUBTASK_MAX_TOKENS = 500
+
+
+# ---------------------------------------------------------------------------
+# Persistent Key Usage Helpers
+# ---------------------------------------------------------------------------
+
+def load_key_usage() -> defaultdict:
+    """Loads daily key usage from disk if valid for today (UTC)."""
+    if os.path.exists(USAGE_FILE_PATH):
+        try:
+            with open(USAGE_FILE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("date") == datetime.now(timezone.utc).date().isoformat():
+                    return defaultdict(int, data.get("usage", {}))
+        except Exception:
+            pass
+    return defaultdict(int)
+
+
+def save_key_usage(usage_dict: dict):
+    """Saves daily key usage to disk."""
+    try:
+        data = {
+            "date": datetime.now(timezone.utc).date().isoformat(),
+            "usage": dict(usage_dict),
+        }
+        with open(USAGE_FILE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
 
 def split_message(text: str, limit: int = 2000) -> list[str]:
@@ -96,9 +127,9 @@ class AIChat(commands.Cog):
         self.max_history = 10
         self._channel_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-        # Usage tracking per key
-        self.key_usage_today = defaultdict(int)
+        # Persistent daily usage tracking per key
         self.last_usage_reset_date = datetime.now(timezone.utc).date()
+        self.key_usage_today = load_key_usage()
 
     def _check_daily_reset(self):
         """Resets key usage counts at midnight UTC."""
@@ -106,11 +137,13 @@ class AIChat(commands.Cog):
         if today != self.last_usage_reset_date:
             self.key_usage_today.clear()
             self.last_usage_reset_date = today
+            save_key_usage(self.key_usage_today)
 
     def _record_key_use(self, key: str):
-        """Increments the daily request count for the specified key."""
+        """Increments the daily request count for the specified key and persists it."""
         self._check_daily_reset()
         self.key_usage_today[key] += 1
+        save_key_usage(self.key_usage_today)
 
     # -- path safety -------------------------------------------------------
 
@@ -172,7 +205,7 @@ class AIChat(commands.Cog):
         self, messages: list, tools: list | None, max_tokens: int
     ) -> dict:
         """Sends chat request. If a 429 Rate Limit error occurs, automatically rotates
-        through all configured API keys until a working key is found."""
+        through all configured API keys with backoff delay until a working key is found."""
         start_key = self.primary_key
         start_idx = self.api_keys.index(start_key) if start_key in self.api_keys else 0
         n_keys = len(self.api_keys)
@@ -189,10 +222,13 @@ class AIChat(commands.Cog):
             except RuntimeError as e:
                 last_error = e
                 if "429" in str(e) and n_keys > 1:
+                    next_key_num = ((key_idx + 1) % n_keys) + 1
+                    backoff_sec = 2 * (offset + 1)
                     print(
                         f"[Key Rotation] Key #{key_idx + 1} hit 429 rate limit. "
-                        f"Rotating to key #{((key_idx + 1) % n_keys) + 1}..."
+                        f"Waiting {backoff_sec}s before rotating to key #{next_key_num}..."
                     )
+                    await asyncio.sleep(backoff_sec)
                     continue
                 raise e
 
@@ -574,15 +610,32 @@ class AIChat(commands.Cog):
                         label = data.get("label", "Unnamed Key")
                         usage_usd = data.get("usage", 0.0)
 
-                        # Extract API request count or default to internal tracker
-                        reqs_used = data.get("requests_today") or data.get("usage_requests") or self.key_usage_today[key]
-                        daily_free_usage = f"{reqs_used} / 50 requests today"
+                        # Parse OpenRouter's free_model_daily_requests structure if returned
+                        free_req_info = data.get("free_model_daily_requests")
+                        if isinstance(free_req_info, dict):
+                            reqs_used = free_req_info.get("usage", self.key_usage_today[key])
+                            reqs_limit = free_req_info.get("limit", 50)
+                            daily_free_usage = f"{reqs_used} / {reqs_limit} requests today"
+                        elif isinstance(free_req_info, (int, float)):
+                            daily_free_usage = f"{int(free_req_info)} / 50 requests today"
+                        else:
+                            # Fall back to persistent local counter
+                            reqs_used = self.key_usage_today[key]
+                            daily_free_usage = f"{reqs_used} / 50 requests today"
 
                         fields = [
                             f"**Label:** `{label}`",
                             f"**Total Spent:** `${usage_usd:.4f}`",
                             f"**Daily Free Usage:** `{daily_free_usage}`",
                         ]
+
+                        # Add burst rate limit info if available from OpenRouter
+                        rate_limit = data.get("rate_limit")
+                        if isinstance(rate_limit, dict):
+                            rl_reqs = rate_limit.get("requests")
+                            rl_interval = rate_limit.get("interval")
+                            if rl_reqs and rl_interval:
+                                fields.append(f"**Burst Limit:** `{rl_reqs} req / {rl_interval}`")
 
                         embed.add_field(
                             name=role_label,
