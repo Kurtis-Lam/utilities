@@ -74,7 +74,7 @@ class LockUnlock(commands.Cog):
         if lock_doc:
             await self.locks_collection.delete_one({"_id": ctx.channel.id})
 
-        await ctx.reply(f"🔓 **{ctx.channel.mention}** was unlocked by {ctx.author.mention}")
+        await ctx.reply(f"🔓 **{ctx.channel.mention}** was unlocked by {ctx.author.mention} 🟢")
 
     @commands.hybrid_command(aliases=["l"], name="lock", description="Locks the current channel.")
     async def lock(self, ctx):
@@ -107,11 +107,7 @@ class LockUnlock(commands.Cog):
         user, _ = await asyncio.gather(user_task, db_task)
         await ctx.channel.set_permissions(user, overwrite=permissions)
 
-        embed = discord.Embed(
-            description=f"🔒 Channel locked by {ctx.author.mention}",
-            color=discord.Color.red()
-        )
-        await ctx.reply(embed=embed)
+        await ctx.reply(f"🔒 **{ctx.channel.mention}** was locked by {ctx.author.mention} 🔴")
 
     @commands.has_permissions(administrator=True)
     @commands.command(aliases=["uac"], description="Unlocks all channels in the server.")
@@ -147,7 +143,7 @@ class LockUnlock(commands.Cog):
             await asyncio.sleep(0.3)
 
         embed = discord.Embed(
-            description=f"🔓 **{count} channels** unlocked by {ctx.author.mention}",
+            description=f"🔓 **{count} channels** unlocked by {ctx.author.mention} 🟢",
             color=discord.Color.green()
         )
 
