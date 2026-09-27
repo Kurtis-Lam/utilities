@@ -10,6 +10,7 @@ models/pokemon_db.npz
 
 firebase_key.json
 config.json
+key_usage.json
 
 keys.txt
 indexer.py
