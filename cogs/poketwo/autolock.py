@@ -4,28 +4,15 @@ import datetime
 import discord
 from discord.ext import commands
 
-POKETWO_ID = 716390085896962058
-DEFAULT_DELAY = 10
-
-# Who may unlock when several restricted locks fire at once. Earlier tier wins;
-# categories inside the same tuple are equal (their user sets are merged).
-# Role-based locks (rare/regional/gmax/paradox/eevos) ping a role, not users,
-# so they never restrict anything.
-UNLOCK_PRIORITY = (("re",), ("sh",), ("cl",), ("tp", "rp"))
-
-# Short labels for the status/lock messages
-SHORT_NAMES = {"re": "res"}
-
-
-async def get_poketwo_target(guild: discord.Guild):
-    """Retrieve Poketwo Member object via cache or fetch. None if it isn't in the guild."""
-    member = guild.get_member(POKETWO_ID)
-    if member:
-        return member
-    try:
-        return await guild.fetch_member(POKETWO_ID)
-    except discord.HTTPException:
-        return None
+from .lock_common import (
+    POKETWO_ID,
+    DEFAULT_DELAY,
+    UNLOCK_PRIORITY,
+    SHORT_NAMES,
+    get_poketwo_target,
+    can_unlock,
+    unlock_denied_message,
+)
 
 
 def _channel_in_whitelist(channel, whitelist: list) -> bool:
@@ -41,22 +28,6 @@ def _channel_in_whitelist(channel, whitelist: list) -> bool:
     if category_id and str(category_id) in entries:
         return True
     return False
-
-
-def can_unlock(lock_doc: dict | None, member: discord.Member) -> bool:
-    """Same rule lockunlock.py uses: no doc / no restriction -> anyone; else listed users or admins."""
-    if not lock_doc:
-        return True
-    allowed = lock_doc.get("allowed_users")
-    if allowed is None:
-        return True
-    return member.id in allowed or member.guild_permissions.administrator
-
-
-def unlock_denied_message(lock_doc: dict) -> str:
-    allowed = lock_doc.get("allowed_users") or []
-    mentions = ", ".join(f"<@{uid}>" for uid in allowed)
-    return f"⚠️ Only {mentions} (or a server admin) can unlock this channel."
 
 
 class AutoLockUnlockView(discord.ui.View):
