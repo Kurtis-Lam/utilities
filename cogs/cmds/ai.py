@@ -4,7 +4,7 @@ import os
 import sys
 import traceback
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import discord
@@ -50,13 +50,35 @@ OPENROUTER_API_KEYS = [k for k in _raw_keys if k]
 if not OPENROUTER_API_KEYS:
     raise ValueError("No usable OpenRouter API keys found in config.json.")
 
-MAX_TOOL_ITERATIONS = 30       # limit for multi-step file edits
-TOOL_CALL_MAX_TOKENS = 500    # budget for reasoning/tools
-CHAT_MAX_TOKENS = 500
+# --- Account grouping for keys ------------------------------------------
+# OpenRouter's /api/v1/key endpoint does not expose any cross-key "account id" —
+# label/usage/limit are all per-key, not per-account — so keys belonging to the
+# same OpenRouter account can't be auto-detected reliably. Group them explicitly:
+#
+#   "AI_CHATBOT_KEY_ACCOUNTS": ["accountA", "accountA", "accountB", "accountB", "accountB"]
+#
+# One entry per key in AI_CHATBOT_KEYS, same order/length. Keys sharing the same
+# string are treated as being on the same OpenRouter account (and therefore
+# sharing a single 50/day free-tier limit). If omitted, every key is treated as
+# its own separate account.
+_raw_key_accounts = config.get("AI_CHATBOT_KEY_ACCOUNTS")
+if _raw_key_accounts:
+    if len(_raw_key_accounts) != len(OPENROUTER_API_KEYS):
+        raise ValueError(
+            "'AI_CHATBOT_KEY_ACCOUNTS' must have exactly one entry per key in "
+            "'AI_CHATBOT_KEYS' (same order, same length)."
+        )
+    KEY_ACCOUNT_IDS = [str(a) for a in _raw_key_accounts]
+else:
+    KEY_ACCOUNT_IDS = [f"key{i + 1}" for i in range(len(OPENROUTER_API_KEYS))]
+
+MAX_TOOL_ITERATIONS = 32       # limit for multi-step file edits
+TOOL_CALL_MAX_TOKENS = 2048    # budget for reasoning/tools
+CHAT_MAX_TOKENS = 1024
 REQUEST_TIMEOUT_SECONDS = 180  # timeout for OpenRouter responses
 
 SUBTASK_MAX_ITERATIONS = 6
-SUBTASK_MAX_TOKENS = 500
+SUBTASK_MAX_TOKENS = 1024
 
 
 # ---------------------------------------------------------------------------
@@ -122,14 +144,28 @@ class AIChat(commands.Cog):
         self.worker_keys = self.api_keys[1:] if len(self.api_keys) > 1 else self.api_keys
         self._worker_key_cycle_idx = 0
 
+        # Maps each raw key string -> the account id it belongs to (see
+        # AI_CHATBOT_KEY_ACCOUNTS above). Used to group usage in `ai-info`.
+        self.key_account_id: dict[str, str] = dict(zip(self.api_keys, KEY_ACCOUNT_IDS))
+
         self.current_model = "openrouter/free"
         self.history = defaultdict(list)
         self.max_history = 10
         self._channel_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-        # Persistent daily usage tracking per key
+        # Persistent daily usage tracking per key (LOCAL ESTIMATE ONLY — see
+        # key_rate_limit_snapshot below for the authoritative server-side number)
         self.last_usage_reset_date = datetime.now(timezone.utc).date()
         self.key_usage_today = load_key_usage()
+
+        # Most recent x-ratelimit-* headers OpenRouter returned for each key,
+        # IF that key has ever hit an error response. OpenRouter only sends
+        # these headers on errors (never on a normal 200 OK), so this is NOT
+        # a live quota snapshot — it's just "state at the last time this key
+        # got rate-limited." ai_info() uses the live `free_model_daily_requests`
+        # field from GET /api/v1/key instead; this dict is only a fallback for
+        # when that live lookup fails. Not persisted to disk.
+        self.key_rate_limit_snapshot: dict[str, dict] = {}
 
     def _check_daily_reset(self):
         """Resets key usage counts at midnight UTC."""
@@ -140,10 +176,36 @@ class AIChat(commands.Cog):
             save_key_usage(self.key_usage_today)
 
     def _record_key_use(self, key: str):
-        """Increments the daily request count for the specified key and persists it."""
+        """Increments the daily request count for the specified key and persists it.
+        NOTE: this is only a local estimate of requests sent by THIS bot process —
+        see _record_rate_limit_headers for OpenRouter's actual server-side count."""
         self._check_daily_reset()
         self.key_usage_today[key] += 1
         save_key_usage(self.key_usage_today)
+
+    def _record_rate_limit_headers(self, key: str, headers) -> None:
+        """Stores OpenRouter's own x-ratelimit-* response headers for this key,
+        when present.
+
+        NOTE: per OpenRouter's docs, these headers are ONLY ever included on
+        error responses (e.g. a 429) — a normal 200 OK never carries them. So
+        this snapshot only updates at the moment a key gets rate-limited, and
+        then stays frozen (stale) until another 429 happens; it can't be used
+        as a live "quota remaining" indicator. For that, ai_info() below uses
+        the `free_model_daily_requests` field from GET /api/v1/key instead,
+        which is fresh on every call regardless of errors. This snapshot is
+        kept only as a "last time this key was rate-limited" fallback."""
+        limit = headers.get("x-ratelimit-limit")
+        remaining = headers.get("x-ratelimit-remaining")
+        reset = headers.get("x-ratelimit-reset")
+        if limit is None and remaining is None:
+            return
+        self.key_rate_limit_snapshot[key] = {
+            "limit": limit,
+            "remaining": remaining,
+            "reset": reset,
+            "observed_at": datetime.now(timezone.utc),
+        }
 
     # -- path safety -------------------------------------------------------
 
@@ -191,6 +253,7 @@ class AIChat(commands.Cog):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(self.openrouter_url, headers=headers, json=payload) as resp:
+                    self._record_rate_limit_headers(key, resp.headers)
                     if resp.status != 200:
                         error_text = await resp.text()
                         raise RuntimeError(f"OpenRouter error ({resp.status}): {error_text}")
@@ -575,82 +638,114 @@ class AIChat(commands.Cog):
         else:
             await ctx.send("Memory is already empty.")
 
-    @commands.command(name="ai-info", help="Displays model status, daily usage limits, and account balances for configured keys.")
-    @commands.has_permissions(administrator=True)
+    @commands.command(name="ai-info", help="Displays model status, and daily usage grouped by OpenRouter account.")
+    @commands.is_owner()
     async def ai_info(self, ctx: commands.Context):
-        """Fetches OpenRouter key metadata, free daily limits, balance, and usage for all keys."""
+        """Fetches OpenRouter key metadata, groups keys that belong to the same
+        account (per AI_CHATBOT_KEY_ACCOUNTS in config.json), and shows each
+        account's shared 50/day free-tier usage plus a per-key breakdown."""
         self._check_daily_reset()
         timeout = aiohttp.ClientTimeout(total=15)
+
+        # Group key indices by account id, preserving key order within a group.
+        account_groups: dict[str, list[int]] = defaultdict(list)
+        for idx, key in enumerate(self.api_keys):
+            account_groups[self.key_account_id[key]].append(idx)
 
         embed = discord.Embed(title="🤖 AI Key Pool & Usage Status", color=discord.Color.blue())
         embed.add_field(name="Active Model", value=f"`{self.current_model}`", inline=False)
         embed.add_field(
             name="Configured Key Pool",
-            value=f"`{len(self.api_keys)}` total API key(s) loaded",
+            value=f"`{len(self.api_keys)}` total API key(s) across `{len(account_groups)}` account(s)",
             inline=False,
         )
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            for idx, key in enumerate(self.api_keys):
-                is_active = " 🟢 (Primary)" if key == self.primary_key else ""
-                role_label = f"Key #{idx + 1}{is_active}"
+            # Fetch per-key info once up front so we can compute account totals.
+            key_info: dict[str, dict] = {}
+            for key in self.api_keys:
                 headers = {"Authorization": f"Bearer {key}"}
-
                 try:
                     async with session.get(self.key_info_url, headers=headers) as resp:
-                        if resp.status != 200:
-                            embed.add_field(
-                                name=role_label, value=f"❌ Failed to fetch info (HTTP {resp.status})", inline=False
-                            )
-                            continue
-
-                        res = await resp.json()
-                        data = res.get("data", {})
-
-                        label = data.get("label", "Unnamed Key")
-                        usage_usd = data.get("usage", 0.0)
-
-                        # Parse OpenRouter's free_model_daily_requests structure if returned
-                        free_req_info = data.get("free_model_daily_requests")
-                        if isinstance(free_req_info, dict):
-                            reqs_used = free_req_info.get("usage", self.key_usage_today[key])
-                            reqs_limit = free_req_info.get("limit", 50)
-                            daily_free_usage = f"{reqs_used} / {reqs_limit} requests today"
-                        elif isinstance(free_req_info, (int, float)):
-                            daily_free_usage = f"{int(free_req_info)} / 50 requests today"
+                        if resp.status == 200:
+                            res = await resp.json()
+                            key_info[key] = res.get("data", {})
                         else:
-                            # Fall back to persistent local counter
-                            reqs_used = self.key_usage_today[key]
-                            daily_free_usage = f"{reqs_used} / 50 requests today"
-
-                        fields = [
-                            f"**Label:** `{label}`",
-                            f"**Total Spent:** `${usage_usd:.4f}`",
-                            f"**Daily Free Usage:** `{daily_free_usage}`",
-                        ]
-
-                        # Add burst rate limit info if available from OpenRouter
-                        rate_limit = data.get("rate_limit")
-                        if isinstance(rate_limit, dict):
-                            rl_reqs = rate_limit.get("requests")
-                            rl_interval = rate_limit.get("interval")
-                            if rl_reqs and rl_interval:
-                                fields.append(f"**Burst Limit:** `{rl_reqs} req / {rl_interval}`")
-
-                        embed.add_field(
-                            name=role_label,
-                            value="\n".join(fields),
-                            inline=False,
-                        )
+                            key_info[key] = {"_error": f"HTTP {resp.status}"}
                 except Exception as e:
-                    embed.add_field(name=role_label, value=f"❌ Network Error: `{e}`", inline=False)
+                    key_info[key] = {"_error": str(e)}
+
+            for acct_id, indices in account_groups.items():
+                # Live, always-current free-model daily quota for this account,
+                # straight from GET /api/v1/key's `free_model_daily_requests`
+                # field (fetched fresh above, just now, as part of this command).
+                # This is the correct source for the shared 50(or 1000)/day cap:
+                # unlike x-ratelimit-* headers (which OpenRouter only sends on
+                # error responses, never on a normal 200 OK — so a header-based
+                # snapshot goes stale the moment nothing has errored recently),
+                # this field is populated on every single call, success or not.
+                # Since the cap is shared per account, every key on the account
+                # should report the same numbers here; take the first that
+                # answered successfully.
+                fmdr = None
+                for i in indices:
+                    info = key_info[self.api_keys[i]]
+                    if "_error" not in info and info.get("free_model_daily_requests"):
+                        fmdr = info["free_model_daily_requests"]
+                        break
+
+                # The free-model daily cap always resets at the next UTC
+                # midnight; render that as a Discord relative timestamp
+                # (renders client-side as "in X hours", localized automatically).
+                now_utc = datetime.now(timezone.utc)
+                next_reset = datetime.combine(
+                    now_utc.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+                )
+                reset_ts = int(next_reset.timestamp())
+
+                if fmdr is not None:
+                    used = fmdr.get("used")
+                    limit = fmdr.get("limit")
+                    live_quota_line = (
+                        f"**Quota:** `{used} / {limit}` — "
+                        f"resets <t:{reset_ts}:R>"
+                    )
+                else:
+                    live_quota_line = (
+                        "**Live Quota (from OpenRouter):** unavailable right now "
+                        "(key lookup failed for every key on this account — see per-key errors below)"
+                    )
+
+                lines = [live_quota_line]
+
+                key_items = []
+                for i in indices:
+                    key = self.api_keys[i]
+                    data = key_info[key]
+                    role_tag = " 🟢 Primary" if key == self.primary_key else ""
+
+                    if "_error" in data:
+                        key_items.append(f"• Key #{i + 1}{role_tag} — ❌ {data['_error']}")
+                    else:
+                        label = data.get("label", "Unnamed Key")
+                        key_requests = self.key_usage_today[key]
+                        key_items.append(f"• Key #{i + 1}{role_tag} — `{label}` — `{key_requests}` reqs today")
+
+                for i in range(0, len(key_items), 2):
+                    lines.append(" | ".join(key_items[i:i + 2]))
+
+                embed.add_field(
+                    name=f"📦 Account: {acct_id}  ({len(indices)} key{'s' if len(indices) != 1 else ''})",
+                    value="\n".join(lines),
+                    inline=False,
+                )
 
         await ctx.send(embed=embed)
 
     @ai_info.error
     async def ai_info_error(self, ctx: commands.Context, error: commands.CommandError):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send("❌ You must have Administrator permissions to use this command.")
+        if isinstance(error, commands.NotOwner):
+            await ctx.send("❌ Only the bot owner can use this command.")
 
     # -- main listener -------------------------------------------------------
 
