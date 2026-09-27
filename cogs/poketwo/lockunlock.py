@@ -3,7 +3,7 @@ import asyncio
 import discord
 from discord.ext import commands
 
-from .lock_common import POKETWO_ID, get_poketwo_target, can_unlock, unlock_denied_message
+from cogs.poketwo.lockcommon import POKETWO_ID, get_poketwo_target, can_unlock, unlock_denied_message
 
 
 class LockUnlock(commands.Cog):
