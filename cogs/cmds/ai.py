@@ -178,6 +178,35 @@ class StatusUpdater:
                 except discord.HTTPException:
                     pass
 
+    async def append_block(self, text: str):
+        """Appends a preformatted block (e.g. a fenced ```code``` block) verbatim,
+        without the per-line '-# ' subtext prefix or line-splitting used by
+        `append`. This keeps multi-line fenced content (like a collapsible /
+        downloadable thinking transcript) intact as one continuous block.
+        Oversized blocks are automatically split into multiple fenced chunks.
+        """
+        if len(text) > DISCORD_MESSAGE_LIMIT:
+            inner_limit = DISCORD_MESSAGE_LIMIT - 8  # leave room for ``` fences
+            raw = text.strip("`\n")
+            for i in range(0, len(raw), inner_limit):
+                await self.append_block(f"```\n{raw[i:i + inner_limit]}\n```")
+            return
+
+        candidate = f"{self.current_text}\n{text}" if self.current_text else text
+        if len(candidate) <= DISCORD_MESSAGE_LIMIT:
+            self.current_text = candidate
+            try:
+                await self.messages[-1].edit(content=self.current_text)
+            except discord.HTTPException:
+                pass
+        else:
+            try:
+                new_msg = await self.channel.send(text)
+                self.messages.append(new_msg)
+                self.current_text = text
+            except discord.HTTPException:
+                pass
+
 
 class AIChat(commands.Cog):
     def __init__(self, bot):
@@ -415,16 +444,27 @@ class AIChat(commands.Cog):
                 "`load_extension`, `unload_extension`, `reload_extension`, `restart_bot`, "
                 "`delegate_subtasks`) which let you inspect, modify, and reload/restart your own "
                 f"code when requested. ({worker_note}.)\n\n"
-                "Guidelines for self-editing and investigation tasks:\n"
-                "- All paths are relative to the project root (where config.json lives).\n"
-                "- BE DIRECT AND ECONOMICAL WITH TOKENS. Do not narrate a long step-by-step "
-                "internal monologue before acting — plan briefly, then act.\n"
-                "- `list_files` is recursive (default depth 4) — call it once near the project "
-                "root to see the whole tree.\n"
-                "- Only `read_file` the specific files you actually need to view or edit.\n"
+                "STRICT RULES — every tool call is a separate request against a very tight daily "
+                "budget shared across all API keys, so wasted round-trips directly cost the user "
+                "usable requests for the rest of the day:\n"
+                "- NO PREAMBLE, NO MONOLOGUE. Never narrate your plan, restate the request back, "
+                "or explain what you're 'going to do next.' Go straight to calling tools or "
+                "writing the final summary. No filler text before your first tool call.\n"
+                "- MINIMIZE ROUND-TRIPS:\n"
+                "  - `list_files` is recursive (default depth 4) — call it ONCE near the project "
+                "root to see the whole tree. Never call it again unless the tree actually changed.\n"
+                "  - Read each relevant file AT MOST ONCE. Never re-read a file already shown "
+                "earlier in this conversation — that content is still in context.\n"
+                "  - Before reading anything, decide the full list of files you'll likely need and "
+                "read only those. Do not explore speculatively or 'double check' by re-reading.\n"
+                "  - As soon as you have enough information, make the edit. Don't keep gathering "
+                "more context 'to be sure.'\n"
+                "- ACT, DON'T ASK. Make the edit directly with `write_file` rather than describing "
+                "what you would change.\n"
                 "- MANDATORY: After completing any file edits, deletions, or extension reloads, "
-                "you MUST send the user a plain text summary detailing what changes you made.\n"
-                "- For tasks with multiple independent parts, use `delegate_subtasks`."
+                "send ONE short, plain-text summary of exactly what changed. No other commentary.\n"
+                "- Only use `delegate_subtasks` for genuinely independent, unrelated parts of a "
+                "request — never as a substitute for reading a file yourself."
             )
 
         return "\n".join(capabilities)
@@ -770,6 +810,40 @@ class AIChat(commands.Cog):
         else:
             await ctx.send("Memory is already empty.")
 
+    @commands.command(name="memory", help="Displays the AI chatbot's current conversation memory for this channel.")
+    async def show_memory(self, ctx: commands.Context):
+        if ctx.channel.id != AI_CHATBOT_CHANNELID:
+            await ctx.send("The AI Chatbot is not active in this channel.")
+            return
+
+        history = self.history.get(ctx.channel.id)
+        if not history:
+            await ctx.send("🧠 Memory is currently empty.")
+            return
+
+        def _content_to_str(content) -> str:
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text":
+                        parts.append(block.get("text", ""))
+                    elif block.get("type") == "image_url":
+                        url = (block.get("image_url") or {}).get("url", "")
+                        parts.append(f"[image: {url}]")
+                return "\n".join(p for p in parts if p) or "[empty]"
+            return content or "[empty]"
+
+        lines = [f"🧠 **Current memory for this channel** — `{len(history)}` message(s) stored:\n"]
+        for i, msg in enumerate(history, start=1):
+            role = msg.get("role", "unknown")
+            lines.append(f"**[{i}] {role}:** {_content_to_str(msg.get('content'))}")
+
+        text = "\n\n".join(lines)
+        for chunk in split_message(text):
+            await ctx.send(chunk)
+
     @commands.command(name="ai-info", help="Displays model status, and daily usage grouped by OpenRouter account.")
     @commands.is_owner()
     async def ai_info(self, ctx: commands.Context):
@@ -781,8 +855,6 @@ class AIChat(commands.Cog):
             account_groups[self.key_account_id[key]].append(idx)
 
         total_accounts = len(account_groups)
-        total_limit = sum(self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT) for key in self.api_keys)
-        total_usage = sum(self.key_usage_today[key] for key in self.api_keys)
 
         embed = discord.Embed(title="🤖 AI Key Pool & Usage Status", color=discord.Color.blue())
         embed.add_field(name="Active Model", value=f"`{self.current_model}`", inline=False)
@@ -791,16 +863,15 @@ class AIChat(commands.Cog):
             value=f"`{len(self.api_keys)}` total API key(s) across `{total_accounts}` account(s)",
             inline=False,
         )
-        embed.add_field(
-            name="Total Daily Usage",
-            value=f"`{total_usage} / {total_limit}` requests used today across all keys",
-            inline=False,
-        )
 
         session = self.session if self.session and not self.session.closed else aiohttp.ClientSession(timeout=timeout)
         close_session = session != self.session
 
         try:
+            # Fetch each key's real quota from OpenRouter first — the daily
+            # limit varies per account (e.g. 50 vs 1000 once $10+ has been
+            # spent), so totals below are summed from live data rather than
+            # assumed/configured defaults.
             key_info: dict[str, dict] = {}
             for key in self.api_keys:
                 headers = {"Authorization": f"Bearer {key}"}
@@ -813,6 +884,32 @@ class AIChat(commands.Cog):
                             key_info[key] = {"_error": f"HTTP {resp.status}"}
                 except Exception as e:
                     key_info[key] = {"_error": str(e)}
+
+            total_usage_live = 0
+            total_limit_live = 0
+            unavailable_keys = 0
+            for key in self.api_keys:
+                info = key_info[key]
+                fmdr = info.get("free_model_daily_requests") if "_error" not in info else None
+                if fmdr and fmdr.get("limit") is not None:
+                    total_usage_live += fmdr.get("used") or 0
+                    total_limit_live += fmdr.get("limit") or 0
+                else:
+                    # Fall back to the locally-tracked count/configured limit
+                    # only for keys OpenRouter didn't return live data for.
+                    unavailable_keys += 1
+                    total_usage_live += self.key_usage_today[key]
+                    total_limit_live += self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)
+
+            usage_note = (
+                f" (`{unavailable_keys}` key(s) unreachable — using local estimate for those)"
+                if unavailable_keys else ""
+            )
+            embed.add_field(
+                name="Total Daily Usage",
+                value=f"`{total_usage_live} / {total_limit_live}` requests used today across all keys{usage_note}",
+                inline=False,
+            )
 
             for acct_id, indices in account_groups.items():
                 fmdr = None
@@ -848,17 +945,11 @@ class AIChat(commands.Cog):
                     data = key_info[key]
                     role_tag = " 🟢 Primary" if key == self.primary_key else ""
 
-                    key_limit = self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)
-                    key_requests = self.key_usage_today[key]
-                    quota_tag = " ⚠️ LIMIT REACHED" if key_requests >= key_limit else ""
-
                     if "_error" in data:
                         key_items.append(f"• Key #{i + 1}{role_tag} — ❌ {data['_error']}")
                     else:
                         label = data.get("label", "Unnamed Key")
-                        key_items.append(
-                            f"• Key #{i + 1}{role_tag} — `{label}` — `{key_requests}/{key_limit}` reqs today{quota_tag}"
-                        )
+                        key_items.append(f"• Key #{i + 1}{role_tag} — `{label}`")
 
                 for i in range(0, len(key_items), 2):
                     lines.append(" | ".join(key_items[i:i + 2]))
@@ -923,6 +1014,11 @@ class AIChat(commands.Cog):
                 "- Supporting shiny hunting, Pokémon collection tracking, and rare/regional spawn pings.\n\n"
                 "Answer user questions accurately, maintain a friendly and helpful tone, and guide users "
                 "on how to navigate server features and bot commands.\n\n"
+                "USAGE IS LIMITED: this bot runs on a shared daily request budget, so any extended "
+                "internal reasoning/thinking before your answer costs real quota. For simple, "
+                "direct questions, answer immediately with no preliminary reasoning at all. Only "
+                "think step-by-step first for genuinely complex, ambiguous, or multi-part requests "
+                "(e.g. multi-file code changes) where it actually changes the quality of the answer.\n\n"
                 f"{capabilities_info}"
             )
 
@@ -972,7 +1068,7 @@ class AIChat(commands.Cog):
                         tools_for_call,
                         max_tokens_for_call,
                         start_key=self.primary_key,
-                        reasoning_effort="low" if is_owner else None,
+                        reasoning_effort=None,
                     )
                 except RuntimeError as e:
                     print(f"OpenRouter request failed: {e}")
@@ -994,7 +1090,8 @@ class AIChat(commands.Cog):
 
                 thinking_text = (choice_message.get("reasoning") or choice_message.get("thinking") or "").strip()
                 if thinking_text:
-                    await status.append(f"Thinking: {thinking_text}")
+                    await status.append("Thinking...")
+                    await status.append_block(f"```\n{thinking_text}\n```")
 
                 if finish_reason == "length":
                     if choice_message.get("tool_calls"):
