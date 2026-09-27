@@ -149,7 +149,7 @@ class AutoLockConfig(commands.Cog):
     def all_categories() -> tuple:
         return ALL_CATEGORIES
 
-    # --- storage helpers (autolock settings) ----------------------------------
+    # --- storage helpers (guild-wide / "--global" autolock settings) -----------
 
     async def get_guild_config(self, guild_id: int) -> dict:
         gid = str(guild_id)
@@ -219,6 +219,67 @@ class AutoLockConfig(commands.Cog):
             {"$set": {f"{category}.restrict_unlockers": new_val}},
             upsert=True,
         )
+        return new_val
+
+    # --- storage helpers (per-channel overrides, i.e. non "--global" commands) -
+    #
+    # `.set` / `.toggle` without `--global` should only affect the channel the
+    # command was run in, without touching (or requiring) the guild-wide default.
+    # Overrides live under doc["channels"][str(channel_id)][category] and only
+    # ever contain the specific keys that were overridden; anything not present
+    # there falls back to the guild-wide category config. Whitelist is not
+    # overridable per channel — it's always guild-wide, same as before.
+
+    async def get_channel_overrides(self, guild_id: int, channel_id: int) -> dict:
+        """Raw override dict for one channel, e.g. {"sh": {"enabled": True}}. {} if none set."""
+        doc = await self.get_guild_config(guild_id)
+        channels = doc.get("channels")
+        if not isinstance(channels, dict):
+            return {}
+        entry = channels.get(str(channel_id))
+        return entry if isinstance(entry, dict) else {}
+
+    async def get_category_config_channel(self, guild_id: int, channel_id: int, category: str) -> dict:
+        """Effective config for `category` in this channel: guild default + channel override."""
+        base = dict(await self.get_category_config(guild_id, category))
+        overrides = await self.get_channel_overrides(guild_id, channel_id)
+        cat_override = overrides.get(category)
+        if isinstance(cat_override, dict):
+            base.update(cat_override)
+        return base
+
+    # Alias kept for readability at call sites that just want "what should
+    # actually happen in this channel right now" (e.g. the AutoLock cog).
+    async def get_effective_category_config(self, guild_id: int, channel_id: int, category: str) -> dict:
+        return await self.get_category_config_channel(guild_id, channel_id, category)
+
+    async def _set_channel_field(self, guild_id: int, channel_id: int, category: str, field: str, value):
+        await self.get_guild_config(guild_id)  # make sure the guild doc exists first
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"channels.{channel_id}.{category}.{field}": value}},
+            upsert=True,
+        )
+
+    async def set_delay_channel(self, guild_id: int, channel_id: int, category: str, delay: int):
+        await self._set_channel_field(guild_id, channel_id, category, "delay", delay)
+
+    async def toggle_lock_channel(self, guild_id: int, channel_id: int, category: str) -> bool:
+        cfg = await self.get_category_config_channel(guild_id, channel_id, category)
+        new_val = not cfg.get("enabled", False)
+        await self._set_channel_field(guild_id, channel_id, category, "enabled", new_val)
+        return new_val
+
+    async def toggle_delay_channel(self, guild_id: int, channel_id: int, category: str) -> bool:
+        cfg = await self.get_category_config_channel(guild_id, channel_id, category)
+        new_val = not cfg.get("delay_enabled", True)
+        await self._set_channel_field(guild_id, channel_id, category, "delay_enabled", new_val)
+        return new_val
+
+    async def toggle_restrict_channel(self, guild_id: int, channel_id: int, category: str) -> bool:
+        cfg = await self.get_category_config_channel(guild_id, channel_id, category)
+        new_val = not cfg.get("restrict_unlockers", False)
+        await self._set_channel_field(guild_id, channel_id, category, "restrict_unlockers", new_val)
         return new_val
 
     async def add_whitelist(self, guild: discord.Guild | int, category: str, raw_input: str):
@@ -397,6 +458,17 @@ class AutoLockConfig(commands.Cog):
 
         return "\n".join(lines)
 
+    def _count_channel_overrides(self, doc: dict, category: str) -> int:
+        """How many channels have at least one overridden field for this category."""
+        channels = doc.get("channels")
+        if not isinstance(channels, dict):
+            return 0
+        return sum(
+            1
+            for entry in channels.values()
+            if isinstance(entry, dict) and isinstance(entry.get(category), dict) and entry[category]
+        )
+
     async def build_main_embed(self, guild: discord.Guild) -> discord.Embed:
         doc = await self.get_guild_config(guild.id)
 
@@ -422,12 +494,17 @@ class AutoLockConfig(commands.Cog):
             if cat in UNLOCK_RESTRICTABLE:
                 lines.append(f"Restrict Unlockers: `{cfg.get('restrict_unlockers', False)}`")
 
+            override_count = self._count_channel_overrides(doc, cat)
+            if override_count:
+                lines.append(f"Channel Overrides: `{override_count}`")
+
             embed.add_field(name=f"{_label(cat)} {status_icon}", value="\n".join(lines), inline=True)
 
         return embed
 
     async def build_category_embed(self, guild: discord.Guild, category: str) -> discord.Embed:
-        cfg = await self.get_category_config(guild.id, category)
+        doc = await self.get_guild_config(guild.id)
+        cfg = doc.get(category, _default_category())
         is_enabled = cfg.get("enabled", False)
         status_str = "Enabled ✅" if is_enabled else "Disabled ❌"
         delay_on = cfg.get("delay_enabled", True)
@@ -481,6 +558,18 @@ class AutoLockConfig(commands.Cog):
                 ),
                 inline=False,
             )
+
+        override_count = self._count_channel_overrides(doc, category)
+        embed.add_field(
+            name="Channel Overrides",
+            value=(
+                f"`{override_count}` channel(s) have custom settings for this lock "
+                "(set via `.set`/`.toggle` without `--global`)."
+                if override_count
+                else "None — every channel currently uses the settings above."
+            ),
+            inline=False,
+        )
 
         return embed
 
