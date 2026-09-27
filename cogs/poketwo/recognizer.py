@@ -86,7 +86,6 @@ class Recognize(commands.Cog):
                             normalized_set.add(self._normalize_name(clean_p))
 
                         self.category_pokes[key] = frozenset(normalized_set)
-                        print(f"[Recognizer] Loaded {len(raw_items)} entries for category '{key}' from {path}")
                 except Exception as e:    
                     print(f"[Recognizer] Failed to load {filepath}: {e}")    
                     self.category_pokes[key] = frozenset()    
