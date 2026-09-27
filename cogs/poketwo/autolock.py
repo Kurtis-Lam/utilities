@@ -111,32 +111,28 @@ class AutoLock(commands.Cog):
         return self.bot.mongo_client["utilities"]
 
     @property
-    def collection(self):
-        return self.db["autolock"]
-
-    @property
     def locks_collection(self):
         return self.db["locked_channels"]
 
-    async def _get_guild_config(self, guild_id: int) -> dict:
-        doc = await self.collection.find_one({"_id": str(guild_id)})
-        return doc or {}
+    # Autolock's own on/off/delay/whitelist/restrict settings — both the guild-wide
+    # ("--global") defaults and any per-channel overrides — live in AutoLockConfig.
+    # We read through that cog rather than Mongo directly so every reader/writer
+    # (this cog, .set, .toggle, the config UI) always agrees on the effective value.
+    @property
+    def config_cog(self):
+        return self.bot.get_cog("AutoLockConfig")
 
-    @staticmethod
-    def _cat_cfg(doc: dict, cat: str) -> dict:
-        cfg = doc.get(cat)
-        return cfg if isinstance(cfg, dict) else {}
-
-    def _resolve_unlockers(self, doc: dict, active: list[str], category_users: dict):
+    def _resolve_unlockers(self, cat_configs: dict[str, dict], active: list[str], category_users: dict):
         """
-        Highest-priority active lock with 'restrict unlockers' ON decides who may unlock.
+        Highest-priority active lock with 'restrict unlockers' ON (for this channel,
+        after applying any channel override) decides who may unlock.
         Returns (allowed_user_ids | None, restricting_categories).
         None means anyone can unlock.
         """
         for tier in UNLOCK_PRIORITY:
             tier_cats = [
                 c for c in tier
-                if c in active and self._cat_cfg(doc, c).get("restrict_unlockers", False)
+                if c in active and cat_configs.get(c, {}).get("restrict_unlockers", False)
             ]
             users = set()
             for c in tier_cats:
@@ -160,17 +156,25 @@ class AutoLock(commands.Cog):
         if channel.id in self.pending_locks:
             return
 
-        category_users = category_users or {}
-        doc = await self._get_guild_config(channel.guild.id)
-        if not doc:
+        config_cog = self.config_cog
+        if not config_cog:
+            print("AutoLock: AutoLockConfig cog is not loaded, skipping autolock check.")
             return
 
-        # Only locks that are switched ON and whitelisted for this channel take part
-        active = [
-            cat for cat in dict.fromkeys(activated_categories)
-            if self._cat_cfg(doc, cat).get("enabled", False)
-            and _channel_in_whitelist(channel, self._cat_cfg(doc, cat).get("whitelist", []))
-        ]
+        category_users = category_users or {}
+
+        # Effective config per category = guild-wide default with any channel-specific
+        # override (set via .set/.toggle without --global) applied on top. Only
+        # categories that are enabled *and* whose (guild-wide) whitelist covers this
+        # channel take part.
+        active = []
+        cat_configs: dict[str, dict] = {}
+        for cat in dict.fromkeys(activated_categories):
+            cfg = await config_cog.get_category_config_channel(channel.guild.id, channel.id, cat)
+            if cfg.get("enabled", False) and _channel_in_whitelist(channel, cfg.get("whitelist", [])):
+                active.append(cat)
+                cat_configs[cat] = cfg
+
         if not active:
             return
 
@@ -178,14 +182,14 @@ class AutoLock(commands.Cog):
         # With several categories the shortest wait wins.
         delay = min(
             (
-                self._cat_cfg(doc, cat).get("delay", DEFAULT_DELAY)
-                if self._cat_cfg(doc, cat).get("delay_enabled", True)
+                cat_configs[cat].get("delay", DEFAULT_DELAY)
+                if cat_configs[cat].get("delay_enabled", True)
                 else 0
             )
             for cat in active
         )
 
-        allowed_unlockers, restrict_cats = self._resolve_unlockers(doc, active, category_users)
+        allowed_unlockers, restrict_cats = self._resolve_unlockers(cat_configs, active, category_users)
         label = "/".join(SHORT_NAMES.get(c, c) for c in active)
 
         self.pending_locks.add(channel.id)
