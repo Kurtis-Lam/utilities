@@ -1,71 +1,5 @@
-import re
-
 import discord
 from discord.ext import commands
-
-from views.autolockview import (
-    CATEGORY_DESCRIPTIONS,
-    CATEGORY_LABELS,
-    CATEGORY_ORDER,
-    RESTRICT_CATEGORIES,
-    ROLE_CATEGORIES,
-)
-
-# --- category helpers ---------------------------------------------------------
-# "re" (reserves) is the same key the PokePings cog and the Recognizer use.
-# Everything falls back gracefully if views/autolockview.py doesn't know "re" yet.
-
-_EXTRA_LABELS = {"re": "Reserves"}
-
-# Reserves first, then whatever order the view already uses.
-ALL_CATEGORIES = tuple(CATEGORY_ORDER) if "re" in CATEGORY_ORDER else ("re", *CATEGORY_ORDER)
-
-# Locks that can restrict who may unlock (they ping specific users, not a role).
-UNLOCK_RESTRICTABLE = frozenset(RESTRICT_CATEGORIES) | {"re"}
-
-CATEGORY_NAMES = {
-    "re": "Reserves Lock",
-    "sh": "Shiny Hunt Lock",
-    "cl": "Collection Lock",
-    "tp": "Type Ping Lock",
-    "rp": "Region Ping Lock",
-    "rare": "Rare Lock",
-    "regional": "Regional Lock",
-    "gmax": "Gigantamax Lock",
-    "paradox": "Paradox Lock",
-    "eevos": "Eeveelutions Lock",
-}
-
-# category key -> accepted names (without the "lock" suffix; see resolve_category)
-CATEGORY_ALIASES = {
-    "re": ("res", "reserve", "reserves"),
-    "sh": ("sh", "shiny", "shinyhunt", "shinyhunts"),
-    "cl": ("cl", "collection", "collections"),
-    "tp": ("tp", "typeping", "typepings", "type", "types"),
-    "rp": ("rp", "regionping", "regionpings", "region", "regions"),
-    "rare": ("ra", "rare"),
-    "regional": ("reg", "regional"),
-    "gmax": ("gmax", "gigantamax"),
-    "paradox": ("para", "paradox"),
-    "eevos": ("eevos", "eevo", "eeveelution", "eeveelutions", "eeveeevolutions"),
-}
-
-_ALIAS_LOOKUP = {alias: cat for cat, aliases in CATEGORY_ALIASES.items() for alias in aliases}
-_ALIAS_LOOKUP.update({cat: cat for cat in CATEGORY_ALIASES if cat != "re"})
-
-
-def _label(category: str) -> str:
-    return CATEGORY_LABELS.get(category) or _EXTRA_LABELS.get(category) or category.capitalize()
-
-
-def _default_category() -> dict:
-    return {
-        "enabled": False,
-        "delay": 10,
-        "delay_enabled": True,  # True = wait `delay` seconds, False = lock immediately
-        "whitelist": [],
-        "restrict_unlockers": False,
-    }
 
 
 class Set(commands.Cog):
@@ -80,11 +14,12 @@ class Set(commands.Cog):
         help_msg = (
             "⚙️ **Set Commands Help & Examples**\n\n"
             "**⏱️ Lock Delay**\n"
-            "Set how many seconds to wait before auto-locking a category.\n"
+            "Set how many seconds to wait before auto-locking a category. "
+            "Applies to the current channel by default — add `--global` to apply it to the whole server.\n"
             "• **One lock:** `.set lockdelay 15 sh`\n"
             "• **Multiple locks:** `.set lockdelay 15 sh cl tp`\n"
             "• **All locks at once:** `.set lockdelay 15 all`\n"
-            "• **Global (whole server):** `.set global lockdelay 15 sh`\n\n"
+            "• **Whole server:** `.set lockdelay 15 sh --global`\n\n"
             "**🏷️ Category Ping Roles**\n"
             "Assign or check the ping role for specific categories. Mention a role to set it, or leave it blank to view current settings.\n"
             "• `.set rarerole @Rare Ping` *(Alias: `.set rarole`)*\n"
@@ -95,74 +30,6 @@ class Set(commands.Cog):
         )
         await ctx.send(help_msg)
 
-    # --- .set global <command> -------------------------------------------
-    @set_group.group(name="global", invoke_without_command=True)
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def set_global(self, ctx: commands.Context):
-        """Apply settings to the whole server instead of the current channel."""
-        return await ctx.send(
-            "⚠️ **Usage:** `.set global <command> <args>`\n\n"
-            "**Examples:**\n"
-            "• `.set global lockdelay 15 sh` *(Sets Shiny Hunt delay to 15s for whole server)*\n"
-            "• `.set global lockdelay 15 sh cl tp` *(Sets delays for multiple locks globally)*\n"
-            "• `.set global lockdelay 15 all` *(Sets all delays to 15s for whole server)*"
-        )
-
-    @set_global.command(name="lockdelay", aliases=["ld", "delay", "lock-delay"])
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def set_global_lockdelay(self, ctx: commands.Context, seconds: str = None, *locks: str):
-        if seconds is None or not locks:
-            return await ctx.send(
-                "⚠️ **Usage:** `.set global lockdelay <seconds> <lock>`\n\n"
-                "**Examples:**\n"
-                "• `.set global lockdelay 15 sh` *(Sets Shiny Hunt delay to 15s for whole server)*\n"
-                "• `.set global lockdelay 15 sh cl tp` *(Sets delays for multiple locks globally)*\n"
-                "• `.set global lockdelay 15 all` *(Sets all delays to 15s for whole server)*"
-            )
-
-        try:
-            delay = int(seconds.lower().rstrip("s"))
-        except ValueError:
-            return await ctx.send(f"⚠️ `{seconds}` isn't a valid number of seconds.")
-
-        if not (1 <= delay <= 600):
-            return await ctx.send(
-                f"⚠️ Delay must be between **1** and **600** seconds. To lock instantly, turn the delay off with `.toggle lockdelay <lock>`."
-            )
-
-        cog = self.bot.get_cog("AutoLockConfig")
-        if not cog:
-            return await ctx.send("⚠️ Internal error: `AutoLockConfig` cog is not loaded.")
-
-        if any(l.lower() == "all" for l in locks):
-            cats = list(cog.all_categories())
-            unknown = []
-        else:
-            cats, unknown = [], []
-            for tok in locks:
-                cat = cog.resolve_category(tok)
-                if cat is None:
-                    unknown.append(tok)
-                elif cat not in cats:
-                    cats.append(cat)
-
-        if not cats:
-            return await ctx.send(f"⚠️ Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}")
-
-        lines = []
-        for cat in cats:
-            # Apply to whole server (guild level)
-            await cog.set_delay(ctx.guild.id, cat, delay)
-            line = f"⏱️ **{cog.display_name(cat)}** delay set to **{delay}s** for the **whole server**."
-            lines.append(line)
-
-        if unknown:
-            lines.append(f"⚠️ Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}")
-
-        await ctx.send("\n".join(lines))
-
     # --- .set lockdelay <seconds> <lock...> [--global] ------------------------------------
     @set_group.command(name="lockdelay", aliases=["ld", "delay", "lock-delay"])
     @commands.guild_only()
@@ -171,13 +38,13 @@ class Set(commands.Cog):
         # Parse arguments to check for --global flag
         locks = []
         global_flag = False
-        
+
         for arg in locks_and_flags:
             if arg.lower() == "--global":
                 global_flag = True
             else:
                 locks.append(arg)
-                
+
         if seconds is None or not locks:
             usage = (
                 "⚠️ **Usage:** `.set lockdelay <seconds> <lock>` [--global]\n\n"
@@ -196,7 +63,7 @@ class Set(commands.Cog):
 
         if not (1 <= delay <= 600):
             return await ctx.send(
-                f"⚠️ Delay must be between **1** and **600** seconds. To lock instantly, turn the delay off with `.toggle lockdelay <lock>`."
+                "⚠️ Delay must be between **1** and **600** seconds. To lock instantly, turn the delay off with `.toggle lockdelay <lock>`."
             )
 
         cog = self.bot.get_cog("AutoLockConfig")
@@ -228,7 +95,7 @@ class Set(commands.Cog):
                 # Apply to current channel only
                 await cog.set_delay_channel(ctx.guild.id, ctx.channel.id, cat, delay)
                 scope = f"{ctx.channel.mention}"
-            
+
             line = f"⏱️ **{cog.display_name(cat)}** delay set to **{delay}s** for {scope}."
             if not global_flag:
                 # Only show delay status for channel-specific setting
