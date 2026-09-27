@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import traceback
 from collections import defaultdict
@@ -142,6 +143,30 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
         chunks.append(text)
 
     return chunks
+
+
+# Some free/fallback models (e.g. DeepSeek-style) don't use a separate
+# "reasoning"/"thinking" field — they embed their chain-of-thought directly
+# inline in `content` using tags like <think>...</think>. Left alone, that
+# text leaks straight into the final Discord reply and makes the bot look
+# like it "keeps talking" after it's actually done. This strips any such
+# tags out of a content string and returns (thinking_text, cleaned_text).
+_THINK_TAG_RE = re.compile(r"<(think|thinking|reasoning)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+
+
+def extract_inline_thinking(content: str) -> tuple[str, str]:
+    """Pulls <think>/<thinking>/<reasoning> tagged spans out of `content`.
+
+    Returns a tuple of (thinking_text, remaining_text), both stripped.
+    thinking_text is the concatenation of every tagged span found (empty
+    string if none). remaining_text is `content` with those spans removed.
+    """
+    if not content:
+        return "", ""
+
+    found = [m.group(2).strip() for m in _THINK_TAG_RE.finditer(content) if m.group(2).strip()]
+    cleaned = _THINK_TAG_RE.sub("", content).strip()
+    return "\n\n".join(found), cleaned
 
 
 DISCORD_MESSAGE_LIMIT = 2000
@@ -1088,7 +1113,16 @@ class AIChat(commands.Cog):
                 choice_message = choice["message"]
                 finish_reason = choice.get("finish_reason")
 
-                thinking_text = (choice_message.get("reasoning") or choice_message.get("thinking") or "").strip()
+                # Some models put reasoning in a dedicated field; others embed
+                # it inline in `content` via <think>/<thinking> tags. Pull
+                # both out so `content` only ever holds the real output.
+                raw_content = choice_message.get("content") or ""
+                inline_thinking, cleaned_content = extract_inline_thinking(raw_content)
+                choice_message["content"] = cleaned_content
+
+                field_thinking = (choice_message.get("reasoning") or choice_message.get("thinking") or "").strip()
+                thinking_text = "\n\n".join(t for t in (field_thinking, inline_thinking) if t)
+
                 if thinking_text:
                     await status.append("Thinking...")
                     await status.append_block(f"```\n{thinking_text}\n```")
@@ -1144,12 +1178,11 @@ class AIChat(commands.Cog):
                         })
                     continue
 
-                reply_text = (
-                    choice_message.get("content")
-                    or choice_message.get("reasoning")
-                    or choice_message.get("thinking")
-                    or ""
-                )
+                # `content` has already had any inline <think> tags stripped
+                # above, so this is purely the model's actual answer, never
+                # its reasoning. If it's empty, the "no text response" path
+                # below handles it rather than dumping raw thoughts on the user.
+                reply_text = choice_message.get("content") or ""
 
                 if mutation_happened:
                     await status.append("Generating summary of changes...")
@@ -1166,12 +1199,20 @@ class AIChat(commands.Cog):
                         )
                         if "choices" in summary_data and summary_data["choices"]:
                             summary_msg = summary_data["choices"][0]["message"]
-                            forced_summary = (
-                                summary_msg.get("content")
-                                or summary_msg.get("reasoning")
-                                or summary_msg.get("thinking")
-                                or ""
+                            summary_thinking, summary_cleaned = extract_inline_thinking(
+                                summary_msg.get("content") or ""
+                            )
+                            summary_field_thinking = (
+                                summary_msg.get("reasoning") or summary_msg.get("thinking") or ""
                             ).strip()
+                            summary_all_thinking = "\n\n".join(
+                                t for t in (summary_field_thinking, summary_thinking) if t
+                            )
+                            if summary_all_thinking:
+                                await status.append("Thinking...")
+                                await status.append_block(f"```\n{summary_all_thinking}\n```")
+
+                            forced_summary = summary_cleaned.strip()
                             if forced_summary:
                                 reply_text = forced_summary
                     except Exception as e:
