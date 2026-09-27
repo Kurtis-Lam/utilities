@@ -12,7 +12,7 @@ from views.autolockview import (
     ROLE_COMMAND_HINTS,
     RESTRICT_CATEGORIES,
 )
-from .lock_common import (
+from cogs.poketwo.lockcommon import (
     DEFAULT_DELAY,
     resolve_category as _resolve_category,
     display_name as _display_name,
@@ -21,17 +21,6 @@ from .base import config_group
 
 
 def _default_category(category: str) -> dict:
-    """
-    Defaults for a brand-new category config:
-      - disabled until an admin turns it on
-      - 15s delay before locking
-      - no whitelist (so nothing will autolock until channels/categories are added)
-      - restrict unlockers ON for the 5 locks that ping specific users
-        (res/sh/cl/tp/rp), so only the pinged user(s) or an admin can unlock.
-        The 5 role-ping locks (rare/regional/gmax/paradox/eevos) can't restrict
-        at all — they ping a role, not a person — so anyone can unlock those;
-        this key is simply unused for them.
-    """
     return {
         "enabled": False,
         "delay": DEFAULT_DELAY,
