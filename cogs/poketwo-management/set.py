@@ -83,7 +83,8 @@ class Set(commands.Cog):
             "Set how many seconds to wait before auto-locking a category.\n"
             "• **One lock:** `.set lockdelay 15 sh`\n"
             "• **Multiple locks:** `.set lockdelay 15 sh cl tp`\n"
-            "• **All locks at once:** `.set lockdelay 15 all`\n\n"
+            "• **All locks at once:** `.set lockdelay 15 all`\n"
+            "• **Global (whole server):** `.set global lockdelay 15 sh`\n\n"
             "**🏷️ Category Ping Roles**\n"
             "Assign or check the ping role for specific categories. Mention a role to set it, or leave it blank to view current settings.\n"
             "• `.set rarerole @Rare Ping` *(Alias: `.set rarole`)*\n"
@@ -94,18 +95,31 @@ class Set(commands.Cog):
         )
         await ctx.send(help_msg)
 
-    # --- .set lockdelay <seconds> <lock...> ------------------------------------
-    @set_group.command(name="lockdelay", aliases=["ld", "delay", "lock-delay"])
+    # --- .set global <command> -------------------------------------------
+    @set_group.group(name="global", invoke_without_command=True)
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_lockdelay(self, ctx: commands.Context, seconds: str = None, *locks: str):
+    async def set_global(self, ctx: commands.Context):
+        """Apply settings to the whole server instead of the current channel."""
+        return await ctx.send(
+            "⚠️ **Usage:** `.set global <command> <args>`\n\n"
+            "**Examples:**\n"
+            "• `.set global lockdelay 15 sh` *(Sets Shiny Hunt delay to 15s for whole server)*\n"
+            "• `.set global lockdelay 15 sh cl tp` *(Sets delays for multiple locks globally)*\n"
+            "• `.set global lockdelay 15 all` *(Sets all delays to 15s for whole server)*"
+        )
+
+    @set_global.command(name="lockdelay", aliases=["ld", "delay", "lock-delay"])
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def set_global_lockdelay(self, ctx: commands.Context, seconds: str = None, *locks: str):
         if seconds is None or not locks:
             return await ctx.send(
-                "⚠️ **Usage:** `.set lockdelay <seconds> <lock>`\n\n"
+                "⚠️ **Usage:** `.set global lockdelay <seconds> <lock>`\n\n"
                 "**Examples:**\n"
-                "• `.set lockdelay 15 sh` *(Sets Shiny Hunt delay to 15s)*\n"
-                "• `.set lockdelay 15 sh cl tp` *(Sets Shiny, Collection, and Type Ping delays)*\n"
-                "• `.set lockdelay 15 all` *(Sets all delays to 15s)*"
+                "• `.set global lockdelay 15 sh` *(Sets Shiny Hunt delay to 15s for whole server)*\n"
+                "• `.set global lockdelay 15 sh cl tp` *(Sets delays for multiple locks globally)*\n"
+                "• `.set global lockdelay 15 all` *(Sets all delays to 15s for whole server)*"
             )
 
         try:
@@ -137,13 +151,90 @@ class Set(commands.Cog):
         if not cats:
             return await ctx.send(f"⚠️ Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}")
 
-        cfg_doc = await cog.get_guild_config(ctx.guild.id)
         lines = []
         for cat in cats:
+            # Apply to whole server (guild level)
             await cog.set_delay(ctx.guild.id, cat, delay)
-            line = f"⏱️ **{cog.display_name(cat)}** delay set to **{delay}s**."
-            if not (cfg_doc.get(cat) or {}).get("delay_enabled", True):
-                line += f" (Delay is currently **off**, so it still locks immediately. Turn it on with `.toggle lockdelay {cat}`.)"
+            line = f"⏱️ **{cog.display_name(cat)}** delay set to **{delay}s** for the **whole server**."
+            lines.append(line)
+
+        if unknown:
+            lines.append(f"⚠️ Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}")
+
+        await ctx.send("\n".join(lines))
+
+    # --- .set lockdelay <seconds> <lock...> [--global] ------------------------------------
+    @set_group.command(name="lockdelay", aliases=["ld", "delay", "lock-delay"])
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def set_lockdelay(self, ctx: commands.Context, seconds: str = None, *locks_and_flags: str):
+        # Parse arguments to check for --global flag
+        locks = []
+        global_flag = False
+        
+        for arg in locks_and_flags:
+            if arg.lower() == "--global":
+                global_flag = True
+            else:
+                locks.append(arg)
+                
+        if seconds is None or not locks:
+            usage = (
+                "⚠️ **Usage:** `.set lockdelay <seconds> <lock>` [--global]\n\n"
+                "**Examples:**\n"
+                "• `.set lockdelay 15 sh` *(Sets Shiny Hunt delay to 15s for current channel)*\n"
+                "• `.set lockdelay 15 sh --global` *(Sets Shiny Hunt delay to 15s for whole server)*\n"
+                "• `.set lockdelay 15 sh cl tp` *(Sets Shiny, Collection, and Type Ping delays)*\n"
+                "• `.set lockdelay 15 all` *(Sets all delays to 15s)*"
+            )
+            return await ctx.send(usage)
+
+        try:
+            delay = int(seconds.lower().rstrip("s"))
+        except ValueError:
+            return await ctx.send(f"⚠️ `{seconds}` isn't a valid number of seconds.")
+
+        if not (1 <= delay <= 600):
+            return await ctx.send(
+                f"⚠️ Delay must be between **1** and **600** seconds. To lock instantly, turn the delay off with `.toggle lockdelay <lock>`."
+            )
+
+        cog = self.bot.get_cog("AutoLockConfig")
+        if not cog:
+            return await ctx.send("⚠️ Internal error: `AutoLockConfig` cog is not loaded.")
+
+        if any(l.lower() == "all" for l in locks):
+            cats = list(cog.all_categories())
+            unknown = []
+        else:
+            cats, unknown = [], []
+            for tok in locks:
+                cat = cog.resolve_category(tok)
+                if cat is None:
+                    unknown.append(tok)
+                elif cat not in cats:
+                    cats.append(cat)
+
+        if not cats:
+            return await ctx.send(f"⚠️ Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}")
+
+        lines = []
+        for cat in cats:
+            if global_flag:
+                # Apply to whole server (guild level)
+                await cog.set_delay(ctx.guild.id, cat, delay)
+                scope = "whole server"
+            else:
+                # Apply to current channel only
+                await cog.set_delay_channel(ctx.guild.id, ctx.channel.id, cat, delay)
+                scope = f"{ctx.channel.mention}"
+            
+            line = f"⏱️ **{cog.display_name(cat)}** delay set to **{delay}s** for {scope}."
+            if not global_flag:
+                # Only show delay status for channel-specific setting
+                cfg_doc = await cog.get_guild_config(ctx.guild.id)
+                if not (cfg_doc.get(cat) or {}).get("delay_enabled", True):
+                    line += f" (Delay is currently **off**, so it still locks immediately. Turn it on with `.toggle lockdelay {cat}`.)"
             lines.append(line)
 
         if unknown:
