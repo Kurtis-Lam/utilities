@@ -6,71 +6,43 @@ from discord.ext import commands
 from views.autolockview import (
     AutoLockMainView,
     CATEGORY_LABELS,
-    CATEGORY_ORDER,
+    ALL_CATEGORIES,
     CATEGORY_DESCRIPTIONS,
     ROLE_CATEGORIES,
     ROLE_COMMAND_HINTS,
     RESTRICT_CATEGORIES,
 )
+from .lock_common import (
+    DEFAULT_DELAY,
+    resolve_category as _resolve_category,
+    display_name as _display_name,
+)
 from .base import config_group
 
-DEFAULT_DELAY = 10
 
-# --- category helpers ---------------------------------------------------------
-# "re" (reserves) is the same key the PokePings cog and the Recognizer use.
-# Everything falls back gracefully if views/autolockview.py doesn't know "re" yet.
-
-_EXTRA_LABELS = {"re": "Reserves"}
-
-# Reserves first, then whatever order the view already uses.
-ALL_CATEGORIES = tuple(CATEGORY_ORDER) if "re" in CATEGORY_ORDER else ("re", *CATEGORY_ORDER)
-
-# Locks that can restrict who may unlock (they ping specific users, not a role).
-UNLOCK_RESTRICTABLE = frozenset(RESTRICT_CATEGORIES) | {"re"}
-
-CATEGORY_NAMES = {
-    "re": "Reserves Lock",
-    "sh": "Shiny Hunt Lock",
-    "cl": "Collection Lock",
-    "tp": "Type Ping Lock",
-    "rp": "Region Ping Lock",
-    "rare": "Rare Lock",
-    "regional": "Regional Lock",
-    "gmax": "Gigantamax Lock",
-    "paradox": "Paradox Lock",
-    "eevos": "Eeveelutions Lock",
-}
-
-# category key -> accepted names (without the "lock" suffix; see resolve_category)
-CATEGORY_ALIASES = {
-    "re": ("res", "reserve", "reserves"),
-    "sh": ("sh", "shiny", "shinyhunt", "shinyhunts"),
-    "cl": ("cl", "collection", "collections"),
-    "tp": ("tp", "typeping", "typepings", "type", "types"),
-    "rp": ("rp", "regionping", "regionpings", "region", "regions"),
-    "rare": ("ra", "rare"),
-    "regional": ("reg", "regional"),
-    "gmax": ("gmax", "gigantamax"),
-    "paradox": ("para", "paradox"),
-    "eevos": ("eevos", "eevo", "eeveelution", "eeveelutions", "eeveeevolutions"),
-}
-
-_ALIAS_LOOKUP = {alias: cat for cat, aliases in CATEGORY_ALIASES.items() for alias in aliases}
-_ALIAS_LOOKUP.update({cat: cat for cat in CATEGORY_ALIASES if cat != "re"})
-
-
-def _label(category: str) -> str:
-    return CATEGORY_LABELS.get(category) or _EXTRA_LABELS.get(category) or category.capitalize()
-
-
-def _default_category() -> dict:
+def _default_category(category: str) -> dict:
+    """
+    Defaults for a brand-new category config:
+      - disabled until an admin turns it on
+      - 15s delay before locking
+      - no whitelist (so nothing will autolock until channels/categories are added)
+      - restrict unlockers ON for the 5 locks that ping specific users
+        (res/sh/cl/tp/rp), so only the pinged user(s) or an admin can unlock.
+        The 5 role-ping locks (rare/regional/gmax/paradox/eevos) can't restrict
+        at all — they ping a role, not a person — so anyone can unlock those;
+        this key is simply unused for them.
+    """
     return {
         "enabled": False,
         "delay": DEFAULT_DELAY,
         "delay_enabled": True,  # True = wait `delay` seconds, False = lock immediately
         "whitelist": [],
-        "restrict_unlockers": False,
+        "restrict_unlockers": category in RESTRICT_CATEGORIES,
     }
+
+
+def _label(category: str) -> str:
+    return CATEGORY_LABELS.get(category, category.capitalize())
 
 
 def _delay_text(cfg: dict) -> str:
@@ -129,21 +101,15 @@ class AutoLockConfig(commands.Cog):
 
     @staticmethod
     def resolve_category(token: str) -> str | None:
-        """'shlock' / 'sh-lock' / 'shinyhunt' / 'res' -> 'sh' / 'sh' / 'sh' / 're'. None if unknown."""
-        t = re.sub(r"[\s_\-]+", "", token.lower())
-        if t in _ALIAS_LOOKUP:
-            return _ALIAS_LOOKUP[t]
-        if t.endswith("lock"):
-            return _ALIAS_LOOKUP.get(t[:-4])
-        return None
+        return _resolve_category(token)
 
     @staticmethod
     def display_name(category: str) -> str:
-        return CATEGORY_NAMES.get(category, category.capitalize())
+        return _display_name(category)
 
     @staticmethod
     def can_restrict(category: str) -> bool:
-        return category in UNLOCK_RESTRICTABLE
+        return category in RESTRICT_CATEGORIES
 
     @staticmethod
     def all_categories() -> tuple:
@@ -156,17 +122,17 @@ class AutoLockConfig(commands.Cog):
         doc = await self.collection.find_one({"_id": gid})
 
         if not doc:
-            doc = {"_id": gid, **{cat: _default_category() for cat in ALL_CATEGORIES}}
+            doc = {"_id": gid, **{cat: _default_category(cat) for cat in ALL_CATEGORIES}}
             await self.collection.insert_one(doc)
             return doc
 
         needs_update = False
         for cat in ALL_CATEGORIES:
             if not isinstance(doc.get(cat), dict):
-                doc[cat] = _default_category()
+                doc[cat] = _default_category(cat)
                 needs_update = True
             else:
-                for key, val in _default_category().items():
+                for key, val in _default_category(cat).items():
                     if key not in doc[cat]:
                         doc[cat][key] = val
                         needs_update = True
@@ -182,7 +148,7 @@ class AutoLockConfig(commands.Cog):
 
     async def get_category_config(self, guild_id: int, category: str) -> dict:
         doc = await self.get_guild_config(guild_id)
-        return doc.get(category, _default_category())
+        return doc.get(category, _default_category(category))
 
     async def toggle_lock(self, guild_id: int, category: str) -> bool:
         cfg = await self.get_category_config(guild_id, category)
@@ -391,7 +357,7 @@ class AutoLockConfig(commands.Cog):
         )
 
     # --- reading roles from PokePings (never written here) --------------------
-    # Roles are written by the PokePings cog (see .set rarerole etc. in autolockset.py).
+    # Roles are written by the PokePings cog (see .set rarerole etc. in set.py).
 
     async def get_ping_role(self, guild: discord.Guild, category: str) -> discord.Role | None:
         doc = await self.pings_collection.find_one({"_id": str(guild.id)})
@@ -479,7 +445,7 @@ class AutoLockConfig(commands.Cog):
         )
 
         for cat in ALL_CATEGORIES:
-            cfg = doc.get(cat, _default_category())
+            cfg = doc.get(cat, _default_category(cat))
             is_enabled = cfg.get("enabled", False)
             status_icon = "✅" if is_enabled else "❌"
             wl_count = len(cfg.get("whitelist", []))
@@ -491,8 +457,9 @@ class AutoLockConfig(commands.Cog):
             if cat in ROLE_CATEGORIES:
                 role = await self.get_ping_role(guild, cat)
                 lines.append(f"Role: {role.mention if role else 'Not set'}")
-            if cat in UNLOCK_RESTRICTABLE:
-                lines.append(f"Restrict Unlockers: `{cfg.get('restrict_unlockers', False)}`")
+                lines.append("Unlock: anyone (role ping)")
+            if cat in RESTRICT_CATEGORIES:
+                lines.append(f"Restrict Unlockers: `{cfg.get('restrict_unlockers', True)}`")
 
             override_count = self._count_channel_overrides(doc, cat)
             if override_count:
@@ -504,7 +471,7 @@ class AutoLockConfig(commands.Cog):
 
     async def build_category_embed(self, guild: discord.Guild, category: str) -> discord.Embed:
         doc = await self.get_guild_config(guild.id)
-        cfg = doc.get(category, _default_category())
+        cfg = doc.get(category, _default_category(category))
         is_enabled = cfg.get("enabled", False)
         status_str = "Enabled ✅" if is_enabled else "Disabled ❌"
         delay_on = cfg.get("delay_enabled", True)
@@ -547,12 +514,17 @@ class AutoLockConfig(commands.Cog):
                 ),
                 inline=False,
             )
+            embed.add_field(
+                name="Who Can Unlock",
+                value="Anyone — this lock pings a role, not specific users, so it can't be restricted.",
+                inline=False,
+            )
 
-        if category in UNLOCK_RESTRICTABLE:
+        if category in RESTRICT_CATEGORIES:
             embed.add_field(
                 name="Restrict Unlockers",
                 value=(
-                    f"`{cfg.get('restrict_unlockers', False)}` — when enabled, only the user(s) "
+                    f"`{cfg.get('restrict_unlockers', True)}` — when enabled, only the user(s) "
                     "pinged for this lock may unlock the channel (server admins can always unlock). "
                     "If several restricted locks trigger at once, Reserves > Shiny Hunt > Collection > others."
                 ),
