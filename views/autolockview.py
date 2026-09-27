@@ -2,24 +2,38 @@ import re
 
 import discord
 
-# --- Shared constants -------------------------------------------------------
+# --- Shared UI constants ------------------------------------------------------
 
 CATEGORY_LABELS = {
     "re": "Res Lock",
+    "sh": "Sh Lock",
+    "cl": "Cl Lock",
+    "rp": "Rp Lock",
+    "tp": "Tp Lock",
     "rare": "Rare Lock",
     "regional": "Regional Lock",
     "gmax": "Gmax Lock",
     "paradox": "Paradox Lock",
     "eevos": "Eevos Lock",
-    "sh": "Sh Lock",
-    "cl": "Cl Lock",
-    "tp": "Tp Lock",
-    "rp": "Rp Lock",
 }
-# Unlock priority order: res > sh > cl > everything else (the rest are equal)
-CATEGORY_ORDER = ("re", "sh", "cl", "tp", "rp", "rare", "regional", "gmax", "paradox", "eevos")
 
-# Same limits as `.set lockdelay` (autolockset.py). To lock instantly, turn the delay OFF instead.
+# Button layout for the `.c a` main page — exactly the rows requested:
+#   row 1: res, sh, cl
+#   row 2: rp, tp
+#   row 3: rare, regional
+#   row 4: gmax, paradox, eevos
+# CATEGORY_ORDER is just this flattened, and is also the order everything
+# else (embeds, .chsettings, .set/.toggle "all") iterates categories in.
+ROW_LAYOUT = (
+    ("re", "sh", "cl"),
+    ("rp", "tp"),
+    ("rare", "regional"),
+    ("gmax", "paradox", "eevos"),
+)
+CATEGORY_ORDER = tuple(cat for row in ROW_LAYOUT for cat in row)
+ALL_CATEGORIES = CATEGORY_ORDER
+
+# Same limits as `.set lockdelay`. To lock instantly, turn the delay OFF instead.
 MIN_DELAY = 1
 MAX_DELAY = 600
 
@@ -43,12 +57,23 @@ CATEGORY_DESCRIPTIONS = {
 }
 
 
+# --- small shared helper -------------------------------------------------------
+
+async def _build_category_page(cog, guild: discord.Guild, guild_id: int, author_id: int, category: str):
+    """(embed, view) for a category's config page, always built from a fresh
+    read of the config so the on/off button colors match reality."""
+    cfg = await cog.get_category_config(guild_id, category)
+    embed = await cog.build_category_embed(guild, category)
+    view = CategoryConfigView(cog, guild_id=guild_id, author_id=author_id, category=category, cfg=cfg)
+    return embed, view
+
+
 # --- Modals ------------------------------------------------------------------
 
 class DelayModal(discord.ui.Modal, title="Set Lock Delay"):
     delay_seconds = discord.ui.TextInput(
         label="Delay (seconds)",
-        placeholder=f"e.g. 10 ({MIN_DELAY}-{MAX_DELAY})",
+        placeholder=f"e.g. 15 ({MIN_DELAY}-{MAX_DELAY})",
         required=True,
         max_length=5,
     )
@@ -71,16 +96,15 @@ class DelayModal(discord.ui.Modal, title="Set Lock Delay"):
         if not (MIN_DELAY <= delay <= MAX_DELAY):
             return await interaction.response.send_message(
                 f"⚠️ Delay must be between `{MIN_DELAY}` and `{MAX_DELAY}` seconds. "
-                "To lock instantly, use **Toggle Delay** to turn the delay off.",
+                "To lock instantly, use **Turn Delay Off** instead.",
                 ephemeral=True,
             )
 
         await self.cog.set_delay(self.guild_id, self.category, delay)
         cfg = await self.cog.get_category_config(self.guild_id, self.category)
 
-        embed = await self.cog.build_category_embed(interaction.guild, self.category)
-        view = CategoryConfigView(
-            self.cog, guild_id=self.guild_id, author_id=interaction.user.id, category=self.category
+        embed, view = await _build_category_page(
+            self.cog, interaction.guild, self.guild_id, interaction.user.id, self.category
         )
         try:
             await self.parent_message.edit(embed=embed, view=view)
@@ -130,9 +154,8 @@ class WhitelistModal(discord.ui.Modal):
             await self.cog.remove_whitelist(interaction.guild, self.category, raw_val)
             verb = "removed from"
 
-        embed = await self.cog.build_category_embed(interaction.guild, self.category)
-        view = CategoryConfigView(
-            self.cog, guild_id=self.guild_id, author_id=interaction.user.id, category=self.category
+        embed, view = await _build_category_page(
+            self.cog, interaction.guild, self.guild_id, interaction.user.id, self.category
         )
         try:
             await self.parent_message.edit(embed=embed, view=view)
@@ -145,30 +168,56 @@ class WhitelistModal(discord.ui.Modal):
 # --- Views ---------------------------------------------------------------------
 
 class CategoryConfigView(discord.ui.View):
-    """Config page for a single category."""
+    """
+    Config page for a single category.
 
-    def __init__(self, cog, guild_id: int, author_id: int, category: str):
+    `cfg` is that category's current effective (guild-wide) config. It's only
+    used to decide button labels/colors: the on/off, delay, and restrict
+    buttons always show what will happen if pressed as a plain "Turn On"
+    (green) / "Turn Off" (red) rather than an ambiguous "Toggle" button.
+    """
+
+    def __init__(self, cog, guild_id: int, author_id: int, category: str, cfg: dict):
         super().__init__(timeout=180)
         self.cog = cog
         self.guild_id = guild_id
         self.author_id = author_id
         self.category = category
 
-        # Row 0: Configuration controls
+        # Row 0: configuration controls
         self.add_item(self._make_button("Set Delay", discord.ButtonStyle.blurple, self._set_delay, row=0))
         self.add_item(self._make_button("Add Whitelist", discord.ButtonStyle.green, self._add_whitelist, row=0))
         self.add_item(self._make_button("Remove Whitelist", discord.ButtonStyle.red, self._remove_whitelist, row=0))
 
-        # Row 1: Toggles directly below whitelist controls
-        self.add_item(self._make_button("Toggle", discord.ButtonStyle.primary, self._toggle_lock, row=1))
-        self.add_item(self._make_button("Toggle Delay", discord.ButtonStyle.gray, self._toggle_delay, row=1))
+        # Row 1: on/off switches, always showing the CURRENT state and the
+        # color of the action pressing them will take (green = will turn on,
+        # red = will turn off).
+        is_enabled = cfg.get("enabled", False)
+        self.add_item(self._make_button(
+            "Turn Off" if is_enabled else "Turn On",
+            discord.ButtonStyle.red if is_enabled else discord.ButtonStyle.green,
+            self._toggle_lock,
+            row=1,
+        ))
+
+        delay_on = cfg.get("delay_enabled", True)
+        self.add_item(self._make_button(
+            "Turn Delay Off" if delay_on else "Turn Delay On",
+            discord.ButtonStyle.red if delay_on else discord.ButtonStyle.green,
+            self._toggle_delay,
+            row=1,
+        ))
 
         if category in RESTRICT_CATEGORIES:
-            self.add_item(
-                self._make_button("Toggle Restrict Unlockers", discord.ButtonStyle.gray, self._toggle_restrict, row=1)
-            )
+            restrict_on = cfg.get("restrict_unlockers", True)
+            self.add_item(self._make_button(
+                "Turn Restrict Off" if restrict_on else "Turn Restrict On",
+                discord.ButtonStyle.red if restrict_on else discord.ButtonStyle.green,
+                self._toggle_restrict,
+                row=1,
+            ))
 
-        # Row 2: Navigation
+        # Row 2: navigation
         self.add_item(self._make_button("Back", discord.ButtonStyle.gray, self._back, row=2))
 
     def _make_button(self, label, style, callback, row=0):
@@ -201,25 +250,22 @@ class CategoryConfigView(discord.ui.View):
 
     async def _toggle_lock(self, interaction: discord.Interaction):
         await self.cog.toggle_lock(self.guild_id, self.category)
-        embed = await self.cog.build_category_embed(interaction.guild, self.category)
-        view = CategoryConfigView(
-            self.cog, guild_id=self.guild_id, author_id=self.author_id, category=self.category
+        embed, view = await _build_category_page(
+            self.cog, interaction.guild, self.guild_id, self.author_id, self.category
         )
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def _toggle_delay(self, interaction: discord.Interaction):
         await self.cog.toggle_delay(self.guild_id, self.category)
-        embed = await self.cog.build_category_embed(interaction.guild, self.category)
-        view = CategoryConfigView(
-            self.cog, guild_id=self.guild_id, author_id=self.author_id, category=self.category
+        embed, view = await _build_category_page(
+            self.cog, interaction.guild, self.guild_id, self.author_id, self.category
         )
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def _toggle_restrict(self, interaction: discord.Interaction):
         await self.cog.toggle_restrict(self.guild_id, self.category)
-        embed = await self.cog.build_category_embed(interaction.guild, self.category)
-        view = CategoryConfigView(
-            self.cog, guild_id=self.guild_id, author_id=self.author_id, category=self.category
+        embed, view = await _build_category_page(
+            self.cog, interaction.guild, self.guild_id, self.author_id, self.category
         )
         await interaction.response.edit_message(embed=embed, view=view)
 
@@ -230,7 +276,7 @@ class CategoryConfigView(discord.ui.View):
 
 
 class AutoLockMainView(discord.ui.View):
-    """Landing page: one button per lock category, 3 per row."""
+    """Landing page for `.c a`: one button per lock category, laid out per ROW_LAYOUT."""
 
     def __init__(self, cog, guild_id: int, author_id: int):
         super().__init__(timeout=180)
@@ -238,17 +284,16 @@ class AutoLockMainView(discord.ui.View):
         self.guild_id = guild_id
         self.author_id = author_id
 
-        for i, cat in enumerate(CATEGORY_ORDER):
-            row = i // 3
-            button = discord.ui.Button(label=CATEGORY_LABELS[cat], style=discord.ButtonStyle.blurple, row=row)
-            button.callback = self._make_callback(cat)
-            self.add_item(button)
+        for row_index, row in enumerate(ROW_LAYOUT):
+            for cat in row:
+                button = discord.ui.Button(label=CATEGORY_LABELS[cat], style=discord.ButtonStyle.blurple, row=row_index)
+                button.callback = self._make_callback(cat)
+                self.add_item(button)
 
     def _make_callback(self, category: str):
         async def callback(interaction: discord.Interaction):
-            embed = await self.cog.build_category_embed(interaction.guild, category)
-            view = CategoryConfigView(
-                self.cog, guild_id=self.guild_id, author_id=self.author_id, category=category
+            embed, view = await _build_category_page(
+                self.cog, interaction.guild, self.guild_id, self.author_id, category
             )
             await interaction.response.edit_message(embed=embed, view=view)
 
