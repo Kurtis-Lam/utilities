@@ -3,64 +3,35 @@ import asyncio
 import discord
 from discord.ext import commands
 
+from .lock_common import POKETWO_ID, get_poketwo_target, can_unlock, unlock_denied_message
+
 
 class LockUnlock(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.target_user_id = 716390085896962058
 
     @property
     def locks_collection(self):
         """Dynamically retrieves the collection from the shared main MongoDB client."""
         return self.bot.mongo_client["utilities"]["locked_channels"]
 
-    async def _get_target_user(self, guild: discord.Guild = None):
-        """Cache-first lookup to avoid unnecessary HTTP requests to Discord API."""
-        if guild:
-            member = guild.get_member(self.target_user_id)
-            if member:
-                return member
-
-        user = self.bot.get_user(self.target_user_id)
-        if user:
-            return user
-
-        return await self.bot.fetch_user(self.target_user_id)
-
-    # --- lock-state helpers (schema shared with autolock.py) -------------------
-    # locked_channels document:
-    #   _id: channel id, guild_id, allowed_users: [ids] | None (None = anyone),
-    #   source: "autolock" | "manual", categories, restricted_by, locked_at
-
-    @staticmethod
-    def _can_unlock(lock_doc: dict | None, member: discord.Member) -> bool:
-        if not lock_doc:
-            return True
-        allowed = lock_doc.get("allowed_users")
-        if allowed is None:
-            return True
-        return member.id in allowed or member.guild_permissions.administrator
-
-    @staticmethod
-    def _denied_message(lock_doc: dict) -> str:
-        allowed = lock_doc.get("allowed_users") or []
-        mentions = ", ".join(f"<@{uid}>" for uid in allowed)
-        return f"⚠️ Only {mentions} (or a server admin) can unlock this channel."
-
     @commands.hybrid_command(aliases=["u"], name="unlock", description="Unlocks the current channel.")
     async def unlock(self, ctx):
         # Motor queries return a Future, pass them directly to asyncio.gather
-        user_task = self._get_target_user(ctx.guild)
+        user_task = get_poketwo_target(ctx.guild)
         lock_doc_task = self.locks_collection.find_one({"_id": ctx.channel.id})
 
         user, lock_doc = await asyncio.gather(user_task, lock_doc_task)
+
+        if user is None:
+            return await ctx.reply("⚠️ Poketwo isn't in this server.")
 
         allowed_mentions = discord.AllowedMentions.none()
 
         if lock_doc:
             # Lock was synced to MongoDB (autolock or .lock): enforce its unlock rules
-            if not self._can_unlock(lock_doc, ctx.author):
-                return await ctx.reply(self._denied_message(lock_doc), allowed_mentions=allowed_mentions)
+            if not can_unlock(lock_doc, ctx.author):
+                return await ctx.reply(unlock_denied_message(lock_doc), allowed_mentions=allowed_mentions)
         else:
             # No record: only proceed if the channel actually looks locked
             overwrite = ctx.channel.overwrites_for(user)
@@ -80,7 +51,7 @@ class LockUnlock(commands.Cog):
     async def lock(self, ctx):
         # Don't let someone hijack a restricted (e.g. reserved / shiny hunt) lock
         existing = await self.locks_collection.find_one({"_id": ctx.channel.id})
-        if existing and not self._can_unlock(existing, ctx.author):
+        if existing and not can_unlock(existing, ctx.author):
             mentions = ", ".join(f"<@{uid}>" for uid in existing.get("allowed_users") or [])
             return await ctx.reply(
                 f"⚠️ This channel is already locked and restricted to {mentions} (or a server admin).",
@@ -90,7 +61,7 @@ class LockUnlock(commands.Cog):
         permissions = discord.PermissionOverwrite(read_messages=False, send_messages=False)
 
         # Run user fetch and Mongo upsert concurrently
-        user_task = self._get_target_user(ctx.guild)
+        user_task = get_poketwo_target(ctx.guild)
         db_task = self.locks_collection.update_one(
             {"_id": ctx.channel.id},
             {"$set": {
@@ -105,6 +76,10 @@ class LockUnlock(commands.Cog):
         )
 
         user, _ = await asyncio.gather(user_task, db_task)
+
+        if user is None:
+            return await ctx.reply("⚠️ Poketwo isn't in this server.")
+
         await ctx.channel.set_permissions(user, overwrite=permissions)
 
         await ctx.reply(f"🔒 **{ctx.channel.mention}** was locked by {ctx.author.mention} 🔴")
@@ -116,7 +91,10 @@ class LockUnlock(commands.Cog):
 
         await self.locks_collection.delete_many({"guild_id": ctx.guild.id})
 
-        user = await self._get_target_user(ctx.guild)
+        user = await get_poketwo_target(ctx.guild)
+        if user is None:
+            return await ctx.reply("⚠️ Poketwo isn't in this server.")
+
         msg = await ctx.send("🔓 Unlocking channels in batches...")
 
         target_channels = [
@@ -152,7 +130,9 @@ class LockUnlock(commands.Cog):
 
     @commands.hybrid_command(name="lockstats", aliases=["ls"], description="Shows all locked and unlocked channels.")
     async def lockstats(self, ctx):
-        user = await self._get_target_user(ctx.guild)
+        user = await get_poketwo_target(ctx.guild)
+        if user is None:
+            return await ctx.reply("⚠️ Poketwo isn't in this server.")
 
         locked = []
         unlocked = []
@@ -196,6 +176,7 @@ class LockUnlock(commands.Cog):
         add_channel_fields("🔓 Unlocked Channels", unlocked)
 
         await ctx.reply(embed=embed)
+
 
 async def setup(bot):
     await bot.add_cog(LockUnlock(bot))
