@@ -4,7 +4,7 @@ import datetime
 import discord
 from discord.ext import commands
 
-from .lock_common import (
+from cogs.poketwo.lockcommon import (
     POKETWO_ID,
     DEFAULT_DELAY,
     UNLOCK_PRIORITY,
