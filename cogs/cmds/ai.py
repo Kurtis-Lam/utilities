@@ -51,16 +51,6 @@ if not OPENROUTER_API_KEYS:
     raise ValueError("No usable OpenRouter API keys found in config.json.")
 
 # --- Account grouping for keys ------------------------------------------
-# OpenRouter's /api/v1/key endpoint does not expose any cross-key "account id" —
-# label/usage/limit are all per-key, not per-account — so keys belonging to the
-# same OpenRouter account can't be auto-detected reliably. Group them explicitly:
-#
-#   "AI_CHATBOT_KEY_ACCOUNTS": ["accountA", "accountA", "accountB", "accountB", "accountB"]
-#
-# One entry per key in AI_CHATBOT_KEYS, same order/length. Keys sharing the same
-# string are treated as being on the same OpenRouter account (and therefore
-# sharing a single 50/day free-tier limit). If omitted, every key is treated as
-# its own separate account.
 _raw_key_accounts = config.get("AI_CHATBOT_KEY_ACCOUNTS")
 if _raw_key_accounts:
     if len(_raw_key_accounts) != len(OPENROUTER_API_KEYS):
@@ -72,10 +62,31 @@ if _raw_key_accounts:
 else:
     KEY_ACCOUNT_IDS = [f"key{i + 1}" for i in range(len(OPENROUTER_API_KEYS))]
 
+# --- Per-key daily request limits ---------------------------------------
+# OpenRouter's free-model daily cap is 50 requests/day per key by default,
+# or 1000 requests/day once that key's account has ever purchased >= $10 of
+# credits. Configure this per key in config.json, e.g.:
+#   "AI_CHATBOT_KEY_DAILY_LIMITS": [1000, 50, 50]
+# A single number applies to every key. If omitted, every key defaults to 50.
+DEFAULT_FREE_DAILY_LIMIT = 50
+
+_raw_key_limits = config.get("AI_CHATBOT_KEY_DAILY_LIMITS")
+if _raw_key_limits is not None:
+    if isinstance(_raw_key_limits, (int, float)):
+        _raw_key_limits = [int(_raw_key_limits)] * len(OPENROUTER_API_KEYS)
+    if len(_raw_key_limits) != len(OPENROUTER_API_KEYS):
+        raise ValueError(
+            "'AI_CHATBOT_KEY_DAILY_LIMITS' must have exactly one entry per key in "
+            "'AI_CHATBOT_KEYS' (same order, same length), or be a single number."
+        )
+    KEY_DAILY_LIMITS = [int(x) for x in _raw_key_limits]
+else:
+    KEY_DAILY_LIMITS = [DEFAULT_FREE_DAILY_LIMIT] * len(OPENROUTER_API_KEYS)
+
 MAX_TOOL_ITERATIONS = 32       # limit for multi-step file edits
-TOOL_CALL_MAX_TOKENS = 2048    # budget for reasoning/tools
+TOOL_CALL_MAX_TOKENS = 4096    # budget for reasoning/tools
 CHAT_MAX_TOKENS = 1024
-REQUEST_TIMEOUT_SECONDS = 180  # timeout for OpenRouter responses
+REQUEST_TIMEOUT_SECONDS = 30   # Increased to 30s to allow free models sufficient time
 
 SUBTASK_MAX_ITERATIONS = 6
 SUBTASK_MAX_TOKENS = 1024
@@ -133,6 +144,41 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
     return chunks
 
 
+DISCORD_MESSAGE_LIMIT = 2000
+
+
+class StatusUpdater:
+    """Manages a single live progress message showing bot execution steps."""
+
+    def __init__(self, first_message: discord.Message):
+        self.channel = first_message.channel
+        self.messages: list[discord.Message] = [first_message]
+        self.current_text = first_message.content or ""
+
+    async def append(self, text: str):
+        """Appends subtext lines to the Discord progress message."""
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()] or [text.strip()]
+        for line in lines:
+            if not line:
+                continue
+            subtext_line = f"-# {line}"
+            candidate = f"{self.current_text}\n{subtext_line}" if self.current_text else subtext_line
+
+            if len(candidate) <= DISCORD_MESSAGE_LIMIT:
+                self.current_text = candidate
+                try:
+                    await self.messages[-1].edit(content=self.current_text)
+                except discord.HTTPException:
+                    pass
+            else:
+                try:
+                    new_msg = await self.channel.send(subtext_line)
+                    self.messages.append(new_msg)
+                    self.current_text = subtext_line
+                except discord.HTTPException:
+                    pass
+
+
 class AIChat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -144,28 +190,27 @@ class AIChat(commands.Cog):
         self.worker_keys = self.api_keys[1:] if len(self.api_keys) > 1 else self.api_keys
         self._worker_key_cycle_idx = 0
 
-        # Maps each raw key string -> the account id it belongs to (see
-        # AI_CHATBOT_KEY_ACCOUNTS above). Used to group usage in `ai-info`.
         self.key_account_id: dict[str, str] = dict(zip(self.api_keys, KEY_ACCOUNT_IDS))
+        self.key_daily_limit: dict[str, int] = dict(zip(self.api_keys, KEY_DAILY_LIMITS))
 
         self.current_model = "openrouter/free"
         self.history = defaultdict(list)
         self.max_history = 10
         self._channel_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-        # Persistent daily usage tracking per key (LOCAL ESTIMATE ONLY — see
-        # key_rate_limit_snapshot below for the authoritative server-side number)
         self.last_usage_reset_date = datetime.now(timezone.utc).date()
         self.key_usage_today = load_key_usage()
-
-        # Most recent x-ratelimit-* headers OpenRouter returned for each key,
-        # IF that key has ever hit an error response. OpenRouter only sends
-        # these headers on errors (never on a normal 200 OK), so this is NOT
-        # a live quota snapshot — it's just "state at the last time this key
-        # got rate-limited." ai_info() uses the live `free_model_daily_requests`
-        # field from GET /api/v1/key instead; this dict is only a fallback for
-        # when that live lookup fails. Not persisted to disk.
         self.key_rate_limit_snapshot: dict[str, dict] = {}
+        self.session: aiohttp.ClientSession | None = None
+
+    async def cog_load(self):
+        """Initializes a shared HTTP session when the cog is loaded."""
+        self.session = aiohttp.ClientSession()
+
+    async def cog_unload(self):
+        """Closes the shared HTTP session when the cog is unloaded."""
+        if self.session and not self.session.closed:
+            await self.session.close()
 
     def _check_daily_reset(self):
         """Resets key usage counts at midnight UTC."""
@@ -176,25 +221,19 @@ class AIChat(commands.Cog):
             save_key_usage(self.key_usage_today)
 
     def _record_key_use(self, key: str):
-        """Increments the daily request count for the specified key and persists it.
-        NOTE: this is only a local estimate of requests sent by THIS bot process —
-        see _record_rate_limit_headers for OpenRouter's actual server-side count."""
+        """Increments daily request count for a specific key."""
         self._check_daily_reset()
         self.key_usage_today[key] += 1
         save_key_usage(self.key_usage_today)
 
-    def _record_rate_limit_headers(self, key: str, headers) -> None:
-        """Stores OpenRouter's own x-ratelimit-* response headers for this key,
-        when present.
+    def _key_has_quota(self, key: str) -> bool:
+        """Returns False once a key has hit its configured daily request limit."""
+        self._check_daily_reset()
+        limit = self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)
+        return self.key_usage_today[key] < limit
 
-        NOTE: per OpenRouter's docs, these headers are ONLY ever included on
-        error responses (e.g. a 429) — a normal 200 OK never carries them. So
-        this snapshot only updates at the moment a key gets rate-limited, and
-        then stays frozen (stale) until another 429 happens; it can't be used
-        as a live "quota remaining" indicator. For that, ai_info() below uses
-        the `free_model_daily_requests` field from GET /api/v1/key instead,
-        which is fresh on every call regardless of errors. This snapshot is
-        kept only as a "last time this key was rate-limited" fallback."""
+    def _record_rate_limit_headers(self, key: str, headers) -> None:
+        """Stores OpenRouter x-ratelimit headers."""
         limit = headers.get("x-ratelimit-limit")
         remaining = headers.get("x-ratelimit-remaining")
         reset = headers.get("x-ratelimit-reset")
@@ -210,11 +249,11 @@ class AIChat(commands.Cog):
     # -- path safety -------------------------------------------------------
 
     def _resolve_path(self, relative_path: str) -> str:
-        """Resolves a user/model-supplied relative path against PROJECT_ROOT."""
+        """Resolves a relative path against PROJECT_ROOT."""
         return os.path.abspath(os.path.join(PROJECT_ROOT, relative_path))
 
     def _is_safe_path(self, target_path: str) -> bool:
-        """Security check to ensure code modifications stay inside the project directory."""
+        """Security check ensuring execution remains inside PROJECT_ROOT."""
         abs_target = self._resolve_path(target_path)
         root = os.path.abspath(PROJECT_ROOT)
         return abs_target == root or abs_target.startswith(root + os.sep)
@@ -222,7 +261,7 @@ class AIChat(commands.Cog):
     # -- API key pool & rotation ---------------------------------------------
 
     def _next_worker_key(self) -> str:
-        """Round-robins across configured worker keys for parallel subtasks."""
+        """Round-robins worker keys for parallel tasks."""
         pool = self.worker_keys or [self.primary_key]
         key = pool[self._worker_key_cycle_idx % len(pool)]
         self._worker_key_cycle_idx += 1
@@ -231,9 +270,14 @@ class AIChat(commands.Cog):
     # -- low-level OpenRouter call --------------------------------------------
 
     async def _call_openrouter(
-        self, key: str, messages: list, tools: list | None, max_tokens: int
+        self,
+        key: str,
+        messages: list,
+        tools: list | None,
+        max_tokens: int,
+        reasoning_effort: str | None = None,
     ) -> dict:
-        """Sends one chat-completions request using a specific key."""
+        """Sends one chat-completions request using optimized free fallback models."""
         self._record_key_use(key)
         headers = {
             "Authorization": f"Bearer {key}",
@@ -241,66 +285,114 @@ class AIChat(commands.Cog):
             "HTTP-Referer": "https://your-site-or-repo.com",
             "X-Title": "Utilities Discord Bot Assistant",
         }
+        
+        # Uses lightweight, high-availability free models as fallbacks
         payload = {
-            "model": self.current_model,
+            "models": [
+                self.current_model,
+                "google/gemini-2.0-flash-lite-001:free",
+                "meta-llama/llama-3.1-8b-instruct:free",
+            ],
             "messages": messages,
             "max_tokens": max_tokens,
         }
         if tools:
             payload["tools"] = tools
+        if reasoning_effort:
+            payload["reasoning"] = {"effort": reasoning_effort}
 
-        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS, sock_read=REQUEST_TIMEOUT_SECONDS)
+        session = self.session if self.session and not self.session.closed else aiohttp.ClientSession()
+        close_session = session != self.session
+
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(self.openrouter_url, headers=headers, json=payload) as resp:
-                    self._record_rate_limit_headers(key, resp.headers)
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        raise RuntimeError(f"OpenRouter error ({resp.status}): {error_text}")
-                    return await resp.json()
+            async with session.post(self.openrouter_url, headers=headers, json=payload, timeout=timeout) as resp:
+                self._record_rate_limit_headers(key, resp.headers)
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise RuntimeError(f"OpenRouter error ({resp.status}): {error_text}")
+
+                result = await resp.json()
+                if "choices" not in result and "error" in result:
+                    err = result["error"]
+                    err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                    err_code = err.get("code", "") if isinstance(err, dict) else ""
+                    raise RuntimeError(f"OpenRouter error ({err_code}): {err_msg}")
+                return result
         except asyncio.TimeoutError as e:
             raise RuntimeError(
                 f"OpenRouter didn't respond within {REQUEST_TIMEOUT_SECONDS}s "
                 "(the model may be overloaded or slow right now — try again)."
             ) from e
+        finally:
+            if close_session:
+                await session.close()
 
     async def _call_openrouter_with_rotation(
-        self, messages: list, tools: list | None, max_tokens: int
+        self,
+        messages: list,
+        tools: list | None,
+        max_tokens: int,
+        start_key: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
-        """Sends chat request. If a 429 Rate Limit error occurs, automatically rotates
-        through all configured API keys with backoff delay until a working key is found."""
-        start_key = self.primary_key
+        """Rotates through every configured key before giving up.
+
+        Keys that have already hit their configured daily limit are tried last
+        (as a safety-net fallback only, in case local usage tracking drifted
+        from OpenRouter's real count), so a key being "used up" simply causes
+        the bot to move on to the next key instead of erroring out.
+        """
+        start_key = start_key or self.api_keys[0]
         start_idx = self.api_keys.index(start_key) if start_key in self.api_keys else 0
         n_keys = len(self.api_keys)
 
+        # Explicit client errors that switching keys can never fix.
+        NON_RETRYABLE_CODES = ("400", "404")
+
+        # Try keys with remaining quota first (in round-robin order starting at
+        # start_idx), then fall back to quota-exhausted keys as a last resort.
+        ordered = [(start_idx + offset) % n_keys for offset in range(n_keys)]
+        attempt_order = [i for i in ordered if self._key_has_quota(self.api_keys[i])]
+        attempt_order += [i for i in ordered if i not in attempt_order]
+
         last_error = None
-        for offset in range(n_keys):
-            key_idx = (start_idx + offset) % n_keys
+        for attempt_num, key_idx in enumerate(attempt_order):
             key = self.api_keys[key_idx]
+            is_last_attempt = attempt_num == len(attempt_order) - 1
+
+            if not self._key_has_quota(key) and not is_last_attempt:
+                print(
+                    f"[Key Rotation] Key #{key_idx + 1} is at its daily limit "
+                    f"({self.key_usage_today[key]}/{self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)}); skipping."
+                )
+                continue
 
             try:
-                data = await self._call_openrouter(key, messages, tools, max_tokens)
+                data = await self._call_openrouter(key, messages, tools, max_tokens, reasoning_effort)
                 self.primary_key = key
                 return data
             except RuntimeError as e:
                 last_error = e
-                if "429" in str(e) and n_keys > 1:
-                    next_key_num = ((key_idx + 1) % n_keys) + 1
-                    backoff_sec = 2 * (offset + 1)
+                err_str = str(e)
+                is_non_retryable = any(code in err_str for code in NON_RETRYABLE_CODES)
+                retryable = not is_non_retryable
+
+                if retryable and not is_last_attempt:
+                    next_key_idx = attempt_order[attempt_num + 1]
                     print(
-                        f"[Key Rotation] Key #{key_idx + 1} hit 429 rate limit. "
-                        f"Waiting {backoff_sec}s before rotating to key #{next_key_num}..."
+                        f"[Key Rotation] Key #{key_idx + 1} failed ({err_str}). "
+                        f"Switching to key #{next_key_idx + 1}..."
                     )
-                    await asyncio.sleep(backoff_sec)
                     continue
                 raise e
 
-        raise last_error
+        raise last_error or RuntimeError("No OpenRouter API keys are configured.")
 
     # -- prompt / tool definitions ------------------------------------------
 
     def generate_bot_capabilities_prompt(self, is_owner: bool) -> str:
-        """Inspects all cogs and commands dynamically to build system context."""
+        """Inspects cogs and commands to build system context."""
         capabilities = ["Here is a summary of available server commands you can explain to users:\n"]
 
         for cog_name, cog in self.bot.cogs.items():
@@ -323,10 +415,16 @@ class AIChat(commands.Cog):
                 "`load_extension`, `unload_extension`, `reload_extension`, `restart_bot`, "
                 "`delegate_subtasks`) which let you inspect, modify, and reload/restart your own "
                 f"code when requested. ({worker_note}.)\n\n"
-                "Guidelines for self-editing tasks:\n"
+                "Guidelines for self-editing and investigation tasks:\n"
                 "- All paths are relative to the project root (where config.json lives).\n"
-                "- MANDATORY: After completing all file edits, deletions, or extension reloads, "
-                "you MUST send the user a plain text summary detailing what changes you made."
+                "- BE DIRECT AND ECONOMICAL WITH TOKENS. Do not narrate a long step-by-step "
+                "internal monologue before acting — plan briefly, then act.\n"
+                "- `list_files` is recursive (default depth 4) — call it once near the project "
+                "root to see the whole tree.\n"
+                "- Only `read_file` the specific files you actually need to view or edit.\n"
+                "- MANDATORY: After completing any file edits, deletions, or extension reloads, "
+                "you MUST send the user a plain text summary detailing what changes you made.\n"
+                "- For tasks with multiple independent parts, use `delegate_subtasks`."
             )
 
         return "\n".join(capabilities)
@@ -337,11 +435,18 @@ class AIChat(commands.Cog):
                 "type": "function",
                 "function": {
                     "name": "list_files",
-                    "description": "Lists files and subdirectories in the bot codebase, relative to the project root.",
+                    "description": (
+                        "Recursively lists files and subdirectories under a path in the bot codebase, "
+                        "relative to the project root, as a flat list of relative paths."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Relative directory path (default is '.')."}
+                            "path": {"type": "string", "description": "Relative directory path (default is '.')."},
+                            "max_depth": {
+                                "type": "integer",
+                                "description": "How many directory levels deep to recurse (default 4, max 8)."
+                            }
                         }
                     }
                 }
@@ -443,7 +548,10 @@ class AIChat(commands.Cog):
                 "type": "function",
                 "function": {
                     "name": "delegate_subtasks",
-                    "description": "Runs one or more independent, READ-ONLY investigation subtasks in parallel.",
+                    "description": (
+                        "Splits a task into independent, READ-ONLY investigation subtasks and runs ALL of "
+                        "them concurrently (in parallel), each with its own sub-agent and API key."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -480,12 +588,36 @@ class AIChat(commands.Cog):
 
         if fn_name == "list_files":
             rel_path = args.get("path", ".")
+            try:
+                max_depth = min(int(args.get("max_depth", 4) or 4), 8)
+            except (TypeError, ValueError):
+                max_depth = 4
             if not self._is_safe_path(rel_path):
                 return "Error: Permission denied (path outside project directory)."
             try:
                 full_path = self._resolve_path(rel_path)
-                files = os.listdir(full_path)
-                return json.dumps(files, indent=2)
+                IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+                results = []
+
+                def _walk(current: str, depth: int):
+                    try:
+                        entries = sorted(os.listdir(current))
+                    except Exception:
+                        return
+                    for entry in entries:
+                        if entry in IGNORE_DIRS:
+                            continue
+                        entry_full = os.path.join(current, entry)
+                        entry_rel = os.path.relpath(entry_full, full_path)
+                        if os.path.isdir(entry_full):
+                            results.append(entry_rel + "/")
+                            if depth < max_depth:
+                                _walk(entry_full, depth + 1)
+                        else:
+                            results.append(entry_rel)
+
+                _walk(full_path, 1)
+                return json.dumps(results, indent=2)
             except Exception as e:
                 return f"Error listing directory: {e}"
 
@@ -597,7 +729,7 @@ class AIChat(commands.Cog):
         for _ in range(SUBTASK_MAX_ITERATIONS):
             try:
                 data = await self._call_openrouter_with_rotation(
-                    sub_messages, self.get_worker_tools(), SUBTASK_MAX_TOKENS
+                    sub_messages, self.get_worker_tools(), SUBTASK_MAX_TOKENS, start_key=key
                 )
             except RuntimeError as e:
                 return f"[subtask failed: {e}]"
@@ -641,27 +773,34 @@ class AIChat(commands.Cog):
     @commands.command(name="ai-info", help="Displays model status, and daily usage grouped by OpenRouter account.")
     @commands.is_owner()
     async def ai_info(self, ctx: commands.Context):
-        """Fetches OpenRouter key metadata, groups keys that belong to the same
-        account (per AI_CHATBOT_KEY_ACCOUNTS in config.json), and shows each
-        account's shared 50/day free-tier usage plus a per-key breakdown."""
         self._check_daily_reset()
         timeout = aiohttp.ClientTimeout(total=15)
 
-        # Group key indices by account id, preserving key order within a group.
         account_groups: dict[str, list[int]] = defaultdict(list)
         for idx, key in enumerate(self.api_keys):
             account_groups[self.key_account_id[key]].append(idx)
+
+        total_accounts = len(account_groups)
+        total_limit = sum(self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT) for key in self.api_keys)
+        total_usage = sum(self.key_usage_today[key] for key in self.api_keys)
 
         embed = discord.Embed(title="🤖 AI Key Pool & Usage Status", color=discord.Color.blue())
         embed.add_field(name="Active Model", value=f"`{self.current_model}`", inline=False)
         embed.add_field(
             name="Configured Key Pool",
-            value=f"`{len(self.api_keys)}` total API key(s) across `{len(account_groups)}` account(s)",
+            value=f"`{len(self.api_keys)}` total API key(s) across `{total_accounts}` account(s)",
+            inline=False,
+        )
+        embed.add_field(
+            name="Total Daily Usage",
+            value=f"`{total_usage} / {total_limit}` requests used today across all keys",
             inline=False,
         )
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Fetch per-key info once up front so we can compute account totals.
+        session = self.session if self.session and not self.session.closed else aiohttp.ClientSession(timeout=timeout)
+        close_session = session != self.session
+
+        try:
             key_info: dict[str, dict] = {}
             for key in self.api_keys:
                 headers = {"Authorization": f"Bearer {key}"}
@@ -676,17 +815,6 @@ class AIChat(commands.Cog):
                     key_info[key] = {"_error": str(e)}
 
             for acct_id, indices in account_groups.items():
-                # Live, always-current free-model daily quota for this account,
-                # straight from GET /api/v1/key's `free_model_daily_requests`
-                # field (fetched fresh above, just now, as part of this command).
-                # This is the correct source for the shared 50(or 1000)/day cap:
-                # unlike x-ratelimit-* headers (which OpenRouter only sends on
-                # error responses, never on a normal 200 OK — so a header-based
-                # snapshot goes stale the moment nothing has errored recently),
-                # this field is populated on every single call, success or not.
-                # Since the cap is shared per account, every key on the account
-                # should report the same numbers here; take the first that
-                # answered successfully.
                 fmdr = None
                 for i in indices:
                     info = key_info[self.api_keys[i]]
@@ -694,9 +822,6 @@ class AIChat(commands.Cog):
                         fmdr = info["free_model_daily_requests"]
                         break
 
-                # The free-model daily cap always resets at the next UTC
-                # midnight; render that as a Discord relative timestamp
-                # (renders client-side as "in X hours", localized automatically).
                 now_utc = datetime.now(timezone.utc)
                 next_reset = datetime.combine(
                     now_utc.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
@@ -712,8 +837,7 @@ class AIChat(commands.Cog):
                     )
                 else:
                     live_quota_line = (
-                        "**Live Quota (from OpenRouter):** unavailable right now "
-                        "(key lookup failed for every key on this account — see per-key errors below)"
+                        "**Live Quota (from OpenRouter):** unavailable right now"
                     )
 
                 lines = [live_quota_line]
@@ -724,12 +848,17 @@ class AIChat(commands.Cog):
                     data = key_info[key]
                     role_tag = " 🟢 Primary" if key == self.primary_key else ""
 
+                    key_limit = self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)
+                    key_requests = self.key_usage_today[key]
+                    quota_tag = " ⚠️ LIMIT REACHED" if key_requests >= key_limit else ""
+
                     if "_error" in data:
                         key_items.append(f"• Key #{i + 1}{role_tag} — ❌ {data['_error']}")
                     else:
                         label = data.get("label", "Unnamed Key")
-                        key_requests = self.key_usage_today[key]
-                        key_items.append(f"• Key #{i + 1}{role_tag} — `{label}` — `{key_requests}` reqs today")
+                        key_items.append(
+                            f"• Key #{i + 1}{role_tag} — `{label}` — `{key_requests}/{key_limit}` reqs today{quota_tag}"
+                        )
 
                 for i in range(0, len(key_items), 2):
                     lines.append(" | ".join(key_items[i:i + 2]))
@@ -739,6 +868,9 @@ class AIChat(commands.Cog):
                     value="\n".join(lines),
                     inline=False,
                 )
+        finally:
+            if close_session:
+                await session.close()
 
         await ctx.send(embed=embed)
 
@@ -775,6 +907,9 @@ class AIChat(commands.Cog):
 
     async def _handle_ai_message(self, message: discord.Message):
         channel_id = message.channel.id
+
+        status_msg = await message.reply("🔄 Requesting response from OpenRouter...")
+        status = StatusUpdater(status_msg)
 
         async with message.channel.typing():
             is_owner = (await self.bot.is_owner(message.author)) or (message.author.id in OWNER_IDS)
@@ -815,23 +950,40 @@ class AIChat(commands.Cog):
             current_payload_messages = [{"role": "system", "content": system_instruction}] + self.history[channel_id]
 
             reply_sent = False
+            mutation_happened = False
+            MUTATING_TOOLS = {
+                "write_file", "delete_file",
+                "load_extension", "unload_extension", "reload_extension",
+                "restart_bot",
+            }
 
             for iteration in range(MAX_TOOL_ITERATIONS):
                 tools_for_call = self.get_owner_tools() if is_owner else None
                 max_tokens_for_call = TOOL_CALL_MAX_TOKENS if is_owner else CHAT_MAX_TOKENS
 
+                if iteration == 0:
+                    await status.append("Requesting response from OpenRouter...")
+                else:
+                    await status.append(f"Continuing (step {iteration + 1})...")
+
                 try:
                     data = await self._call_openrouter_with_rotation(
-                        current_payload_messages, tools_for_call, max_tokens_for_call
+                        current_payload_messages,
+                        tools_for_call,
+                        max_tokens_for_call,
+                        start_key=self.primary_key,
+                        reasoning_effort="low" if is_owner else None,
                     )
                 except RuntimeError as e:
                     print(f"OpenRouter request failed: {e}")
+                    await status.append(f"Failed: {e}")
                     await message.reply(f"❌ {e}")
                     reply_sent = True
                     break
 
                 if "choices" not in data or not data["choices"]:
                     print(f"OpenRouter returned no choices: {data}")
+                    await status.append("Failed: empty response from OpenRouter.")
                     await message.reply("Sorry, I got an empty response from the AI backend.")
                     reply_sent = True
                     break
@@ -840,12 +992,18 @@ class AIChat(commands.Cog):
                 choice_message = choice["message"]
                 finish_reason = choice.get("finish_reason")
 
+                thinking_text = (choice_message.get("reasoning") or choice_message.get("thinking") or "").strip()
+                if thinking_text:
+                    await status.append(f"Thinking: {thinking_text}")
+
                 if finish_reason == "length":
                     if choice_message.get("tool_calls"):
+                        await status.append("Cut off before finishing.")
                         await message.reply(
                             "⚠️ The AI's response was cut off before it finished. Try again with a narrower request."
                         )
                     else:
+                        await status.append("Ran out of tokens.")
                         await message.reply(
                             "⚠️ The AI ran out of tokens before it could act on your request."
                         )
@@ -854,9 +1012,34 @@ class AIChat(commands.Cog):
 
                 tool_calls = choice_message.get("tool_calls")
                 if tool_calls and is_owner:
-                    current_payload_messages.append(choice_message)
+                    trimmed_message = {
+                        "role": choice_message.get("role", "assistant"),
+                        "content": choice_message.get("content") or "",
+                        "tool_calls": tool_calls,
+                    }
+                    current_payload_messages.append(trimmed_message)
                     for tool_call in tool_calls:
+                        fn_name = tool_call["function"]["name"]
+
+                        if fn_name == "delegate_subtasks":
+                            try:
+                                n_tasks = len(json.loads(tool_call["function"].get("arguments", "{}")).get("tasks", []))
+                            except Exception:
+                                n_tasks = "?"
+                            await status.append(f"Delegating {n_tasks} sub-agent(s) to run in parallel...")
+                        else:
+                            await status.append(f"Calling tool `{fn_name}`...")
+
+                        if fn_name in MUTATING_TOOLS:
+                            mutation_happened = True
+
                         tool_result = await self.execute_tool_call(tool_call)
+
+                        if fn_name == "delegate_subtasks":
+                            await status.append("Sub-agents finished.")
+                        else:
+                            await status.append(f"`{fn_name}` finished.")
+
                         current_payload_messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call["id"],
@@ -871,10 +1054,14 @@ class AIChat(commands.Cog):
                     or ""
                 )
 
-                if not reply_text.strip() and current_payload_messages and current_payload_messages[-1].get("role") == "tool":
+                if mutation_happened:
+                    await status.append("Generating summary of changes...")
                     current_payload_messages.append({
                         "role": "user",
-                        "content": "All tool actions are completed. Please provide a brief plain text summary of what changes were made."
+                        "content": (
+                            "You modified the bot's files/extensions during this task. "
+                            "Respond with ONLY a concise plain-text summary of exactly what changed and why."
+                        )
                     })
                     try:
                         summary_data = await self._call_openrouter_with_rotation(
@@ -882,18 +1069,20 @@ class AIChat(commands.Cog):
                         )
                         if "choices" in summary_data and summary_data["choices"]:
                             summary_msg = summary_data["choices"][0]["message"]
-                            reply_text = (
+                            forced_summary = (
                                 summary_msg.get("content")
                                 or summary_msg.get("reasoning")
                                 or summary_msg.get("thinking")
                                 or ""
-                            )
+                            ).strip()
+                            if forced_summary:
+                                reply_text = forced_summary
                     except Exception as e:
-                        print(f"Failed to retrieve fallback summary: {e}")
+                        print(f"Failed to retrieve summary: {e}")
 
                 if reply_text.strip():
                     self.history[channel_id].append({"role": "assistant", "content": reply_text})
-
+                    await status.append("Done.")
                     chunks = split_message(reply_text)
                     for i, chunk in enumerate(chunks):
                         if i == 0:
@@ -901,12 +1090,13 @@ class AIChat(commands.Cog):
                         else:
                             await message.channel.send(chunk)
                 else:
-                    await message.reply("⚠️ Action completed, but no text summary was generated by the AI.")
+                    await status.append("Done, but no text summary was generated.")
+                    await message.reply("⚠️ Action completed, but no text response was returned.")
 
                 reply_sent = True
                 break
             else:
-                print(f"AIChat: hit MAX_TOOL_ITERATIONS ({MAX_TOOL_ITERATIONS}) in channel {channel_id}.")
+                await status.append("Hit tool call iteration limit.")
                 await message.reply("⚠️ Task hit tool call iteration limits.")
                 reply_sent = True
 
