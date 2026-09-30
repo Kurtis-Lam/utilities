@@ -98,7 +98,6 @@ SUBTASK_MAX_TOKENS = 1024
 # ---------------------------------------------------------------------------
 
 def load_key_usage() -> defaultdict:
-    """Loads daily key usage from disk if valid for today (UTC)."""
     if os.path.exists(USAGE_FILE_PATH):
         try:
             with open(USAGE_FILE_PATH, "r", encoding="utf-8") as f:
@@ -111,7 +110,6 @@ def load_key_usage() -> defaultdict:
 
 
 def save_key_usage(usage_dict: dict):
-    """Saves daily key usage to disk."""
     try:
         data = {
             "date": datetime.now(timezone.utc).date().isoformat(),
@@ -124,7 +122,6 @@ def save_key_usage(usage_dict: dict):
 
 
 def split_message(text: str, limit: int = 2000) -> list[str]:
-    """Splits a long message string into chunks under Discord's character limit."""
     if len(text) <= limit:
         return [text]
 
@@ -155,12 +152,6 @@ _THINK_TAG_RE = re.compile(r"<(think|thinking|reasoning)>(.*?)</\1>", re.IGNOREC
 
 
 def extract_inline_thinking(content: str) -> tuple[str, str]:
-    """Pulls <think>/<thinking>/<reasoning> tagged spans out of `content`.
-
-    Returns a tuple of (thinking_text, remaining_text), both stripped.
-    thinking_text is the concatenation of every tagged span found (empty
-    string if none). remaining_text is `content` with those spans removed.
-    """
     if not content:
         return "", ""
 
@@ -173,7 +164,6 @@ DISCORD_MESSAGE_LIMIT = 2000
 
 
 class StatusUpdater:
-    """Manages a single live progress message showing bot execution steps."""
 
     def __init__(self, first_message: discord.Message):
         self.channel = first_message.channel
@@ -181,7 +171,6 @@ class StatusUpdater:
         self.current_text = first_message.content or ""
 
     async def append(self, text: str):
-        """Appends subtext lines to the Discord progress message."""
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()] or [text.strip()]
         for line in lines:
             if not line:
@@ -204,12 +193,6 @@ class StatusUpdater:
                     pass
 
     async def append_block(self, text: str):
-        """Appends a preformatted block (e.g. a fenced ```code``` block) verbatim,
-        without the per-line '-# ' subtext prefix or line-splitting used by
-        `append`. This keeps multi-line fenced content (like a collapsible /
-        downloadable thinking transcript) intact as one continuous block.
-        Oversized blocks are automatically split into multiple fenced chunks.
-        """
         if len(text) > DISCORD_MESSAGE_LIMIT:
             inner_limit = DISCORD_MESSAGE_LIMIT - 8  # leave room for ``` fences
             raw = text.strip("`\n")
@@ -258,16 +241,13 @@ class AIChat(commands.Cog):
         self.session: aiohttp.ClientSession | None = None
 
     async def cog_load(self):
-        """Initializes a shared HTTP session when the cog is loaded."""
         self.session = aiohttp.ClientSession()
 
     async def cog_unload(self):
-        """Closes the shared HTTP session when the cog is unloaded."""
         if self.session and not self.session.closed:
             await self.session.close()
 
     def _check_daily_reset(self):
-        """Resets key usage counts at midnight UTC."""
         today = datetime.now(timezone.utc).date()
         if today != self.last_usage_reset_date:
             self.key_usage_today.clear()
@@ -275,19 +255,16 @@ class AIChat(commands.Cog):
             save_key_usage(self.key_usage_today)
 
     def _record_key_use(self, key: str):
-        """Increments daily request count for a specific key."""
         self._check_daily_reset()
         self.key_usage_today[key] += 1
         save_key_usage(self.key_usage_today)
 
     def _key_has_quota(self, key: str) -> bool:
-        """Returns False once a key has hit its configured daily request limit."""
         self._check_daily_reset()
         limit = self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)
         return self.key_usage_today[key] < limit
 
     def _record_rate_limit_headers(self, key: str, headers) -> None:
-        """Stores OpenRouter x-ratelimit headers."""
         limit = headers.get("x-ratelimit-limit")
         remaining = headers.get("x-ratelimit-remaining")
         reset = headers.get("x-ratelimit-reset")
@@ -303,11 +280,9 @@ class AIChat(commands.Cog):
     # -- path safety -------------------------------------------------------
 
     def _resolve_path(self, relative_path: str) -> str:
-        """Resolves a relative path against PROJECT_ROOT."""
         return os.path.abspath(os.path.join(PROJECT_ROOT, relative_path))
 
     def _is_safe_path(self, target_path: str) -> bool:
-        """Security check ensuring execution remains inside PROJECT_ROOT."""
         abs_target = self._resolve_path(target_path)
         root = os.path.abspath(PROJECT_ROOT)
         return abs_target == root or abs_target.startswith(root + os.sep)
@@ -315,7 +290,6 @@ class AIChat(commands.Cog):
     # -- API key pool & rotation ---------------------------------------------
 
     def _next_worker_key(self) -> str:
-        """Round-robins worker keys for parallel tasks."""
         pool = self.worker_keys or [self.primary_key]
         key = pool[self._worker_key_cycle_idx % len(pool)]
         self._worker_key_cycle_idx += 1
@@ -331,7 +305,6 @@ class AIChat(commands.Cog):
         max_tokens: int,
         reasoning_effort: str | None = None,
     ) -> dict:
-        """Sends one chat-completions request using optimized free fallback models."""
         self._record_key_use(key)
         headers = {
             "Authorization": f"Bearer {key}",
@@ -390,13 +363,6 @@ class AIChat(commands.Cog):
         start_key: str | None = None,
         reasoning_effort: str | None = None,
     ) -> dict:
-        """Rotates through every configured key before giving up.
-
-        Keys that have already hit their configured daily limit are tried last
-        (as a safety-net fallback only, in case local usage tracking drifted
-        from OpenRouter's real count), so a key being "used up" simply causes
-        the bot to move on to the next key instead of erroring out.
-        """
         start_key = start_key or self.api_keys[0]
         start_idx = self.api_keys.index(start_key) if start_key in self.api_keys else 0
         n_keys = len(self.api_keys)
@@ -446,7 +412,6 @@ class AIChat(commands.Cog):
     # -- prompt / tool definitions ------------------------------------------
 
     def generate_bot_capabilities_prompt(self, is_owner: bool) -> str:
-        """Inspects cogs and commands to build system context."""
         capabilities = ["Here is a summary of available server commands you can explain to users:\n"]
 
         for cog_name, cog in self.bot.cogs.items():

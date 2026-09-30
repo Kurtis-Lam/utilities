@@ -54,7 +54,6 @@ class Recognize(commands.Cog):
         return self.bot.get_cog("SetAFK")    
 
     def _normalize_name(self, name: str) -> str:
-        """Removes all non-alphanumeric characters for strict equality matching."""
         return re.sub(r'[^a-z0-9]', '', name.strip().lower())
 
     def _load_category_pokes(self):    
@@ -94,7 +93,6 @@ class Recognize(commands.Cog):
                 self.category_pokes[key] = frozenset()    
 
     async def _load_pokedex_cache(self):
-        """Loads Pokémon metadata directly from MongoDB utilities.constdata (_id: pokedex)."""
         try:
             doc = await self.bot.mongo_client["utilities"]["constdata"].find_one({"_id": "pokedex"})
             if doc and "data" in doc:
@@ -103,7 +101,6 @@ class Recognize(commands.Cog):
             print(f"[Recognizer] Failed to load pokedex from MongoDB: {e}")
 
     async def _ensure_model_loaded(self):    
-        """Lazy loads heavy weights into RAM only on first usage."""   
         if not self.is_model_loaded:    
             from .recognize import PokemonRecognizer    
             if self.recognizer is None:    
@@ -266,7 +263,6 @@ class Recognize(commands.Cog):
         return "\n".join(lines), activated_categories, category_users
 
     def _mentions_to_names(self, guild, text: str) -> str:
-        """Embed titles don't render mentions (they'd show as raw <@id>), so show @names instead."""
         def role_sub(m):
             role = guild.get_role(int(m.group(1))) if guild else None
             return f"@{role.name}" if role else m.group(0)

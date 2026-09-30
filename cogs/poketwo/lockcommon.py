@@ -46,7 +46,6 @@ _ALIAS_LOOKUP.update({cat: cat for cat in CATEGORY_ALIASES})
 
 
 def resolve_category(token: str) -> str | None:
-    """'shlock' / 'sh-lock' / 'shinyhunt' / 'res' -> 'sh' / 'sh' / 'sh' / 're'. None if unknown."""
     t = re.sub(r"[\s_\-]+", "", token.lower())
     if t in _ALIAS_LOOKUP:
         return _ALIAS_LOOKUP[t]
@@ -68,7 +67,6 @@ UNLOCK_PRIORITY = (("re",), ("sh",), ("cl",), ("tp", "rp"))
 
 
 async def get_poketwo_target(guild: discord.Guild):
-    """Retrieve the Poketwo Member object via cache or fetch. None if it isn't in the guild."""
     member = guild.get_member(POKETWO_ID)
     if member:
         return member
@@ -79,17 +77,6 @@ async def get_poketwo_target(guild: discord.Guild):
 
 
 def can_unlock(lock_doc: dict | None, member: discord.Member) -> bool:
-    """
-    The ONE rule for "may this member unlock this channel". Used by `.unlock`,
-    the Unlock button, and anywhere else that needs to check it — so there is
-    no risk of one place enforcing "restrict unlockers" and another not.
-
-    - No lock document at all (channel was never locked through this system,
-      or it's already been unlocked) -> anyone may proceed.
-    - Lock document with allowed_users == None -> restrict was off when this
-      channel locked, so anyone may unlock.
-    - Otherwise -> only the listed user id(s), or a server admin.
-    """
     if not lock_doc:
         return True
     allowed = lock_doc.get("allowed_users")
