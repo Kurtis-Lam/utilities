@@ -1,4 +1,6 @@
+import datetime
 import re
+import time
 
 import discord
 
@@ -79,6 +81,8 @@ async def get_poketwo_target(guild: discord.Guild):
 def can_unlock(lock_doc: dict | None, member: discord.Member) -> bool:
     if not lock_doc:
         return True
+    if lock_doc.get("source") == "manual":
+        return True
     allowed = lock_doc.get("allowed_users")
     if allowed is None:
         return True
@@ -89,3 +93,177 @@ def unlock_denied_message(lock_doc: dict) -> str:
     allowed = lock_doc.get("allowed_users") or []
     mentions = ", ".join(f"<@{uid}>" for uid in allowed)
     return f"⚠️ Only {mentions} (or a server admin) can unlock this channel."
+
+
+# --- Embed styling shared by .lock / .unlock / .uac / .lockstats and AutoLock ---
+
+LOCK_COLOR = discord.Color.red()
+UNLOCK_COLOR = discord.Color.green()
+WARN_COLOR = discord.Color.gold()
+
+
+def now_unix() -> int:
+    return int(time.time())
+
+
+def to_unix(value) -> int | None:
+    """Mongo datetime (naive means UTC) -> unix seconds. None if missing or invalid."""
+    if not isinstance(value, datetime.datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return int(value.timestamp())
+
+
+def format_elapsed(seconds: float) -> str:
+    """12.4 -> '12.4s', 125 -> '2m 5s', 3725 -> '1h 2m 5s'."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total = int(round(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
+def is_locked_overwrite(overwrite: discord.PermissionOverwrite) -> bool:
+    """A channel counts as locked for Poketwo when it can't view or can't send."""
+    return overwrite.send_messages is False or overwrite.view_channel is False
+
+
+def stamp(unix: int) -> str:
+    """Live relative time, e.g. '2 minutes ago'."""
+    return f"<t:{unix}:R>"
+
+
+def who_can_unlock_text(allowed_users) -> str:
+    if allowed_users is None:
+        return "Anyone: use `.unlock` / `.u` or the **Unlock** button."
+    if not allowed_users:
+        return "Server admins only."
+    mentions = ", ".join(f"<@{uid}>" for uid in allowed_users)
+    return f"{mentions} or a server admin."
+
+
+def _categories_label(categories) -> str:
+    return "/".join(SHORT_NAMES.get(c, c) for c in (categories or []))
+
+
+def locked_embed(
+    channel,
+    *,
+    locked_by=None,
+    trigger: str | None = None,
+    allowed_users=None,
+    restricted_by=None,
+    when: int | None = None,
+) -> discord.Embed:
+    when = when or now_unix()
+    embed = discord.Embed(
+        title="🔒 Channel Locked",
+        color=LOCK_COLOR,
+    )
+    embed.add_field(name="🕒 Locked At", value=stamp(when), inline=True)
+    if locked_by is not None:
+        embed.add_field(name="👤 Locked By", value=locked_by.mention, inline=True)
+    elif trigger:
+        embed.add_field(name="🤖 Triggered By", value=f"Auto-lock (`{trigger}`)", inline=True)
+
+    text = who_can_unlock_text(allowed_users)
+    if restricted_by:
+        text += f"\n-# Restricted by the `{_categories_label(restricted_by)}` lock."
+    embed.add_field(name="🔐 Who Can Unlock", value=text, inline=False)
+    return embed
+
+
+def unlocked_embed(channel, *, unlocked_by, locked_at: int | None = None, when: int | None = None) -> discord.Embed:
+    when = when or now_unix()
+    embed = discord.Embed(
+        title="🔓 Channel Unlocked",
+        color=UNLOCK_COLOR,
+    )
+    embed.add_field(name="🕒 Unlocked At", value=stamp(when), inline=True)
+    embed.add_field(name="👤 Unlocked By", value=unlocked_by.mention, inline=True)
+    return embed
+
+
+def already_locked_embed(channel, lock_doc: dict | None = None) -> discord.Embed:
+    embed = discord.Embed(
+        title="🔒 Already Locked",
+        description=f"{channel.mention} is already locked, so nothing was changed.",
+        color=WARN_COLOR,
+    )
+    if lock_doc:
+        locked_at = to_unix(lock_doc.get("locked_at"))
+        if locked_at:
+            embed.add_field(name="🕒 Locked At", value=stamp(locked_at), inline=True)
+        if lock_doc.get("locked_by"):
+            embed.add_field(name="👤 Locked By", value=f"<@{lock_doc['locked_by']}>", inline=True)
+        elif lock_doc.get("source") == "autolock":
+            embed.add_field(
+                name="🤖 Triggered By",
+                value=f"Auto-lock (`{_categories_label(lock_doc.get('categories'))}`)",
+                inline=True,
+            )
+        embed.add_field(name="🔐 Who Can Unlock", value=who_can_unlock_text(lock_doc.get("allowed_users")), inline=False)
+    return embed
+
+
+def already_unlocked_embed(channel) -> discord.Embed:
+    return discord.Embed(
+        title="🔓 Already Unlocked",
+        description=f"{channel.mention} isn't locked, so there's nothing to unlock.",
+        color=WARN_COLOR,
+    )
+
+
+def unlock_denied_embed(channel, lock_doc: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="⛔ Can't Unlock This Channel",
+        description=f"{channel.mention} is locked and restricted.",
+        color=LOCK_COLOR,
+    )
+    embed.add_field(name="🔐 Who Can Unlock", value=who_can_unlock_text(lock_doc.get("allowed_users")), inline=False)
+    locked_at = to_unix(lock_doc.get("locked_at"))
+    if locked_at:
+        embed.add_field(name="🕒 Locked At", value=stamp(locked_at), inline=False)
+    return embed
+
+
+# --- Field helpers that stay inside Discord's 1024-char field limit ---
+
+def chunk_items(items: list[str], sep: str = " ", limit: int = 1000, max_chunks: int = 2):
+    """Join items into <= limit-char chunks. Returns (chunks, hidden_count)."""
+    chunks, current, length, used = [], [], 0, 0
+    for item in items:
+        extra = len(item) + len(sep)
+        if current and length + extra > limit:
+            chunks.append(sep.join(current))
+            current, length = [], 0
+            if len(chunks) >= max_chunks:
+                break
+        current.append(item)
+        length += extra
+        used += 1
+    else:
+        if current:
+            chunks.append(sep.join(current))
+    return chunks, len(items) - used
+
+
+def add_item_fields(embed: discord.Embed, name: str, items: list[str], sep: str = " ", max_chunks: int = 2) -> None:
+    if not items:
+        return
+    chunks, hidden = chunk_items(items, sep=sep, max_chunks=max_chunks)
+    for index, chunk in enumerate(chunks, start=1):
+        title = name if len(chunks) == 1 else f"{name} (part {index})"
+        if hidden and index == len(chunks):
+            chunk += f"\n…and {hidden} more"
+        embed.add_field(name=title, value=chunk, inline=False)
