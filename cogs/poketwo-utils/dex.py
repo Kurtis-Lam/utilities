@@ -3,7 +3,7 @@ import io
 import discord
 from discord.ext import commands
 
-from views.embeds import err_embed, handle_command_error, send_usage, warn_embed
+from views.embeds import err_embed, handle_command_error, make_embed, send_usage, warn_embed
 
 TYPE_EMOJIS = {
     "normal": "🔘",
@@ -120,10 +120,9 @@ class Dex(commands.Cog):
         if evolution:
             description += f"\n\n**Evolution**\n{evolution}"
 
-        embed = discord.Embed(
+        embed = make_embed(
             title=embed_title,
-            description=description,
-            color=0xdbbe00
+            description=description
         )
 
         img_doc = await self.img_collection.find_one({"_id": matched_name.lower()})
