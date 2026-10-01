@@ -8,6 +8,7 @@ from discord.ext import commands
 # Imports from views directory
 from views.categoriesview import CategorySelectView
 from views.common import ConfirmView
+from views.embeds import handle_common_error, send_usage
 
 
 class Categories(commands.Cog):
@@ -16,28 +17,7 @@ class Categories(commands.Cog):
         self.bot = bot
 
     async def cog_command_error(self, ctx, error):
-        if isinstance(error, commands.MissingPermissions):
-            perms = ", ".join([f"`{p}`" for p in error.missing_permissions])
-            embed = discord.Embed(
-                title="❌ Missing Permissions",
-                description=(
-                    "You lack the required permissions to use this command:"
-                    f" {perms}"
-                ),
-                color=discord.Color.red(),
-            )
-            await ctx.send(embed=embed)
-        elif isinstance(error, commands.BotMissingPermissions):
-            perms = ", ".join([f"`{p}`" for p in error.missing_permissions])
-            embed = discord.Embed(
-                title="❌ Bot Missing Permissions",
-                description=(
-                    f"I am missing permissions to do this. Please give me: {perms}"
-                ),
-                color=discord.Color.red(),
-            )
-            await ctx.send(embed=embed)
-        else:
+        if not await handle_common_error(ctx, error):
             raise error
 
     async def confirm_action(self, ctx, prompt: str) -> bool:
@@ -192,12 +172,9 @@ class Categories(commands.Cog):
 
             name = args_str.replace("-", " ").strip()
             if not name:
-                embed = discord.Embed(
-                    title="❌ Error",
-                    description="Please provide a name for the category.",
-                    color=discord.Color.red(),
+                return await send_usage(
+                    ctx, note="Please provide a name for the category."
                 )
-                return await ctx.send(embed=embed)
         else:
             name = name.replace("-", " ")
             if preaction in ("prelock", "both"):
