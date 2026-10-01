@@ -2,6 +2,8 @@ from collections import defaultdict
 import discord
 from discord.ext import commands
 
+from views.embeds import info_embed
+
 TARGET_USER_ID = 716390085896962058
 
 class HintSolver(commands.Cog):
@@ -89,11 +91,15 @@ class HintSolver(commands.Cog):
         ]
 
         if matches:
-            response = f"Possible Pokémon: {', '.join(matches)}"
-            if len(response) > 2000:
-                response = response[:1990] + "..."
+            description = ", ".join(matches)
+            # Embed descriptions are capped at 4096 characters
+            if len(description) > 4000:
+                description = description[:3990].rsplit(",", 1)[0] + ", ..."
 
-            await message.reply(response)
+            embed = info_embed("Possible Pokémon", description, emoji="🔍")
+            embed.set_footer(text=f"{len(matches)} possible match{'es' if len(matches) != 1 else ''}")
+
+            await message.reply(embed=embed)
 
 
 async def setup(bot: commands.Bot):
