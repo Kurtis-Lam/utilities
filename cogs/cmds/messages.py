@@ -6,6 +6,7 @@ from discord.ext import commands
 
 # Import ConfirmView from views/common.py
 from views.common import ConfirmView
+from views.embeds import ok_embed, err_embed, info_embed, handle_common_error, send_usage
 
 
 class Messages(commands.Cog):
@@ -56,6 +57,7 @@ class Messages(commands.Cog):
                     pass
 
             # Send a new sticky message at the bottom
+            # (kept as plain text on purpose: it mirrors the content you set with .stick)
             try:
                 new_msg = await message.channel.send(content)
                 # AWAITED: Non-blocking DB update
@@ -67,13 +69,7 @@ class Messages(commands.Cog):
                 pass
 
     async def cog_command_error(self, ctx, error):
-        if isinstance(error, commands.MissingPermissions):
-            perms = ", ".join([f"`{p}`" for p in error.missing_permissions])
-            await ctx.send(f"❌ You lack the required permissions: {perms}")
-        elif isinstance(error, commands.BotMissingPermissions):
-            perms = ", ".join([f"`{p}`" for p in error.missing_permissions])
-            await ctx.send(f"❌ I am missing permissions: {perms}")
-        else:
+        if not await handle_common_error(ctx, error):
             raise error
 
     @commands.hybrid_command(name="purge", description="Bulk deletes messages, optionally restricted to a specific user. Use '*' for all messages.")
@@ -93,9 +89,9 @@ class Messages(commands.Cog):
             try:
                 amount = int(amt)
             except ValueError:
-                return await ctx.send("❌ Amount must be a valid number or `*`.")
+                return await send_usage(ctx, note="Amount must be a valid number or `*`.")
             if amount <= 0:
-                return await ctx.send("❌ Amount must be greater than 0.")
+                return await ctx.send(embed=err_embed("Invalid Amount", "Amount must be greater than 0."))
             limit = amount + 1 if ctx.interaction is None else amount
         else:
             limit = None
@@ -113,9 +109,10 @@ class Messages(commands.Cog):
             count = len(deleted)
 
         target_str = f" from {user.display_name}" if user else ""
-        msg = await ctx.send(f"🧹 Purged {count} messages{target_str}.")
-        await asyncio.sleep(1)
-        await msg.delete()
+        await ctx.send(
+            embed=ok_embed("Messages Purged", f"Purged **{count}** message(s){target_str}.", emoji="🧹"),
+            delete_after=3
+        )
 
     @commands.hybrid_command(name="pin", description="Pins a message (reply to a message or provide a message ID/link).")
     @app_commands.describe(
@@ -134,15 +131,15 @@ class Messages(commands.Cog):
                 msg_id = int(message_ref.split("/")[-1]) if "/" in message_ref else int(message_ref)
                 target_msg = await ctx.channel.fetch_message(msg_id)
             except (ValueError, discord.NotFound, discord.HTTPException):
-                return await ctx.send("❌ Could not find a valid message with that ID or link.")
+                return await ctx.send(embed=err_embed("Message Not Found", "Could not find a valid message with that ID or link."))
         elif ctx.message and ctx.message.reference and ctx.message.reference.message_id:
             try:
                 target_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
             except discord.NotFound:
-                return await ctx.send("❌ Could not find the referenced message.")
+                return await ctx.send(embed=err_embed("Message Not Found", "Could not find the referenced message."))
         
         if not target_msg:
-            return await ctx.send("❌ Please reply to a message or provide a message ID/link to pin.")
+            return await send_usage(ctx, note="Reply to a message or provide a message ID/link to pin.")
 
         try:
             await target_msg.pin(reason=f"Pinned by {ctx.author}")
@@ -152,9 +149,9 @@ class Messages(commands.Cog):
                 except discord.HTTPException:
                     pass
             else:
-                await ctx.send(f"✅ Successfully pinned the message.", delete_after=3)
+                await ctx.send(embed=ok_embed("Message Pinned", "Successfully pinned the message.", emoji="📌"), delete_after=3)
         except discord.HTTPException:
-            await ctx.send("❌ Failed to pin the message. It might already be pinned or the pin limit (50) was reached.")
+            await ctx.send(embed=err_embed("Pin Failed", "Failed to pin the message. It might already be pinned or the pin limit (50) was reached."))
 
     @commands.hybrid_command(name="unpin", description="Unpins a message (reply to a message or provide a message ID/link).")
     @app_commands.describe(
@@ -173,15 +170,15 @@ class Messages(commands.Cog):
                 msg_id = int(message_ref.split("/")[-1]) if "/" in message_ref else int(message_ref)
                 target_msg = await ctx.channel.fetch_message(msg_id)
             except (ValueError, discord.NotFound, discord.HTTPException):
-                return await ctx.send("❌ Could not find a valid message with that ID or link.")
+                return await ctx.send(embed=err_embed("Message Not Found", "Could not find a valid message with that ID or link."))
         elif ctx.message and ctx.message.reference and ctx.message.reference.message_id:
             try:
                 target_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
             except discord.NotFound:
-                return await ctx.send("❌ Could not find the referenced message.")
+                return await ctx.send(embed=err_embed("Message Not Found", "Could not find the referenced message."))
         
         if not target_msg:
-            return await ctx.send("❌ Please reply to a message or provide a message ID/link to unpin.")
+            return await send_usage(ctx, note="Reply to a message or provide a message ID/link to unpin.")
 
         try:
             await target_msg.unpin(reason=f"Unpinned by {ctx.author}")
@@ -191,9 +188,9 @@ class Messages(commands.Cog):
                 except discord.HTTPException:
                     pass
             else:
-                await ctx.send(f"✅ Successfully unpinned the message.", delete_after=3)
+                await ctx.send(embed=ok_embed("Message Unpinned", "Successfully unpinned the message.", emoji="📌"), delete_after=3)
         except discord.HTTPException:
-            await ctx.send("❌ Failed to unpin the message. It might not be pinned.")
+            await ctx.send(embed=err_embed("Unpin Failed", "Failed to unpin the message. It might not be pinned."))
 
     @commands.hybrid_command(name="pins", description="View pinned messages in the current channel or across the server.")
     @app_commands.describe(
@@ -219,7 +216,7 @@ class Messages(commands.Cog):
             channels = ctx.guild.text_channels
             title_scope = f"in {ctx.guild.name}"
         else:
-            return await ctx.send("❌ Invalid argument. Use `channel` (`ch`) or `server` (`guild`).")
+            return await ctx.send(embed=err_embed("Invalid Argument", "Use `channel` (`ch`) or `server` (`guild`)."))
 
         all_pins = []
         for ch in channels:
@@ -233,7 +230,7 @@ class Messages(commands.Cog):
                 continue
 
         if not all_pins:
-            return await ctx.send(f"📌 No pinned messages found {title_scope}.")
+            return await ctx.send(embed=info_embed("No Pins", f"No pinned messages found {title_scope}.", emoji="📌"))
 
         desc = []
         for idx, (ch, msg) in enumerate(all_pins[:15], 1):
@@ -259,6 +256,7 @@ class Messages(commands.Cog):
             await ctx.message.delete()
         except (discord.HTTPException, AttributeError):
             pass
+        # Plain text on purpose: echo's whole job is to repeat your text as-is.
         await ctx.send(msg)
 
     @commands.hybrid_command(name="stick", description="Sticks a message to the current channel.")
@@ -308,7 +306,7 @@ class Messages(commands.Cog):
 
         existing_stick = await self.collection.find_one({"_id": channel_id_str})
         if not existing_stick:
-            return await ctx.send(f"❌ There is no sticky message active in {target_channel.mention}.")
+            return await ctx.send(embed=err_embed("No Sticky Found", f"There is no sticky message active in {target_channel.mention}."))
 
         last_msg_id = existing_stick.get("last_msg_id")
         if last_msg_id:
@@ -319,7 +317,7 @@ class Messages(commands.Cog):
                 pass
 
         await self.collection.delete_one({"_id": channel_id_str})
-        await ctx.send(f"✅ Successfully removed the sticky message from {target_channel.mention}.")
+        await ctx.send(embed=ok_embed("Sticky Removed", f"Successfully removed the sticky message from {target_channel.mention}.", emoji="📌"))
 
     @commands.hybrid_group(name="sticks", invoke_without_command=True, description="View current server sticky messages.")
     @commands.has_permissions(manage_messages=True)
@@ -329,7 +327,7 @@ class Messages(commands.Cog):
         guild_sticks = await self.collection.find({"guild_id": ctx.guild.id}).to_list(length=None)
 
         if not guild_sticks:
-            return await ctx.send("❌ There are no active sticky messages in this server.")
+            return await ctx.send(embed=err_embed("No Sticky Messages", "There are no active sticky messages in this server."))
 
         desc = []
         for idx, data in enumerate(guild_sticks, 1):
@@ -370,13 +368,13 @@ class Messages(commands.Cog):
             target_id_str = str(ctx.channel.id)
 
         if not target_id_str:
-            return await ctx.send("❌ Could not resolve the specified channel.")
+            return await ctx.send(embed=err_embed("Channel Not Found", "Could not resolve the specified channel."))
 
         # AWAITED
         existing_stick = await self.collection.find_one({"_id": target_id_str})
         if not existing_stick:
             ch_str = target_channel.mention if target_channel else f"ID `{target_id_str}`"
-            return await ctx.send(f"❌ There is no sticky message active in {ch_str}.")
+            return await ctx.send(embed=err_embed("No Sticky Found", f"There is no sticky message active in {ch_str}."))
 
         # Step 1: Prompt for confirmation
         view = ConfirmView(ctx.author)
