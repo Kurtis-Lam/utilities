@@ -2,24 +2,48 @@ import re
 import discord
 from discord.ext import commands
 
+from views.embeds import err_embed, handle_command_error, info_embed, send_usage
+
+
+def _clip(text: str, limit: int = 1900) -> str:
+    """Trim text so two code blocks always fit inside one embed description (4096)."""
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 class PokemonExtractor(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="extract", aliases=["ex"])
+    async def cog_command_error(self, ctx: commands.Context, error):
+        await handle_command_error(ctx, error)
+
+    @commands.command(
+        name="extract",
+        aliases=["ex"],
+        description=(
+            "Reply to a Pokétwo embed (Pokédex / pokémon list) with this command to "
+            "extract the Pokémon names, dex numbers or IDs."
+        ),
+    )
     async def extract(self, ctx):
         if not ctx.message.reference:
-            await ctx.reply("❌ Please reply to a Pokétwo message to use this command.", mention_author=False)
+            await send_usage(ctx, note="Please reply to a Pokétwo message to use this command.")
             return
 
         try:
             replied_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
         except discord.HTTPException:
-            await ctx.reply("❌ Unable to fetch the replied message.", mention_author=False)
+            await ctx.reply(
+                embed=err_embed("Fetch Failed", "Unable to fetch the replied message."),
+                mention_author=False,
+            )
             return
 
         if not replied_message.embeds:
-            await ctx.reply("❌ The replied message does not contain an embed.", mention_author=False)
+            await ctx.reply(
+                embed=err_embed("No Embed Found", "The replied message does not contain an embed."),
+                mention_author=False,
+            )
             return
 
         embed = replied_message.embeds[0]
@@ -48,13 +72,16 @@ class PokemonExtractor(commands.Cog):
             names = [match[0].strip() for match in pokedex_matches]
             dex_numbers = [match[1] for match in pokedex_matches]
 
-            names_str = ", ".join(names)
-            numbers_str = ", ".join([f"#{num}" for num in dex_numbers])
+            names_str = _clip(", ".join(names))
+            numbers_str = _clip(", ".join([f"#{num}" for num in dex_numbers]))
 
-            await replied_message.reply(
-                f"Names:\n```\n{names_str}\n```\nDex Numbers:\n```\n{numbers_str}\n```",
-                mention_author=False
+            result = info_embed(
+                "Pokédex Extract",
+                f"**Names:**\n```\n{names_str}\n```\n**Dex Numbers:**\n```\n{numbers_str}\n```",
+                emoji="📋",
             )
+            result.set_footer(text=f"{len(names)} Pokémon extracted")
+            await replied_message.reply(embed=result, mention_author=False)
         elif list_matches:
             pokemon_ids = []
             names = []
@@ -75,15 +102,25 @@ class PokemonExtractor(commands.Cog):
                     pokemon_ids.append(pokemon_id)
                     names.append(clean_name)
 
-            ids_str = " ".join(pokemon_ids)
-            names_str = ", ".join(names)
+            ids_str = _clip(" ".join(pokemon_ids))
+            names_str = _clip(", ".join(names))
 
-            await replied_message.reply(
-                f"Pokemon IDs:\n```\n{ids_str}\n```\nPokemon Names:\n```\n{names_str}\n```",
-                mention_author=False
+            result = info_embed(
+                "Pokémon List Extract",
+                f"**Pokémon IDs:**\n```\n{ids_str}\n```\n**Pokémon Names:**\n```\n{names_str}\n```",
+                emoji="📋",
             )
+            result.set_footer(text=f"{len(names)} Pokémon extracted")
+            await replied_message.reply(embed=result, mention_author=False)
         else:
-            await replied_message.reply("❌ No Pokémon IDs or Pokédex entries found in that embed.", mention_author=False)
+            await replied_message.reply(
+                embed=err_embed(
+                    "Nothing Found",
+                    "No Pokémon IDs or Pokédex entries found in that embed.",
+                ),
+                mention_author=False,
+            )
+
 
 async def setup(bot):
     await bot.add_cog(PokemonExtractor(bot))
