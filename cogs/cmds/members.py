@@ -7,29 +7,14 @@ from discord.ext import commands
 
 # Import ConfirmView from views/common.py
 from views.common import ConfirmView
+from views.embeds import handle_common_error
 
 class Members(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
     async def cog_command_error(self, ctx, error):
-        if isinstance(error, commands.MissingPermissions):
-            perms = ", ".join([f"`{p}`" for p in error.missing_permissions])
-            embed = discord.Embed(
-                title="❌ Missing Permissions",
-                description=f"You lack the required permissions to use this command: {perms}",
-                color=discord.Color.red()
-            )
-            await ctx.send(embed=embed)
-        elif isinstance(error, commands.BotMissingPermissions):
-            perms = ", ".join([f"`{p}`" for p in error.missing_permissions])
-            embed = discord.Embed(
-                title="❌ Bot Missing Permissions",
-                description=f"I am missing permissions to do this. Please give me: {perms}",
-                color=discord.Color.red()
-            )
-            await ctx.send(embed=embed)
-        else:
+        if not await handle_common_error(ctx, error):
             raise error
 
     async def confirm_action(self, ctx, prompt: str) -> bool:
