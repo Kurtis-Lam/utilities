@@ -2,11 +2,18 @@ import asyncio
 import discord
 from discord.ext import commands
 
+from views.embeds import err_embed, handle_command_error, ok_embed, warn_embed
+
+
 class WildPokemonDetector(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.target_user_id = 716390085896962058
         self.target_channel_id = 1527623924811300967
+        self.ping_role_id = 1529318601444692102
+
+    async def cog_command_error(self, ctx: commands.Context, error):
+        await handle_command_error(ctx, error)
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -22,12 +29,22 @@ class WildPokemonDetector(commands.Cog):
                     # Get the target channel to send the message link
                     channel = self.bot.get_channel(self.target_channel_id)
                     if channel:
+                        # The role ping must stay in `content` (pings inside embeds don't notify),
+                        # the rest of the message is displayed in the embed.
                         await channel.send(
-                            f"<@&1529318601444692102> Wild Pokémon fled! Message link: {message.jump_url}"
+                            content=f"<@&{self.ping_role_id}>",
+                            embed=warn_embed(
+                                "Wild Pokémon Fled",
+                                f"A wild Pokémon fled!\n[Jump to message]({message.jump_url})",
+                                emoji="💨",
+                            ),
                         )
                     break
 
-    @commands.command(name="checkflee")
+    @commands.command(
+        name="checkflee",
+        description="Scan channels and report where Poketwo's last message wasn't a 'Congratulations'.",
+    )
     @commands.has_permissions(manage_messages=True)
     async def checkflee(self, ctx):
         failed_channels = []
@@ -51,13 +68,17 @@ class WildPokemonDetector(commands.Cog):
 
         if failed_channels:
             channels_str = ", ".join(failed_channels)
-            await ctx.send(
-                f"❌ Poketwo did not congratulate in the following channels: {channels_str}"
-            )
+            if len(channels_str) > 4000:
+                channels_str = channels_str[:3990].rsplit(",", 1)[0] + ", ..."
+            await ctx.send(embed=err_embed(
+                "Poketwo Did Not Congratulate",
+                f"Poketwo did not congratulate in the following channels:\n{channels_str}",
+            ))
         else:
-            await ctx.send(
-                "✅ All scanned channels have a 'Congratulations' message from Poketwo as their last Poketwo message."
-            )
+            await ctx.send(embed=ok_embed(
+                "All Clear",
+                "All scanned channels have a 'Congratulations' message from Poketwo as their last Poketwo message.",
+            ))
 
 
 async def setup(bot):
