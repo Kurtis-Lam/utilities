@@ -12,7 +12,16 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from views.embeds import BRAND_COLOR, ok_embed, err_embed, warn_embed, info_embed, handle_common_error
+from views.embeds import (
+    BRAND_COLOR,
+    err_embed,
+    handle_common_error,
+    info_embed,
+    make_embed,
+    ok_embed,
+    send_usage,
+    warn_embed,
+)
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -34,7 +43,6 @@ PROJECT_ROOT = os.path.dirname(CONFIG_PATH)
 USAGE_FILE_PATH = os.path.join(PROJECT_ROOT, "key_usage.json")
 
 BOT_PREFIX = config.get("PREFIX", "!")
-AI_CHATBOT_CHANNELID = int(config["AI_CHATBOT_CHANNELID"])
 OWNER_IDS = set(config.get("OWNER_IDS", []))
 
 # --- API keys ----------------------------------------------------------
@@ -86,6 +94,13 @@ if _raw_key_limits is not None:
     KEY_DAILY_LIMITS = [int(x) for x in _raw_key_limits]
 else:
     KEY_DAILY_LIMITS = [DEFAULT_FREE_DAILY_LIMIT] * len(OPENROUTER_API_KEYS)
+
+# MongoDB location of the per-server AI channel whitelist (same DB as dex.py).
+AI_DB_NAME = "utilities"
+AI_CHANNELS_COLLECTION = "aichannels"
+
+BUSY_REACTION = "⏳"
+BUSY_DELETE_AFTER_SECONDS = 5
 
 MAX_TOOL_ITERATIONS = 32       # limit for multi-step file edits
 TOOL_CALL_MAX_TOKENS = 4096    # budget for reasoning/tools
@@ -222,6 +237,17 @@ class ThinkingStatus:
             pass
 
 
+def is_bot_owner():
+    """Owner-only check: Discord application owner OR an id listed in config OWNER_IDS."""
+
+    async def predicate(ctx: commands.Context) -> bool:
+        if await ctx.bot.is_owner(ctx.author) or ctx.author.id in OWNER_IDS:
+            return True
+        raise commands.NotOwner("You do not own this bot.")
+
+    return commands.check(predicate)
+
+
 class AIChat(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -237,17 +263,59 @@ class AIChat(commands.Cog):
         self.key_daily_limit: dict[str, int] = dict(zip(self.api_keys, KEY_DAILY_LIMITS))
 
         self.current_model = "openrouter/free"
-        self.history = defaultdict(list)
+        # Memory is keyed by (channel_id, user_id): every user gets their own
+        # memory in every channel, and resetting only touches one such slot.
+        self.history: dict[tuple[int, int], list] = defaultdict(list)
         self.max_history = 10
-        self._channel_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+        # guild_id -> set of whitelisted channel ids (mirror of MongoDB).
+        self.ai_channels: dict[int, set[int]] = {}
+        # Users with a request currently in flight (one request at a time).
+        self._active_users: set[int] = set()
+        self._bg_tasks: set[asyncio.Task] = set()
 
         self.last_usage_reset_date = datetime.now(timezone.utc).date()
         self.key_usage_today = load_key_usage()
         self.key_rate_limit_snapshot: dict[str, dict] = {}
         self.session: aiohttp.ClientSession | None = None
 
+    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
+    @property
+    def channels_collection(self):
+        return self.mongo_client[AI_DB_NAME][AI_CHANNELS_COLLECTION]
+
     async def cog_load(self):
         self.session = aiohttp.ClientSession()
+        try:
+            await self.mongo_client.admin.command("ping")
+            await self.load_ai_channels()
+        except Exception as e:
+            print(f"AI Cog: MongoDB warmup or AI channel loading failed: {e}")
+
+    async def load_ai_channels(self):
+        """Loads every server's whitelisted AI channels from MongoDB into memory."""
+        loaded: dict[int, set[int]] = {}
+        async for doc in self.channels_collection.find({}):
+            try:
+                loaded[int(doc["_id"])] = {int(c) for c in doc.get("channels", [])}
+            except (KeyError, TypeError, ValueError):
+                continue
+        self.ai_channels = loaded
+
+    async def _fetch_guild_channels(self, guild_id: int) -> list[int]:
+        """Reads one server's whitelist straight from MongoDB (source of truth) and refreshes the cache."""
+        doc = await self.channels_collection.find_one({"_id": guild_id})
+        ids = [int(c) for c in doc.get("channels", [])] if doc else []
+        self.ai_channels[guild_id] = set(ids)
+        return ids
+
+    def _is_ai_channel(self, channel) -> bool:
+        guild = getattr(channel, "guild", None)
+        return bool(guild) and channel.id in self.ai_channels.get(guild.id, ())
 
     async def cog_unload(self):
         if self.session and not self.session.closed:
@@ -798,27 +866,216 @@ class AIChat(commands.Cog):
 
     # -- commands -------------------------------------------------------
 
-    @commands.command(name="reset", help="Clears the AI chatbot memory for this channel.")
-    async def reset_memory(self, ctx: commands.Context):
-        if ctx.channel.id != AI_CHATBOT_CHANNELID:
-            await ctx.send(embed=err_embed("Wrong Channel", "The AI Chatbot is not active in this channel.", emoji="🚫"))
-            return
+    @staticmethod
+    def _unique_mentioned_channels(ctx: commands.Context) -> list:
+        """Channel mentions from the invoking message, de-duplicated, in order, same server only."""
+        seen, result = set(), []
+        for ch in ctx.message.channel_mentions:
+            if ch.id in seen or getattr(ch, "guild", None) != ctx.guild:
+                continue
+            seen.add(ch.id)
+            result.append(ch)
+        return result
 
-        if self.history.get(ctx.channel.id):
-            self.history[ctx.channel.id].clear()
-            await ctx.send(embed=ok_embed("Memory Cleared", "Conversation memory has been cleared!", emoji="🧹", color=BRAND_COLOR))
+    async def _require_admin(self, ctx: commands.Context) -> bool:
+        """Sends an error and returns False unless this is a server and the author is an administrator."""
+        if ctx.guild is None:
+            await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"))
+            return False
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=err_embed(
+                "Missing Permissions",
+                "Only **server administrators** can add or remove AI channels.",
+                emoji="🚫",
+            ))
+            return False
+        return True
+
+    @commands.group(
+        name="ai",
+        invoke_without_command=True,
+        description="Learn how to use the AI chatbot and its commands.",
+    )
+    async def ai_group(self, ctx: commands.Context):
+        p = ctx.clean_prefix
+        embed = make_embed(
+            title="🤖 AI Chatbot — How to Use",
+            description=(
+                "Just type a message in any AI-enabled channel and I'll reply. "
+                "Use the commands below to manage it."
+            ),
+        )
+        embed.add_field(
+            name="💬 Chatting",
+            value=(
+                "Send a normal message (no prefix) in an AI channel. "
+                "You can attach images too.\n"
+                f"-# Messages starting with `{p}` are treated as commands, not AI prompts."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="⚙️ Managing AI channels *(administrators only)*",
+            value=(
+                f"`{p}ai-config` — see where the AI is enabled (anyone can view)\n"
+                f"`{p}ai add <#channel> [#channel ...]` — enable the AI in channel(s)\n"
+                f"`{p}ai remove <#channel> [#channel ...]` — disable the AI in channel(s)\n"
+                f"-# Aliases: `{p}ai a` = add, `{p}ai r` = remove"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🧠 Memory",
+            value=(
+                f"`{p}ai memory` — view what I remember from your chat with me in this channel\n"
+                f"`{p}ai reset` — clear your memory in this channel\n"
+                "-# Memory is separate for every channel **and** every user. "
+                "Resetting only clears yours, and only in the channel you run it in."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="⏳ One request at a time",
+            value=(
+                "If I'm still answering you, new messages get a ⏳ reaction and are "
+                f"deleted after {BUSY_DELETE_AFTER_SECONDS} seconds. Wait for my reply first."
+            ),
+            inline=False,
+        )
+        await ctx.reply(embed=embed, mention_author=False)
+
+    @commands.command(name="ai-config", description="See which channels the AI chatbot is enabled in.")
+    async def ai_config(self, ctx: commands.Context):
+        if ctx.guild is None:
+            return await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"))
+
+        try:
+            channel_ids = await self._fetch_guild_channels(ctx.guild.id)
+        except Exception as e:
+            print(f"AI Cog: failed to fetch AI channels for guild {ctx.guild.id}: {e}")
+            # Fall back to the in-memory copy so the command still works.
+            channel_ids = sorted(self.ai_channels.get(ctx.guild.id, set()))
+
+        p = ctx.clean_prefix
+        if channel_ids:
+            listing = "\n".join(f"• <#{cid}>" for cid in channel_ids)
+            description = f"The AI chatbot is enabled in **{len(channel_ids)}** channel(s):\n\n{listing}"
         else:
-            await ctx.send(embed=info_embed("Memory Empty", "Memory is already empty.", emoji="🧠"))
+            description = "The AI chatbot isn't enabled in any channel in this server yet."
 
-    @commands.command(name="memory", help="Displays the AI chatbot's current conversation memory for this channel.")
-    async def show_memory(self, ctx: commands.Context):
-        if ctx.channel.id != AI_CHATBOT_CHANNELID:
+        embed = make_embed(title="🤖 AI Configuration", description=description)
+        embed.add_field(
+            name="Manage *(administrators only)*",
+            value=(
+                f"`{p}ai add <#channel> [#channel ...]`\n"
+                f"`{p}ai remove <#channel> [#channel ...]`\n"
+                f"-# See `{p}ai` for the full guide."
+            ),
+            inline=False,
+        )
+        await ctx.reply(embed=embed, mention_author=False)
+
+    @ai_group.command(
+        name="add",
+        aliases=["a"],
+        usage="<#channel> [#channel ...]",
+        description="Enable the AI chatbot in one or more channels (administrators only).",
+    )
+    async def ai_add(self, ctx: commands.Context, *, channels: str = None):
+        if not await self._require_admin(ctx):
+            return
+
+        targets = self._unique_mentioned_channels(ctx)
+        if not targets:
+            return await send_usage(ctx, note="Mention at least one channel, e.g. `#general`.")
+
+        try:
+            existing = set(await self._fetch_guild_channels(ctx.guild.id))
+            to_add = [c for c in targets if c.id not in existing]
+            already = [c for c in targets if c.id in existing]
+
+            if to_add:
+                await self.channels_collection.update_one(
+                    {"_id": ctx.guild.id},
+                    {"$addToSet": {"channels": {"$each": [c.id for c in to_add]}}},
+                    upsert=True,
+                )
+                self.ai_channels.setdefault(ctx.guild.id, set()).update(c.id for c in to_add)
+        except Exception as e:
+            print(f"AI Cog: failed to add AI channels for guild {ctx.guild.id}: {e}")
+            return await ctx.reply(embed=err_embed(
+                "Database Error", "Couldn't save the AI channels right now. Please try again in a moment."))
+
+        lines = []
+        if to_add:
+            lines.append("✅ **Added:** " + ", ".join(c.mention for c in to_add))
+        if already:
+            lines.append("⚠️ **Already added:** " + ", ".join(c.mention for c in already))
+
+        await ctx.reply(embed=make_embed(title="AI Channels Updated", description="\n".join(lines)),
+                        mention_author=False)
+
+    @ai_group.command(
+        name="remove",
+        aliases=["r"],
+        usage="<#channel> [#channel ...]",
+        description="Disable the AI chatbot in one or more channels (administrators only).",
+    )
+    async def ai_remove(self, ctx: commands.Context, *, channels: str = None):
+        if not await self._require_admin(ctx):
+            return
+
+        targets = self._unique_mentioned_channels(ctx)
+        if not targets:
+            return await send_usage(ctx, note="Mention at least one channel, e.g. `#general`.")
+
+        try:
+            existing = set(await self._fetch_guild_channels(ctx.guild.id))
+            to_remove = [c for c in targets if c.id in existing]
+            not_added = [c for c in targets if c.id not in existing]
+
+            if to_remove:
+                await self.channels_collection.update_one(
+                    {"_id": ctx.guild.id},
+                    {"$pull": {"channels": {"$in": [c.id for c in to_remove]}}},
+                )
+                self.ai_channels.setdefault(ctx.guild.id, set()).difference_update(c.id for c in to_remove)
+        except Exception as e:
+            print(f"AI Cog: failed to remove AI channels for guild {ctx.guild.id}: {e}")
+            return await ctx.reply(embed=err_embed(
+                "Database Error", "Couldn't update the AI channels right now. Please try again in a moment."))
+
+        lines = []
+        if to_remove:
+            lines.append("✅ **Removed:** " + ", ".join(c.mention for c in to_remove))
+        if not_added:
+            lines.append("⚠️ **Not added:** " + ", ".join(c.mention for c in not_added))
+
+        await ctx.reply(embed=make_embed(title="AI Channels Updated", description="\n".join(lines)),
+                        mention_author=False)
+
+    @ai_group.command(name="reset", help="Clears your AI chatbot memory for this channel.")
+    async def reset_memory(self, ctx: commands.Context):
+        if not self._is_ai_channel(ctx.channel):
             await ctx.send(embed=err_embed("Wrong Channel", "The AI Chatbot is not active in this channel.", emoji="🚫"))
             return
 
-        history = self.history.get(ctx.channel.id)
+        key = (ctx.channel.id, ctx.author.id)
+        if self.history.get(key):
+            self.history[key].clear()
+            await ctx.send(embed=ok_embed("Memory Cleared", "Your memory in this channel has been cleared!", emoji="🧹", color=BRAND_COLOR))
+        else:
+            await ctx.send(embed=info_embed("Memory Empty", "Your memory in this channel is already empty.", emoji="🧠"))
+
+    @ai_group.command(name="memory", help="Displays your AI chatbot memory for this channel.")
+    async def show_memory(self, ctx: commands.Context):
+        if not self._is_ai_channel(ctx.channel):
+            await ctx.send(embed=err_embed("Wrong Channel", "The AI Chatbot is not active in this channel.", emoji="🚫"))
+            return
+
+        history = self.history.get((ctx.channel.id, ctx.author.id))
         if not history:
-            await ctx.send(embed=info_embed("Memory Empty", "Memory is currently empty.", emoji="🧠"))
+            await ctx.send(embed=info_embed("Memory Empty", "Your memory in this channel is currently empty.", emoji="🧠"))
             return
 
         def _content_to_str(content) -> str:
@@ -844,11 +1101,11 @@ class AIChat(commands.Cog):
         for idx, chunk in enumerate(split_message(text, EMBED_DESCRIPTION_LIMIT)):
             embed = discord.Embed(description=chunk, color=BRAND_COLOR)
             if idx == 0:
-                embed.title = f"🧠 Current Memory — {len(history)} message(s) stored"
+                embed.title = f"🧠 Your Memory (this channel) — {len(history)} message(s) stored"
             await ctx.send(embed=embed)
 
-    @commands.command(name="ai-info", help="Displays model status, and daily usage grouped by OpenRouter account.")
-    @commands.is_owner()
+    @commands.command(name="ai-info", help="Owner only: displays model status, and daily usage grouped by OpenRouter account.")
+    @is_bot_owner()
     async def ai_info(self, ctx: commands.Context):
         self._check_daily_reset()
         timeout = aiohttp.ClientTimeout(total=15)
@@ -972,30 +1229,53 @@ class AIChat(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or message.channel.id != AI_CHATBOT_CHANNELID:
+        if message.author.bot or message.guild is None:
+            return
+
+        if not self._is_ai_channel(message.channel):
             return
 
         if message.content.startswith(BOT_PREFIX):
             return
 
-        channel_id = message.channel.id
-        lock = self._channel_locks[channel_id]
+        # Rate limit: one in-flight request per user. The check and the add
+        # below have no `await` between them, so two rapid messages can't both slip through.
+        user_id = message.author.id
+        if user_id in self._active_users:
+            task = asyncio.create_task(self._reject_busy(message))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+            return
+        self._active_users.add(user_id)
 
-        async with lock:
+        try:
+            await self._handle_ai_message(message)
+        except Exception:
+            tb = traceback.format_exc()
+            print(f"Unhandled exception in AIChat.on_message:\n{tb}")
             try:
-                await self._handle_ai_message(message)
-            except Exception:
-                tb = traceback.format_exc()
-                print(f"Unhandled exception in AIChat.on_message:\n{tb}")
-                try:
-                    await message.reply(
-                        embed=err_embed(
-                            "Something Went Wrong",
-                            "Something went wrong handling that message. Check console logs.",
-                        )
+                await message.reply(
+                    embed=err_embed(
+                        "Something Went Wrong",
+                        "Something went wrong handling that message. Check console logs.",
                     )
-                except Exception:
-                    pass
+                )
+            except Exception:
+                pass
+        finally:
+            self._active_users.discard(user_id)
+
+    async def _reject_busy(self, message: discord.Message):
+        """React with an hourglass, then delete the too-early message after a few seconds."""
+        try:
+            await message.add_reaction(BUSY_REACTION)
+        except discord.HTTPException:
+            pass
+        await asyncio.sleep(BUSY_DELETE_AFTER_SECONDS)
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass  # already deleted, or the bot lacks Manage Messages
 
     async def _send_result(self, message: discord.Message, text: str):
         """Sends the final answer as #0414c7 embed(s). Only the result is shown."""
@@ -1008,7 +1288,7 @@ class AIChat(commands.Cog):
                 await message.channel.send(embed=embed)
 
     async def _handle_ai_message(self, message: discord.Message):
-        channel_id = message.channel.id
+        memory_key = (message.channel.id, message.author.id)
 
         # Single "Thinking..." embed with a live Discord timestamp; edited to
         # "Thought for N seconds" when done. No reasoning/steps are displayed.
@@ -1053,10 +1333,10 @@ class AIChat(commands.Cog):
             else:
                 user_message_dict = {"role": "user", "content": message.content}
 
-            self.history[channel_id].append(user_message_dict)
-            self.history[channel_id] = self.history[channel_id][-self.max_history:]
+            self.history[memory_key].append(user_message_dict)
+            self.history[memory_key] = self.history[memory_key][-self.max_history:]
 
-            current_payload_messages = [{"role": "system", "content": system_instruction}] + self.history[channel_id]
+            current_payload_messages = [{"role": "system", "content": system_instruction}] + self.history[memory_key]
 
             reply_sent = False
             mutation_happened = False
@@ -1169,7 +1449,7 @@ class AIChat(commands.Cog):
                         print(f"Failed to retrieve summary: {e}")
 
                 if reply_text.strip():
-                    self.history[channel_id].append({"role": "assistant", "content": reply_text})
+                    self.history[memory_key].append({"role": "assistant", "content": reply_text})
                     await status.finish(success=True)
                     await self._send_result(message, reply_text)
                 else:
