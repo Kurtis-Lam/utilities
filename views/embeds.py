@@ -107,6 +107,44 @@ USAGE_EXAMPLES = {
     ],
     "pause": ["{p}pause", "{p}pause 1 2 3", "{p}pause 1 2h", "{p}p 4 30m"],
     "resume": ["{p}resume", "{p}resume 1 2", "{p}r 3"],
+    # poketwo-management: set
+    "set": [
+        "{p}set lockdelay 15 sh",
+        "{p}set rarerole @Rare Ping",
+    ],
+    "set lockdelay": [
+        "{p}set lockdelay 15 sh",
+        "{p}set lockdelay 15 sh cl tp",
+        "{p}set lockdelay 15 all",
+        "{p}set lockdelay 15 sh --global",
+    ],
+    "set rarerole": ["{p}set rarerole @Rare Ping", "{p}set rarerole"],
+    "set regionalrole": ["{p}set regionalrole @Regional Ping", "{p}set regionalrole"],
+    "set gigantamaxrole": ["{p}set gigantamaxrole @GMax Ping", "{p}set gigantamaxrole"],
+    "set paradoxrole": ["{p}set paradoxrole @Paradox Ping", "{p}set paradoxrole"],
+    "set eeveelutionsrole": ["{p}set eeveelutionsrole @Eevee Ping", "{p}set eeveelutionsrole"],
+    # poketwo-management: toggle
+    "toggle": [
+        "{p}toggle shlock",
+        "{p}toggle shlock --global",
+        "{p}toggle lockdelay sh cl",
+    ],
+    "toggle lockdelay": [
+        "{p}toggle lockdelay sh",
+        "{p}toggle lockdelay sh cl",
+        "{p}toggle lockdelay sh cl --global",
+    ],
+    "toggle restrictunlockers": [
+        "{p}toggle restrictunlockers res",
+        "{p}toggle restuls res sh",
+        "{p}toggle restrictunlockers res --global",
+    ],
+    # poketwo-management: settings
+    "channelsettings": ["{p}channelsettings", "{p}chsettings"],
+    # poketwo-utils
+    "dex": ["{p}dex pikachu", "{p}dex 25", "{p}pokedex #25"],
+    "extract": ["Reply to a Pokétwo embed with: {p}extract", "Reply to a Pokétwo embed with: {p}ex"],
+    "checkflee": ["{p}checkflee"],
 }
 
 
