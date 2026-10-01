@@ -6,10 +6,16 @@ from discord.ext import commands
 
 # Import ConfirmView from views/common.py
 from views.common import ConfirmView
+from views.embeds import ok_embed, err_embed, handle_common_error, send_usage
+
 
 class RoleCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def cog_command_error(self, ctx, error):
+        if not await handle_common_error(ctx, error):
+            raise error
 
     async def confirm_action(self, ctx, prompt: str) -> bool:
         view = ConfirmView(ctx.author)
@@ -56,12 +62,12 @@ class RoleCog(commands.Cog):
     @commands.bot_has_permissions(manage_roles=True)
     async def giverole(self, ctx, member: discord.Member, role: discord.Role):
         if role >= ctx.guild.me.top_role:
-            return await ctx.send("❌ I cannot assign a role that is higher than or equal to my highest role.")
+            return await ctx.send(embed=err_embed("Action Denied", "I cannot assign a role that is higher than or equal to my highest role."))
         if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
-            return await ctx.send("❌ You cannot assign a role higher than or equal to your own highest role.")
+            return await ctx.send(embed=err_embed("Action Denied", "You cannot assign a role higher than or equal to your own highest role."))
         
         await member.add_roles(role)
-        await ctx.send(f"✅ Successfully gave **{role.name}** to **{member.display_name}**.")
+        await ctx.send(embed=ok_embed("Role Given", f"Successfully gave **{role.name}** to {member.mention}."))
 
     @commands.hybrid_command(
         name="removerole", 
@@ -77,12 +83,12 @@ class RoleCog(commands.Cog):
     @commands.bot_has_permissions(manage_roles=True)
     async def removerole(self, ctx, member: discord.Member, role: discord.Role):
         if role >= ctx.guild.me.top_role:
-            return await ctx.send("❌ I cannot remove a role that is higher than or equal to my highest role.")
+            return await ctx.send(embed=err_embed("Action Denied", "I cannot remove a role that is higher than or equal to my highest role."))
         if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
-            return await ctx.send("❌ You cannot remove a role higher than or equal to your own highest role.")
+            return await ctx.send(embed=err_embed("Action Denied", "You cannot remove a role higher than or equal to your own highest role."))
         
         await member.remove_roles(role)
-        await ctx.send(f"✅ Successfully removed **{role.name}** from **{member.display_name}**.")
+        await ctx.send(embed=ok_embed("Role Removed", f"Successfully removed **{role.name}** from {member.mention}."))
 
     @commands.command(
         name="setperms", 
@@ -92,10 +98,10 @@ class RoleCog(commands.Cog):
     async def setperms(self, ctx, level: str, targets: commands.Greedy[discord.Role | discord.Member]):
         level = level.lower()
         if level not in ["admin", "member", "blocked"]:
-            return await ctx.send("❌ Invalid level! Please choose **admin**, **member**, or **blocked**.")
+            return await send_usage(ctx, note="Invalid level! Please choose **admin**, **member**, or **blocked**.")
 
         if not targets:
-            return await ctx.send("❌ Please specify at least one role or member.")
+            return await send_usage(ctx, note="Please specify at least one role or member.")
 
         if level == "admin":
             perms = discord.PermissionOverwrite(
@@ -129,7 +135,12 @@ class RoleCog(commands.Cog):
             target_names.append(target.name)
 
         names_str = ", ".join(f"**{name}**" for name in target_names)
-        await ctx.send(f"✅ Set {dest_type} **{destination.name}** and granted **{level_desc}** permissions to: {names_str}.")
+        embed = ok_embed(
+            "Permissions Updated",
+            f"Set {dest_type} **{destination.name}** and granted **{level_desc}** permissions to: {names_str}.",
+            emoji="🔐"
+        )
+        await ctx.send(embed=embed)
 
     @commands.hybrid_command(
         name="createrole", 
@@ -223,11 +234,12 @@ class RoleCog(commands.Cog):
                 hex_val = int(color_input_clean.lstrip("#"), 16)
                 role_color = discord.Color(hex_val)
             except ValueError:
-                return await ctx.send("❌ Invalid hex color code provided.")
+                return await ctx.send(embed=err_embed("Invalid Color", "Invalid hex color code provided. Example: `#FF0000`."))
         elif color_input_clean not in ["default", "none"]:
-            return await ctx.send(
-                "❌ Invalid color choice! Choose a standard color (e.g. `light-blue`, `red`), `default`, or a hex code (e.g. `#FF0000`)."
-            )
+            return await ctx.send(embed=err_embed(
+                "Invalid Color",
+                "Choose a standard color (e.g. `light-blue`, `red`), `default`, or a hex code (e.g. `#FF0000`)."
+            ))
 
         # Permission Level Parsing
         level_clean = level.strip().lower() if level else "none"
@@ -238,7 +250,7 @@ class RoleCog(commands.Cog):
         elif level_clean == "none":
             perms = discord.Permissions.none()
         else:
-            return await ctx.send("❌ Invalid level! Please choose **admin**, **basic**, or **none**.")
+            return await ctx.send(embed=err_embed("Invalid Level", "Please choose **admin**, **basic**, or **none**."))
 
         # Create Role
         try:
@@ -249,7 +261,7 @@ class RoleCog(commands.Cog):
                 reason=f"Created by {ctx.author}"
             )
         except discord.HTTPException:
-            return await ctx.send("❌ Failed to create the role. Check my permissions.")
+            return await ctx.send(embed=err_embed("Role Creation Failed", "Failed to create the role. Check my permissions."))
 
         # Assign Role to Targets
         assigned_count = 0
@@ -264,11 +276,17 @@ class RoleCog(commands.Cog):
 
         # Send Success Response
         color_display = color_input if color_input_clean not in ["default", "none"] else "default (gray)"
-        success_msg = f"✅ Successfully created role **{role.name}** with color `{color_display}` and `{level_clean}` permissions."
+        embed = ok_embed(
+            "Role Created",
+            f"Successfully created role **{role.name}**.",
+            emoji="🎨"
+        )
+        embed.add_field(name="🎨 Color", value=f"`{color_display}`", inline=True)
+        embed.add_field(name="🔐 Permissions", value=f"`{level_clean}`", inline=True)
         if assigned_count > 0:
-            success_msg += f"\n👥 Assigned to {assigned_count} member(s)."
+            embed.add_field(name="👥 Assigned To", value=f"{assigned_count} member(s)", inline=True)
             
-        await ctx.send(success_msg)
+        await ctx.send(embed=embed)
 
     @commands.hybrid_command(
         name="deleterole", 
@@ -283,9 +301,9 @@ class RoleCog(commands.Cog):
     @commands.bot_has_permissions(manage_roles=True)
     async def deleterole(self, ctx, role: discord.Role):
         if role >= ctx.guild.me.top_role:
-            return await ctx.send("❌ I cannot delete a role that is higher than or equal to my highest role.")
+            return await ctx.send(embed=err_embed("Action Denied", "I cannot delete a role that is higher than or equal to my highest role."))
         if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
-            return await ctx.send("❌ You cannot delete a role higher than or equal to your own highest role.")
+            return await ctx.send(embed=err_embed("Action Denied", "You cannot delete a role higher than or equal to your own highest role."))
 
         role_name = role.name
         
@@ -296,9 +314,9 @@ class RoleCog(commands.Cog):
 
         try:
             await role.delete(reason=f"Deleted by {ctx.author}")
-            await ctx.send(f"✅ Successfully deleted the role **{role_name}**.")
+            await ctx.send(embed=ok_embed("Role Deleted", f"Successfully deleted the role **{role_name}**.", emoji="🗑️"))
         except discord.HTTPException:
-            await ctx.send("❌ Failed to delete the role. Check my permissions.")
+            await ctx.send(embed=err_embed("Delete Failed", "Failed to delete the role. Check my permissions."))
 
 
 async def setup(bot):
