@@ -10,6 +10,9 @@ import aiohttp
 import discord    
 from discord.ext import commands    
 
+from views.common import EMBED_COLOR, error_embed
+from views.embeds import handle_command_error, send_usage
+
 from .recognize import extract_pokemon_from_text, format_name    
 
 
@@ -295,7 +298,10 @@ class Recognize(commands.Cog):
         except discord.HTTPException:    
             pass    
 
-    @commands.command(name="rec", aliases=["recognize"])    
+    async def cog_command_error(self, ctx: commands.Context, error: Exception):
+        await handle_command_error(ctx, error)
+
+    @commands.command(name="rec", aliases=["recognize"], description="Identify a Pokémon from an image.")    
     async def manual_recognize(self, ctx: commands.Context):    
         image_url = None    
 
@@ -319,7 +325,7 @@ class Recognize(commands.Cog):
                 pass    
 
         if not image_url:     
-            await ctx.send("❌ Please attach an image or reply to a message containing a Pokémon image.")    
+            await send_usage(ctx, note="Please attach an image or reply to a message containing a Pokémon image.")    
             return
 
         await self._ensure_model_loaded()    
@@ -335,14 +341,14 @@ class Recognize(commands.Cog):
                 embed = discord.Embed(
                     title=title,
                     description=pings if pings else None,
-                    color=discord.Color.blue()
+                    color=EMBED_COLOR
                 )
                 await ctx.send(
                     embed=embed,
                     allowed_mentions=discord.AllowedMentions(roles=True, users=True)
                 )
             except Exception as e:    
-                await ctx.send(f"❌ Recognition failed: `{e}`")    
+                await ctx.send(embed=error_embed(f"Recognition failed: `{e}`"))    
 
     @commands.Cog.listener()    
     async def on_message(self, message: discord.Message):    
