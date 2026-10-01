@@ -41,6 +41,7 @@ class Recognize(commands.Cog):
             "eevos": "data/pokes/eevos.json",    
         }
         self.category_pokes = {}    
+        self.alt_names = {}
         self.pokedex_cache = {}
         self._background_tasks = set()    
 
@@ -58,6 +59,36 @@ class Recognize(commands.Cog):
 
     def _normalize_name(self, name: str) -> str:
         return re.sub(r'[^a-z0-9]', '', name.strip().lower())
+
+    def _load_alt_names(self):
+        possible_bases = [Path(__file__).parent, Path.cwd()]
+        filepath = Path("data/alt.json")
+        path = None
+        for base in possible_bases:
+            candidate = base / filepath
+            if candidate.exists():
+                path = candidate
+                break
+
+        if path and path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.alt_names = {str(k).strip().lower(): str(v) for k, v in data.items()}
+            except Exception as e:
+                print(f"[Recognizer] Failed to load {filepath}: {e}")
+                self.alt_names = {}
+        else:
+            print(f"[Recognizer] Warning: {filepath} not found in paths {[str(b / filepath) for b in possible_bases]}")
+            self.alt_names = {}
+
+    def _get_alt_name(self, pokemon_name: str) -> str | None:
+        pok_lower = pokemon_name.strip().lower()
+        if pok_lower in self.alt_names:
+            return self.alt_names[pok_lower]
+        pok_norm = self._normalize_name(pokemon_name)
+        return self.alt_names.get(pok_norm)
 
     def _load_category_pokes(self):    
         # Search relative to cog directory as well as the root working directory
@@ -115,6 +146,7 @@ class Recognize(commands.Cog):
 
     async def cog_load(self):    
         self._load_category_pokes()    
+        self._load_alt_names()
         await self._load_pokedex_cache()
         
         connector = aiohttp.TCPConnector(    
@@ -337,7 +369,9 @@ class Recognize(commands.Cog):
                 
                 pings, _, _ = await self._get_ping_info(ctx.guild.id if ctx.guild else 0, pokemon_name)    
 
-                title = f"{format_name(pokemon_name)}: {confidence:.3%}"
+                alt = self._get_alt_name(pokemon_name)
+                alt_str = f" [{format_name(alt)}]" if alt else ""
+                title = f"{format_name(pokemon_name)}: {confidence:.2%}{alt_str}"
                 embed = discord.Embed(
                     title=title,
                     description=pings if pings else None,
@@ -429,7 +463,9 @@ class Recognize(commands.Cog):
             message.guild.id if message.guild else 0, pokemon_name    
         )
 
-        out_text = f"# {format_name(pokemon_name)}: {confidence:.3%}"    
+        alt = self._get_alt_name(pokemon_name)
+        alt_str = f" [{format_name(alt)}]" if alt else ""
+        out_text = f"# {format_name(pokemon_name)}: {confidence:.2%}{alt_str}"    
         if pings:    
             out_text += f"\n{pings}"    
 
