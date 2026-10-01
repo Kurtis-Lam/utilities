@@ -1,7 +1,7 @@
 import discord
 from discord.ui import Button, ChannelSelect, Modal, RoleSelect, TextInput
 
-from views.common import BaseView, make_embed, success_embed
+from views.common import BaseView, make_embed, success_embed, themed
 
 TOTAL_PAGES = 3
 PLACEHOLDER_HELP = "{mention}  {username}  {display_name}  {server}  {membercount}"
@@ -113,15 +113,13 @@ class WelcomeMessageModal(Modal, title="Edit Welcome Message"):
         )
         self.view_instance.config["welcome_message"] = new_message
         await interaction.response.edit_message(
-            embed=get_welcome_embed(self.view_instance.config, interaction.guild, interaction.user),
+            embed=themed(get_welcome_embed(self.view_instance.config, interaction.guild, interaction.user)),
             view=self.view_instance,
         )
         await interaction.followup.send(embed=success_embed("Welcome message updated."), ephemeral=True)
 
 
 # --- Views -----------------------------------------------------------------------
-# `author_id` is optional: pass it from the command to lock the menu to whoever
-# opened it. Without it the views behave exactly as before.
 
 class WelcomeConfigView(BaseView):
     def __init__(self, collection, config: dict, author_id: int | None = None):
@@ -149,7 +147,7 @@ class WelcomeConfigView(BaseView):
             {"_id": self.guild_id}, {"$set": {"welcome_channel": channel_id}}, upsert=True
         )
         await interaction.response.edit_message(
-            embed=get_welcome_embed(self.config, interaction.guild, interaction.user), view=self
+            embed=themed(get_welcome_embed(self.config, interaction.guild, interaction.user)), view=self
         )
 
     @discord.ui.button(label="Edit Message", emoji="📝", style=discord.ButtonStyle.primary, row=1)
@@ -165,7 +163,7 @@ class WelcomeConfigView(BaseView):
         await self.collection.update_one({"_id": self.guild_id}, {"$set": {"use_embed": new_val}}, upsert=True)
         self._sync_toggle()
         await interaction.response.edit_message(
-            embed=get_welcome_embed(self.config, interaction.guild, interaction.user), view=self
+            embed=themed(get_welcome_embed(self.config, interaction.guild, interaction.user)), view=self
         )
 
     @discord.ui.button(label="Next: Greets", emoji="▶️", style=discord.ButtonStyle.success, row=2)
@@ -195,7 +193,7 @@ class GreetConfigView(BaseView):
         await self.collection.update_one(
             {"_id": self.guild_id}, {"$set": {"greet_channels": channel_ids}}, upsert=True
         )
-        await interaction.response.edit_message(embed=get_greet_embed(self.config), view=self)
+        await interaction.response.edit_message(embed=themed(get_greet_embed(self.config)), view=self)
 
     @discord.ui.button(label="Back: Welcome", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def prev_page_btn(self, interaction: discord.Interaction, button: Button):
@@ -228,7 +226,7 @@ class AutoroleConfigView(BaseView):
         role_ids = [role.id for role in select.values]
         self.config["autoroles"] = role_ids
         await self.collection.update_one({"_id": self.guild_id}, {"$set": {"autoroles": role_ids}}, upsert=True)
-        await interaction.response.edit_message(embed=get_autorole_embed(self.config), view=self)
+        await interaction.response.edit_message(embed=themed(get_autorole_embed(self.config)), view=self)
 
     @discord.ui.button(label="Back: Greets", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def prev_page_btn(self, interaction: discord.Interaction, button: Button):

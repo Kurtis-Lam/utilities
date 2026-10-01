@@ -663,7 +663,6 @@ class ConfigView(ui.View):
 
         self.reset_all.label = f"💥 Reset All {self.reset_noun.title()}"
 
-        # Only keep the buttons that make sense for this page
         if page == "autocatch":
             self.remove_item(self.edit_cfg)
         elif page not in ["modes", "autocatch"]:
@@ -770,7 +769,7 @@ class ConfigView(ui.View):
     async def rem_bot(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(RemoveBotModal())
 
-    # --- ROW 4: DANGER ZONE (kept apart so it's hard to hit by accident) ---
+    # --- ROW 4: DANGER ZONE ---
     @ui.button(label="💥 Reset All", style=discord.ButtonStyle.danger, custom_id="cfg_reset_all", row=4)
     async def reset_all(self, interaction: discord.Interaction, button: ui.Button):
         if not await _guild_only(interaction):

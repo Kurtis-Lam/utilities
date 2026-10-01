@@ -26,13 +26,6 @@ CATEGORY_LABELS = {
     "eevos": "Eevos Lock",
 }
 
-# Button layout for the `.c a` main page — exactly the rows requested:
-#   row 1: res, sh, cl
-#   row 2: rp, tp
-#   row 3: rare, regional
-#   row 4: gmax, paradox, eevos
-# CATEGORY_ORDER is just this flattened, and is also the order everything
-# else (embeds, .chsettings, .set/.toggle "all") iterates categories in.
 ROW_LAYOUT = (
     ("re", "sh", "cl"),
     ("rp", "tp"),
@@ -42,7 +35,6 @@ ROW_LAYOUT = (
 CATEGORY_ORDER = tuple(cat for row in ROW_LAYOUT for cat in row)
 ALL_CATEGORIES = CATEGORY_ORDER
 
-# Same limits as `.set lockdelay`. To lock instantly, turn the delay OFF instead.
 MIN_DELAY = 1
 MAX_DELAY = 600
 
@@ -80,9 +72,7 @@ async def _build_category_page(cog, guild: discord.Guild, guild_id: int, author_
 
 
 async def build_main_page(cog, guild: discord.Guild, guild_id: int, author_id: int):
-    """(embed, view) for the `.c a` landing page. Buttons are colored by each
-    lock's current state (green = on, grey = off). Use this from the command
-    instead of building AutoLockMainView by hand to get the colored buttons."""
+    """(embed, view) for the `.c a` landing page."""
     results = await asyncio.gather(
         *(cog.get_category_config(guild_id, cat) for cat in CATEGORY_ORDER),
         return_exceptions=True,
@@ -194,15 +184,6 @@ class WhitelistModal(discord.ui.Modal):
 # --- Views -----------------------------------------------------------------------
 
 class CategoryConfigView(BaseView):
-    """
-    Config page for a single category.
-
-    `cfg` is that category's current effective (guild-wide) config. It's only
-    used to decide button labels/colors: the on/off, delay, and restrict
-    buttons always show the action pressing them will take as a plain
-    "Turn … On" (green) / "Turn … Off" (red) rather than an ambiguous "Toggle".
-    """
-
     def __init__(self, cog, guild_id: int, author_id: int, category: str, cfg: dict):
         super().__init__(author_id=author_id, timeout=180)
         self.cog = cog
@@ -214,7 +195,7 @@ class CategoryConfigView(BaseView):
         self.add_item(self._make_button("Add Whitelist", discord.ButtonStyle.green, self._add_whitelist, row=0, emoji="➕"))
         self.add_item(self._make_button("Remove Whitelist", discord.ButtonStyle.red, self._remove_whitelist, row=0, emoji="➖"))
 
-        # Row 1: on/off switches (green = pressing turns it on, red = turns it off)
+        # Row 1: on/off switches
         is_enabled = cfg.get("enabled", False)
         self.add_item(self._make_button(
             "Turn Lock Off" if is_enabled else "Turn Lock On",
@@ -252,7 +233,6 @@ class CategoryConfigView(BaseView):
         return button
 
     async def reload(self, interaction: discord.Interaction):
-        """Re-render this page from fresh data (colors/labels match reality)."""
         embed, view = await _build_category_page(
             self.cog, interaction.guild, self.guild_id, self.author_id, self.category
         )
@@ -289,12 +269,6 @@ class CategoryConfigView(BaseView):
 
 
 class AutoLockMainView(BaseView):
-    """Landing page for `.c a`: one button per lock category, laid out per ROW_LAYOUT.
-
-    ``states`` (optional) maps category -> enabled so buttons can be colored
-    green / grey. Without it every button is blurple, as before.
-    """
-
     def __init__(self, cog, guild_id: int, author_id: int, states: dict | None = None):
         super().__init__(author_id=author_id, timeout=180)
         self.cog = cog
