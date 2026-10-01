@@ -1,4 +1,6 @@
 import io
+import re
+import unicodedata
 
 import discord
 from discord.ext import commands
@@ -27,11 +29,92 @@ TYPE_EMOJIS = {
 }
 
 
+# --- Alt-name helpers ---------------------------------------------------------
+# Alt names live in the "names" list of each Pokédex entry (the same list the
+# "Names" field of .dex displays). These helpers turn those raw strings into
+# normalized lookup keys so that "ghos", "Ghos", "ゴース" etc. all resolve.
+
+_LEADING_JUNK_RE = re.compile(r"^[^\w]+")
+_SPLIT_RE = re.compile(r"[/;|\n]")
+_PAREN_RE = re.compile(r"[(\[（]([^)\]）]*)[)\]）]")
+
+
+def _strip_accents(text: str) -> str:
+    """Drops accents from Latin letters only (keeps kana dakuten etc. intact)."""
+    out = []
+    for ch in unicodedata.normalize("NFD", text):
+        if unicodedata.combining(ch) and out and ord(out[-1]) < 0x250:
+            continue
+        out.append(ch)
+    return unicodedata.normalize("NFC", "".join(out))
+
+
+def _is_latin(text: str) -> bool:
+    return all(
+        ch.isascii() or ch in "’♀♂" or unicodedata.name(ch, "").startswith("LATIN")
+        for ch in text
+    )
+
+
+def name_keys(text: str) -> set:
+    """Normalized lookup keys for a name (case/width/accent-insensitive)."""
+    base = unicodedata.normalize("NFKC", text).replace("’", "'")
+    base = " ".join(base.split()).casefold()
+    if not base:
+        return set()
+    return {base, _strip_accents(base)}
+
+
+def extract_name_variants(entry) -> list:
+    """
+    Cleans one raw entry of a Pokémon's "names" list into usable name strings.
+    Handles flag/emoji prefixes, "Language: name" labels, "a / b" lists and
+    "ゴース (Gōsu)" style parentheses.
+    """
+    if not isinstance(entry, str):
+        return []
+    variants = []
+
+    def add(text):
+        text = _LEADING_JUNK_RE.sub("", text.strip()).strip()
+        if text and text not in variants:
+            variants.append(text)
+
+    for part in _SPLIT_RE.split(entry):
+        if ":" in part:
+            part = part.split(":", 1)[1]
+        outer = _PAREN_RE.sub(" ", part)
+        # Parenthesised romanization only counts when the outer text is non-Latin
+        # (otherwise the parentheses are just a label like "(French)").
+        if not _is_latin(_LEADING_JUNK_RE.sub("", outer.strip())):
+            for inner in _PAREN_RE.findall(part):
+                add(inner)
+        add(outer)
+    return variants
+
+
+def build_alt_index(pokedex: dict) -> dict:
+    """Maps every normalized alt name (any language) -> canonical Pokédex key."""
+    index = {}
+    for name, info in pokedex.items():
+        if not isinstance(info, dict):
+            continue
+        raw_names = info.get("names", [])
+        if isinstance(raw_names, str):
+            raw_names = [raw_names]
+        for entry in raw_names or []:
+            for variant in extract_name_variants(entry):
+                for key in name_keys(variant):
+                    index.setdefault(key, name)
+    return index
+
+
 class Dex(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
         self.pokedex = {}
+        self.alt_index = {}  # normalized alt name -> pokedex key
 
     async def cog_command_error(self, ctx: commands.Context, error):
         await handle_command_error(ctx, error)
@@ -69,15 +152,17 @@ class Dex(commands.Cog):
                 self.pokedex = doc["data"]
             else:
                 self.pokedex = {}
+            self.alt_index = build_alt_index(self.pokedex)
         except Exception as e:
             print(f"❌ Failed to load Pokédex from MongoDB: {e}")
             self.pokedex = {}
+            self.alt_index = {}
 
     @commands.command(
         name="dex",
         aliases=["pokedex"],
-        usage="<pokémon name or dex number>",
-        description="Look up a Pokémon in the Pokédex by name or dex number.",
+        usage="<pokémon name, alt name or dex number>",
+        description="Look up a Pokémon in the Pokédex by name, alt name (any language) or dex number.",
     )
     async def dex_cmd(self, ctx: commands.Context, *, query: str = None):
         if query is None or not query.strip():
@@ -105,11 +190,21 @@ class Dex(commands.Cog):
                 data = info
                 break
 
+        # Fallback: alt names in any language (e.g. "ghos" or "ゴース" -> Gastly).
+        # Real names / dex numbers are checked first so they always take priority.
+        if not data:
+            for key in name_keys(query.strip().lstrip("#")):
+                alt_target = self.alt_index.get(key)
+                if alt_target and alt_target in self.pokedex:
+                    matched_name = alt_target
+                    data = self.pokedex[alt_target]
+                    break
+
         if not data:
             await ctx.reply(embed=err_embed(
                 "Pokémon Not Found",
                 f"Couldn't find `{query.strip()[:100]}` in the Pokédex.\n"
-                f"-# Try the exact name or dex number, e.g. `{ctx.clean_prefix}dex pikachu` or `{ctx.clean_prefix}dex 25`."))
+                f"-# Try the name, an alt name or the dex number, e.g. `{ctx.clean_prefix}dex pikachu` or `{ctx.clean_prefix}dex 25`."))
             return
 
         dex_num = str(data.get("pokedex_number", "???")).lstrip("#")

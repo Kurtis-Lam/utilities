@@ -1,4 +1,6 @@
 import json
+import re
+import unicodedata
 from pathlib import Path
 from typing import List, Tuple, Optional
 import discord
@@ -19,6 +21,86 @@ REGIONS = [
 ]
 
 EXTRA_RP_CATEGORIES = ["Gmax", "Paradox", "Eevos"]
+
+
+# --- Alt-name helpers ---------------------------------------------------------
+# Alt names live in the "names" list of each Pokédex entry (the same list the
+# "Names" field of .dex displays). These helpers turn those raw strings into
+# normalized lookup keys so that "ghos", "Ghos", "ゴース" etc. all resolve.
+
+_LEADING_JUNK_RE = re.compile(r"^[^\w]+")
+_SPLIT_RE = re.compile(r"[/;|\n]")
+_PAREN_RE = re.compile(r"[(\[（]([^)\]）]*)[)\]）]")
+
+
+def _strip_accents(text: str) -> str:
+    """Drops accents from Latin letters only (keeps kana dakuten etc. intact)."""
+    out = []
+    for ch in unicodedata.normalize("NFD", text):
+        if unicodedata.combining(ch) and out and ord(out[-1]) < 0x250:
+            continue
+        out.append(ch)
+    return unicodedata.normalize("NFC", "".join(out))
+
+
+def _is_latin(text: str) -> bool:
+    return all(
+        ch.isascii() or ch in "’♀♂" or unicodedata.name(ch, "").startswith("LATIN")
+        for ch in text
+    )
+
+
+def name_keys(text: str) -> set:
+    """Normalized lookup keys for a name (case/width/accent-insensitive)."""
+    base = unicodedata.normalize("NFKC", text).replace("’", "'")
+    base = " ".join(base.split()).casefold()
+    if not base:
+        return set()
+    return {base, _strip_accents(base)}
+
+
+def extract_name_variants(entry) -> list:
+    """
+    Cleans one raw entry of a Pokémon's "names" list into usable name strings.
+    Handles flag/emoji prefixes, "Language: name" labels, "a / b" lists and
+    "ゴース (Gōsu)" style parentheses.
+    """
+    if not isinstance(entry, str):
+        return []
+    variants = []
+
+    def add(text):
+        text = _LEADING_JUNK_RE.sub("", text.strip()).strip()
+        if text and text not in variants:
+            variants.append(text)
+
+    for part in _SPLIT_RE.split(entry):
+        if ":" in part:
+            part = part.split(":", 1)[1]
+        outer = _PAREN_RE.sub(" ", part)
+        # Parenthesised romanization only counts when the outer text is non-Latin
+        # (otherwise the parentheses are just a label like "(French)").
+        if not _is_latin(_LEADING_JUNK_RE.sub("", outer.strip())):
+            for inner in _PAREN_RE.findall(part):
+                add(inner)
+        add(outer)
+    return variants
+
+
+def build_alt_index(pokedex: dict) -> dict:
+    """Maps every normalized alt name (any language) -> canonical Pokédex key."""
+    index = {}
+    for name, info in pokedex.items():
+        if not isinstance(info, dict):
+            continue
+        raw_names = info.get("names", [])
+        if isinstance(raw_names, str):
+            raw_names = [raw_names]
+        for entry in raw_names or []:
+            for variant in extract_name_variants(entry):
+                for key in name_keys(variant):
+                    index.setdefault(key, name)
+    return index
 
 
 # --- UI Components for Type Pings ---
@@ -140,6 +222,7 @@ class RegionPingView(discord.ui.View):
 class PokePings(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._alt_index = {}  # normalized alt name -> canonical Pokédex name
 
     @property
     def collection(self):
@@ -190,9 +273,52 @@ class PokePings(commands.Cog):
                 upsert=True
             )
 
+    async def _get_alt_index(self) -> dict:
+        """Lazily builds (and caches) the alt-name index from the pokedex doc."""
+        if self._alt_index:
+            return self._alt_index
+        try:
+            doc = await self.constdata_collection.find_one({"_id": "pokedex"})
+            data = doc.get("data") if doc else None
+            if isinstance(data, dict):
+                self._alt_index = build_alt_index(data)
+        except Exception as e:
+            print(f"PokePings: failed to build alt-name index: {e}")
+        return self._alt_index
+
+    async def _resolve_alt_lower(self, text: str) -> Optional[str]:
+        """Returns the canonical (lowercase) Pokémon name for an alt name, or None."""
+        alt_index = await self._get_alt_index()
+        for key in name_keys(text):
+            target = alt_index.get(key)
+            if target:
+                return target.lower()
+        return None
+
     async def parse_pokemon_list(self, raw_input: str) -> Tuple[List[str], List[str]]:
-        requested_names = [p.strip().lower() for p in raw_input.split(",") if p.strip()]
-        
+        """
+        Resolves a comma-separated list of names to canonical pokevars names.
+        Accepts real names and alt names in any language (e.g. "ghos", "ゴース").
+        Returns (matched, invalid) - matched keeps input order and has no duplicates.
+        """
+        requested = [p.strip() for p in raw_input.split(",") if p.strip()]
+        if not requested:
+            return [], []
+
+        alt_index = await self._get_alt_index()
+
+        # Per input: real name first, then any alt-name resolution.
+        candidates: List[List[str]] = []
+        all_candidates = set()
+        for original in requested:
+            cands = [original.lower()]
+            for key in name_keys(original):
+                target = alt_index.get(key)
+                if target and target.lower() not in cands:
+                    cands.append(target.lower())
+            candidates.append(cands)
+            all_candidates.update(cands)
+
         pipeline = [
             {"$match": {"_id": "pokevars"}},
             {"$project": {
@@ -200,22 +326,44 @@ class PokePings(commands.Cog):
                     "$filter": {
                         "input": "$data",
                         "as": "poke",
-                        "cond": {"$in": [{"$toLower": "$$poke"}, requested_names]}
+                        "cond": {"$in": [{"$toLower": "$$poke"}, list(all_candidates)]}
                     }
                 }
             }}
         ]
-        
-        matched = []
+
+        db_matched = []
         cursor = self.constdata_collection.aggregate(pipeline)
         async for doc in cursor:
-            matched = doc.get("matched", [])
+            db_matched = doc.get("matched", [])
             break
 
-        matched_lower = [m.lower() for m in matched]
-        invalid = [name for name in requested_names if name not in matched_lower]
-        
+        lookup = {m.lower(): m for m in db_matched}
+
+        matched, invalid, seen = [], [], set()
+        for original, cands in zip(requested, candidates):
+            hit = next((lookup[c] for c in cands if c in lookup), None)
+            if hit is None:
+                invalid.append(original.lower())
+                continue
+            if hit.lower() not in seen:
+                seen.add(hit.lower())
+                matched.append(hit)
+
         return matched, invalid
+
+    async def _map_targets(self, raw_targets: set, user_list: List[str]) -> dict:
+        """
+        Maps removal inputs to {canonical_lowercase_name: original_input}.
+        An input already present in the list is used as-is; otherwise it is
+        resolved as an alt name (e.g. "ghos" -> "gastly").
+        """
+        in_list = {i.lower() for i in user_list}
+        mapped = {}
+        for target in raw_targets:
+            canonical = target if target in in_list else (await self._resolve_alt_lower(target) or target)
+            mapped[canonical] = target
+        return mapped
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
@@ -271,10 +419,12 @@ class PokePings(commands.Cog):
 
         matched_name = matched_names[0]
         await self.set_ping_data(g_id, "sh", u_id, matched_name)
-        await ctx.reply(
-            embed=make_embed(description=f"✨ Set your Shiny Hunt target to **{matched_name}** in this server!"),
-            mention_author=False,
-        )
+
+        description = f"✨ Set your Shiny Hunt target to **{matched_name}** in this server!"
+        typed = pokemon.split(",")[0].strip()
+        if typed.lower() != matched_name.lower():
+            description += f"\n-# Recognized `{typed[:50]}` as an alt name of {matched_name}."
+        await ctx.reply(embed=make_embed(description=description), mention_author=False)
 
     # --- Collection List Commands ---
 
@@ -342,18 +492,19 @@ class PokePings(commands.Cog):
             await ctx.reply(embed=warning_embed("Your collection list is empty."), mention_author=False)
             return
 
+        targets = await self._map_targets(raw_targets, user_list)
         removed, not_found = [], []
 
         new_list = []
         for item in user_list:
-            if item.lower() in raw_targets:
+            if item.lower() in targets:
                 removed.append(item)
-                raw_targets.remove(item.lower())
+                targets.pop(item.lower())
             else:
                 new_list.append(item)
 
-        if raw_targets:
-            not_found = list(raw_targets)
+        if targets:
+            not_found = list(targets.values())
 
         if removed:
             await self.set_ping_data(g_id, "cl", u_id, new_list)
@@ -474,18 +625,19 @@ class PokePings(commands.Cog):
         if not raw_targets:
             return await send_usage(ctx, note="Please specify at least one Pokémon name.")
 
+        targets = await self._map_targets(raw_targets, user_list)
         removed, not_found = [], []
 
         new_list = []
         for item in user_list:
-            if item.lower() in raw_targets:
+            if item.lower() in targets:
                 removed.append(item)
-                raw_targets.remove(item.lower())
+                targets.pop(item.lower())
             else:
                 new_list.append(item)
 
-        if raw_targets:
-            not_found = list(raw_targets)
+        if targets:
+            not_found = list(targets.values())
 
         if removed:
             await self.set_ping_data(g_id, "re", u_id, new_list)
