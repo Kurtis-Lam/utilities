@@ -4,6 +4,9 @@ from typing import List, Tuple, Optional
 import discord
 from discord.ext import commands
 
+from views.common import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed, warning_embed
+from views.embeds import handle_command_error, send_usage
+
 TYPES = [
     "Normal", "Fire", "Water", "Grass", "Electric", "Ice",
     "Fighting", "Poison", "Ground", "Flying", "Psychic", "Bug",
@@ -41,7 +44,9 @@ class TypePingSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         view: TypePingView = self.view
         if interaction.user.id != view.user_id:
-            return await interaction.response.send_message("This interactive menu is not for you.", ephemeral=True)
+            return await interaction.response.send_message(
+                embed=warning_embed("This menu isn't for you. Run the command yourself to get your own."), ephemeral=True
+            )
 
         g_id = str(interaction.guild_id)
         u_id = str(interaction.user.id)
@@ -64,7 +69,7 @@ class TypePingView(discord.ui.View):
         self.add_item(TypePingSelect(user_types))
 
     def make_embed(self, user_types: list) -> discord.Embed:
-        embed = discord.Embed(title="⚡ Type Pings Configuration", color=discord.Color.blue())
+        embed = discord.Embed(title="⚡ Type Pings Configuration", color=EMBED_COLOR)
         embed.description = "\n".join(
             f"{'✅' if t in user_types else '❌'} **{t}**" for t in TYPES
         )
@@ -95,7 +100,9 @@ class RegionPingSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         view: RegionPingView = self.view
         if interaction.user.id != view.user_id:
-            return await interaction.response.send_message("This interactive menu is not for you.", ephemeral=True)
+            return await interaction.response.send_message(
+                embed=warning_embed("This menu isn't for you. Run the command yourself to get your own."), ephemeral=True
+            )
 
         g_id = str(interaction.guild_id)
         u_id = str(interaction.user.id)
@@ -118,7 +125,7 @@ class RegionPingView(discord.ui.View):
         self.add_item(RegionPingSelect(user_regions))
 
     def make_embed(self, user_regions: list) -> discord.Embed:
-        embed = discord.Embed(title="🌍 Region & Special Pings Configuration", color=discord.Color.blue())
+        embed = discord.Embed(title="🌍 Region & Special Pings Configuration", color=EMBED_COLOR)
         
         region_lines = [f"{'✅' if r in user_regions else '❌'} **{r}**" for r in REGIONS]
         extra_lines = [f"{'✅' if cat in user_regions else '❌'} **{cat}**" for cat in EXTRA_RP_CATEGORIES]
@@ -210,57 +217,82 @@ class PokePings(commands.Cog):
         
         return matched, invalid
 
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        if ctx.guild is None:
+            raise commands.NoPrivateMessage()
+        return True
+
+    async def cog_command_error(self, ctx: commands.Context, error: Exception):
+        await handle_command_error(ctx, error)
+
     async def _handle_role_config(self, ctx: commands.Context, role_key: str, category_name: str, role: discord.Role = None):
         g_id = str(ctx.guild.id)
         if role is None:
             current_role_id = await self.get_guild_role(g_id, role_key)
             if current_role_id:
-                await ctx.reply(f"Current **{category_name}** role: <@&{current_role_id}>", mention_author=False)
+                embed = info_embed(f"Current **{category_name}** role: <@&{current_role_id}>")
             else:
-                await ctx.reply(f"No role configured for **{category_name}**.", mention_author=False)
+                embed = warning_embed(f"No role configured for **{category_name}**.")
+            await ctx.reply(embed=embed, mention_author=False)
         else:
             await self.set_guild_role(g_id, role_key, str(role.id))
-            await ctx.reply(f"Set **{category_name}** ping role to {role.mention}", mention_author=False)
+            await ctx.reply(embed=success_embed(f"Set **{category_name}** ping role to {role.mention}"), mention_author=False)
 
     # --- Shiny Hunt Command ---
 
-    @commands.command(name="sh")
-    async def shiny_hunt(self, ctx: commands.Context, *, pokemon: str = None):
+    @commands.command(name="sh", description="View or set your Shiny Hunt target.")
+    async def shiny_hunt(
+        self,
+        ctx: commands.Context,
+        *,
+        pokemon: str = commands.parameter(
+            default=None,
+            description="The Pokémon to hunt. Leave empty to view your current target.",
+        ),
+    ):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
         if not pokemon:
             current_sh = await self.get_ping_data(g_id, "sh", u_id)
             if current_sh:
-                await ctx.reply(f"✨ Your current Shiny Hunt target is **{current_sh}**.", mention_author=False)
+                await ctx.reply(
+                    embed=make_embed(description=f"✨ Your current Shiny Hunt target is **{current_sh}**."),
+                    mention_author=False,
+                )
             else:
-                await ctx.reply("You don't have a Shiny Hunt target set. Usage: `.sh <pokemon>`", mention_author=False)
+                await send_usage(ctx, note="You don't have a Shiny Hunt target set.")
             return
 
         matched_names, _ = await self.parse_pokemon_list(pokemon)
         if not matched_names:
-            await ctx.reply("Pokémon does not exist.", mention_author=False)
+            await ctx.reply(embed=error_embed("Pokémon does not exist."), mention_author=False)
             return
 
         matched_name = matched_names[0]
         await self.set_ping_data(g_id, "sh", u_id, matched_name)
-        await ctx.reply(f"✨ Set your Shiny Hunt target to **{matched_name}** in this server!", mention_author=False)
+        await ctx.reply(
+            embed=make_embed(description=f"✨ Set your Shiny Hunt target to **{matched_name}** in this server!"),
+            mention_author=False,
+        )
 
     # --- Collection List Commands ---
 
-    @commands.group(name="cl", invoke_without_command=True)
+    @commands.group(name="cl", invoke_without_command=True, description="Manage your collection list pings.")
     async def cl_group(self, ctx: commands.Context):
-        await ctx.reply("Usage: `.cl add <pokemon1, pokemon2...>`, `.cl remove <pokemon1, pokemon2...>`, `.cl clear`, or `.cl list`", mention_author=False)
+        passed = getattr(ctx, "subcommand_passed", None)
+        await send_usage(ctx, note=f"Unknown subcommand `{passed}`." if passed else None)
 
-    @cl_group.command(name="add", aliases=["a"])
-    async def cl_add(self, ctx: commands.Context, *, pokemon: str = None):
-        if not pokemon:
-            await ctx.reply("Please specify at least one Pokémon name.", mention_author=False)
-            return
-
+    @cl_group.command(name="add", aliases=["a"], description="Add Pokémon to your collection list.")
+    async def cl_add(
+        self,
+        ctx: commands.Context,
+        *,
+        pokemon: str = commands.parameter(description="Pokémon name(s), separated by commas."),
+    ):
         matched_names, invalid_names = await self.parse_pokemon_list(pokemon)
         if not matched_names:
-            await ctx.reply("None of the specified Pokémon exist.", mention_author=False)
+            await ctx.reply(embed=error_embed("None of the specified Pokémon exist."), mention_author=False)
             return
 
         g_id = str(ctx.guild.id)
@@ -288,13 +320,18 @@ class PokePings(commands.Cog):
         if invalid_names:
             msg_parts.append(f"❌ Invalid Pokémon: **{', '.join(invalid_names)}**")
 
-        await ctx.reply("\n".join(msg_parts), mention_author=False)
+        await ctx.reply(embed=make_embed(description="\n".join(msg_parts)), mention_author=False)
 
-    @cl_group.command(name="remove", aliases=["r"])
-    async def cl_remove(self, ctx: commands.Context, *, pokemon: str = None):
-        if not pokemon:
-            await ctx.reply("Please specify at least one Pokémon name.", mention_author=False)
-            return
+    @cl_group.command(name="remove", aliases=["r"], description="Remove Pokémon from your collection list.")
+    async def cl_remove(
+        self,
+        ctx: commands.Context,
+        *,
+        pokemon: str = commands.parameter(description="Pokémon name(s), separated by commas."),
+    ):
+        raw_targets = {p.strip().lower() for p in pokemon.split(",") if p.strip()}
+        if not raw_targets:
+            return await send_usage(ctx, note="Please specify at least one Pokémon name.")
 
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
@@ -302,10 +339,9 @@ class PokePings(commands.Cog):
         user_list = await self.get_ping_data(g_id, "cl", u_id, default=[])
 
         if not user_list:
-            await ctx.reply("Your collection list is empty.", mention_author=False)
+            await ctx.reply(embed=warning_embed("Your collection list is empty."), mention_author=False)
             return
 
-        raw_targets = {p.strip().lower() for p in pokemon.split(",") if p.strip()}
         removed, not_found = [], []
 
         new_list = []
@@ -328,37 +364,42 @@ class PokePings(commands.Cog):
         if not_found:
             msg_parts.append(f"❌ Not found in list: **{', '.join(not_found)}**")
 
-        await ctx.reply("\n".join(msg_parts), mention_author=False)
+        await ctx.reply(embed=make_embed(description="\n".join(msg_parts)), mention_author=False)
 
-    @cl_group.command(name="clear", aliases=["c"])
+    @cl_group.command(name="clear", aliases=["c"], description="Clear your whole collection list.")
     async def cl_clear(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
         await self.set_ping_data(g_id, "cl", u_id, [])
-        await ctx.reply("🧹 Cleared your collection list!", mention_author=False)
+        await ctx.reply(embed=make_embed(description="🧹 Cleared your collection list!"), mention_author=False)
 
-    @cl_group.command(name="list", aliases=["l"])
+    @cl_group.command(name="list", aliases=["l"], description="Show your collection list.")
     async def cl_list(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
         user_list = await self.get_ping_data(g_id, "cl", u_id, default=[])
 
-        embed = discord.Embed(title=f"📦 {ctx.author.display_name}'s Collection List", color=discord.Color.gold())
+        embed = discord.Embed(title=f"📦 {ctx.author.display_name}'s Collection List", color=EMBED_COLOR)
         embed.description = "\n".join(f"• {name}" for name in user_list) if user_list else "*Your collection list is empty.*"
 
         await ctx.reply(embed=embed, mention_author=False)
 
     # --- Reserves Commands ---
 
-    @commands.group(name="reserves", aliases=["reserve", "res", "re"], invoke_without_command=True)
+    @commands.group(
+        name="reserves",
+        aliases=["reserve", "res", "re"],
+        invoke_without_command=True,
+        description="Show this server's reserves list.",
+    )
     async def reserves(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
         doc = await self._get_guild_doc(g_id)
         re_data = doc.get("re", {})
 
-        embed = discord.Embed(title=f"📋 {ctx.guild.name} Reserves List", color=discord.Color.purple())
+        embed = discord.Embed(title=f"📋 {ctx.guild.name} Reserves List", color=EMBED_COLOR)
         lines = []
 
         for uid, plist in re_data.items():
@@ -370,12 +411,18 @@ class PokePings(commands.Cog):
         embed.description = "\n".join(lines) if lines else "*No active reserves in this server.*"
         await ctx.reply(embed=embed, mention_author=False)
 
-    @reserves.command(name="add", aliases=["a"])
+    @reserves.command(name="add", aliases=["a"], description="Reserve Pokémon for a member (admin only).")
     @commands.has_permissions(administrator=True)
-    async def re_add(self, ctx: commands.Context, member: discord.Member, *, pokemon: str):
+    async def re_add(
+        self,
+        ctx: commands.Context,
+        member: discord.Member = commands.parameter(description="The member to reserve for (mention or ID)."),
+        *,
+        pokemon: str = commands.parameter(description="Pokémon name(s), separated by commas."),
+    ):
         matched_names, invalid_names = await self.parse_pokemon_list(pokemon)
         if not matched_names:
-            await ctx.reply("None of the specified Pokémon exist.", mention_author=False)
+            await ctx.reply(embed=error_embed("None of the specified Pokémon exist."), mention_author=False)
             return
 
         g_id = str(ctx.guild.id)
@@ -403,21 +450,30 @@ class PokePings(commands.Cog):
         if invalid_names:
             msg_parts.append(f"❌ Invalid Pokémon: **{', '.join(invalid_names)}**")
 
-        await ctx.reply("\n".join(msg_parts), mention_author=False)
+        await ctx.reply(embed=make_embed(description="\n".join(msg_parts)), mention_author=False)
 
-    @reserves.command(name="remove", aliases=["r"])
+    @reserves.command(name="remove", aliases=["r"], description="Remove reserved Pokémon from a member (admin only).")
     @commands.has_permissions(administrator=True)
-    async def re_remove(self, ctx: commands.Context, member: discord.Member, *, pokemon: str):
+    async def re_remove(
+        self,
+        ctx: commands.Context,
+        member: discord.Member = commands.parameter(description="The member to remove reserves from (mention or ID)."),
+        *,
+        pokemon: str = commands.parameter(description="Pokémon name(s), separated by commas."),
+    ):
         g_id = str(ctx.guild.id)
         u_id = str(member.id)
 
         user_list = await self.get_ping_data(g_id, "re", u_id, default=[])
 
         if not user_list:
-            await ctx.reply(f"{member.mention} has no reserves.", mention_author=False)
+            await ctx.reply(embed=warning_embed(f"{member.mention} has no reserves."), mention_author=False)
             return
 
         raw_targets = {p.strip().lower() for p in pokemon.split(",") if p.strip()}
+        if not raw_targets:
+            return await send_usage(ctx, note="Please specify at least one Pokémon name.")
+
         removed, not_found = [], []
 
         new_list = []
@@ -440,36 +496,40 @@ class PokePings(commands.Cog):
         if not_found:
             msg_parts.append(f"❌ Not found in reserves: **{', '.join(not_found)}**")
 
-        await ctx.reply("\n".join(msg_parts), mention_author=False)
+        await ctx.reply(embed=make_embed(description="\n".join(msg_parts)), mention_author=False)
 
-    @reserves.command(name="clear", aliases=["c"])
+    @reserves.command(name="clear", aliases=["c"], description="Clear reserves for one member, or the whole server (admin only).")
     @commands.has_permissions(administrator=True)
-    async def re_clear(self, ctx: commands.Context, member: discord.Member = None):
+    async def re_clear(
+        self,
+        ctx: commands.Context,
+        member: discord.Member = commands.parameter(
+            default=None,
+            description="Member to clear. Leave empty to clear everyone's reserves.",
+        ),
+    ):
         g_id = str(ctx.guild.id)
 
         if member:
             u_id = str(member.id)
             await self.set_ping_data(g_id, "re", u_id, [])
-            await ctx.reply(f"🧹 Cleared all reserves for {member.mention}!", mention_author=False)
+            await ctx.reply(embed=make_embed(description=f"🧹 Cleared all reserves for {member.mention}!"), mention_author=False)
         else:
             await self.clear_ping_category(g_id, "re")
-            await ctx.reply("🧹 Cleared **ALL** reserves for this server!", mention_author=False)
-
-    @re_add.error
-    @re_remove.error
-    @re_clear.error
-    async def reserves_error(self, ctx: commands.Context, error):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.reply("❌ You must have **Administrator** permissions to manage reserves.", mention_author=False)
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.reply("❌ Missing arguments. Usage: `.re add @user <pokemon1, pokemon2...>` or `.re clear [@user]`", mention_author=False)
-        elif isinstance(error, commands.MemberNotFound):
-            await ctx.reply("❌ Could not find that user.", mention_author=False)
+            await ctx.reply(embed=make_embed(description="🧹 Cleared **ALL** reserves for this server!"), mention_author=False)
 
     # --- Type & Region Commands ---
 
-    @commands.command(name="tp")
-    async def type_pings(self, ctx: commands.Context, *, target: str = None):
+    @commands.command(name="tp", description="View or toggle your Type Pings.")
+    async def type_pings(
+        self,
+        ctx: commands.Context,
+        *,
+        target: str = commands.parameter(
+            default=None,
+            description="Type(s) to toggle, separated by spaces or commas. Leave empty to open the menu.",
+        ),
+    ):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
@@ -493,7 +553,7 @@ class PokePings(commands.Cog):
                 invalid_targets.append(t_in)
 
         if not valid_targets:
-            await ctx.reply(f"❌ Invalid type(s). Valid types are: {', '.join(TYPES)}", mention_author=False)
+            await send_usage(ctx, note=f"Invalid type(s). Valid types are: {', '.join(TYPES)}")
             return
 
         user_types = await self.get_ping_data(g_id, "tp", u_id, default=[])
@@ -517,10 +577,18 @@ class PokePings(commands.Cog):
         if invalid_targets:
             msg.append(f"⚠️ Unrecognized input: **{', '.join(invalid_targets)}**")
 
-        await ctx.reply("\n".join(msg), mention_author=False)
+        await ctx.reply(embed=make_embed(description="\n".join(msg)), mention_author=False)
 
-    @commands.command(name="rp")
-    async def region_pings(self, ctx: commands.Context, *, target: str = None):
+    @commands.command(name="rp", description="View or toggle your Region Pings.")
+    async def region_pings(
+        self,
+        ctx: commands.Context,
+        *,
+        target: str = commands.parameter(
+            default=None,
+            description="Region(s) or Gmax/Paradox/Eevos to toggle, separated by spaces or commas. Leave empty to open the menu.",
+        ),
+    ):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
 
@@ -545,7 +613,7 @@ class PokePings(commands.Cog):
                 invalid_targets.append(r_in)
 
         if not valid_targets:
-            await ctx.reply(f"❌ Invalid region/category. Valid options are: {', '.join(all_items)}", mention_author=False)
+            await send_usage(ctx, note=f"Invalid region/category. Valid options are: {', '.join(all_items)}")
             return
 
         user_regions = await self.get_ping_data(g_id, "rp", u_id, default=[])
@@ -569,8 +637,7 @@ class PokePings(commands.Cog):
         if invalid_targets:
             msg.append(f"⚠️ Unrecognized input: **{', '.join(invalid_targets)}**")
 
-        await ctx.reply("\n".join(msg), mention_author=False)
-
+        await ctx.reply(embed=make_embed(description="\n".join(msg)), mention_author=False)
 
 async def setup(bot):
     await bot.add_cog(PokePings(bot))
