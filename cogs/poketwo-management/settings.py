@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 
 from views.autolockview import ALL_CATEGORIES, CATEGORY_LABELS
+from views.embeds import err_embed, handle_command_error
 
 
 def _label(category: str) -> str:
@@ -12,16 +13,24 @@ class Settings(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def cog_command_error(self, ctx: commands.Context, error):
+        await handle_command_error(ctx, error)
+
     async def _get_config_cog(self, ctx: commands.Context):
         cog = self.bot.get_cog("AutoLockConfig")
         if not cog:
-            await ctx.send("⚠️ Internal error: `AutoLockConfig` cog is not loaded.")
+            await ctx.send(embed=err_embed(
+                "Internal Error", "`AutoLockConfig` cog is not loaded.", emoji="⚠️"))
         return cog
 
     # Server-wide settings are already covered by `.c a` (AutoLockConfig's own
     # interactive menu), so this cog only handles the one thing that menu
     # doesn't show at a glance: this specific channel's effective settings.
-    @commands.command(name="channelsettings", aliases=["chsettings"])
+    @commands.command(
+        name="channelsettings",
+        aliases=["chsettings"],
+        description="Show the effective autolock settings for the current channel.",
+    )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def channel_settings(self, ctx: commands.Context):
@@ -44,11 +53,11 @@ class Settings(commands.Cog):
             delay_val = cfg.get("delay", 15)
             delay_str = f"{delay_val}s" if delay_enabled else "Off (Instant)"
 
-            restricted = "Yes" if cfg.get("restrict_unlockers", False) else "No"
+            restricted = "✅ Yes" if cfg.get("restrict_unlockers", False) else "❌ No"
 
             field_value = (
                 f"**Status:** {enabled}\n"
-                f"**Delay:** {delay_str}\n"
+                f"**Delay:** ⏱️ {delay_str}\n"
                 f"**Restrict Unlockers:** {restricted}"
             )
 
