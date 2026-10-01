@@ -17,6 +17,8 @@ from cogs.poketwo.lockcommon import (
     resolve_category as _resolve_category,
     display_name as _display_name,
 )
+from views.common import error_embed, themed
+from views.embeds import handle_command_error
 from .base import config_group
 
 
@@ -50,19 +52,16 @@ async def autolockconfig(ctx: commands.Context):
     cog = ctx.bot.get_cog("AutoLockConfig")
 
     if cog is None:
-        return await ctx.send("⚠️ Internal error: `AutoLockConfig` cog is not loaded.")
+        return await ctx.send(embed=error_embed("Internal error: `AutoLockConfig` cog is not loaded."))
 
-    embed = await cog.build_main_embed(ctx.guild)
+    embed = themed(await cog.build_main_embed(ctx.guild))
     view = AutoLockMainView(cog, guild_id=ctx.guild.id, author_id=ctx.author.id)
     await ctx.send(embed=embed, view=view)
 
 
 @autolockconfig.error
 async def autolockconfig_error(ctx: commands.Context, error: Exception):
-    if isinstance(error, commands.MissingPermissions):
-        pass
-    else:
-        await ctx.send(f"⚠️ Internal error: `{error}`")
+    await handle_command_error(ctx, error)
 
 
 class AutoLockConfig(commands.Cog):
