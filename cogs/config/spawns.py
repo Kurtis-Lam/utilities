@@ -2,6 +2,8 @@ import asyncio
 import discord
 from discord.ext import commands
 
+from views.common import error_embed, make_embed, themed
+from views.embeds import handle_command_error
 from views.spawnsview import SpawnsConfigView
 from .base import config_group
 
@@ -26,12 +28,17 @@ async def spawnsconfig(ctx: commands.Context):
     
     # Optional safety check just in case the cog failed to load
     if cog is None:
-        return await ctx.send("⚠️ Internal error: `SpawnsConfig` cog is not loaded.")
+        return await ctx.send(embed=error_embed("Internal error: `SpawnsConfig` cog is not loaded."))
 
     # Use the retrieved cog instead of ctx.cog
-    embed = await cog.build_config_embed(ctx.guild)
+    embed = themed(await cog.build_config_embed(ctx.guild))
     view = SpawnsConfigView(cog, author_id=ctx.author.id)
     await ctx.send(embed=embed, view=view)
+
+
+@spawnsconfig.error
+async def spawnsconfig_error(ctx: commands.Context, error: Exception):
+    await handle_command_error(ctx, error)
 
 
 class UnlockView(discord.ui.View):
@@ -50,7 +57,9 @@ class UnlockView(discord.ui.View):
 
         await interaction.response.edit_message(view=self)
         await interaction.followup.send(
-            f"🔓 **{interaction.channel.mention}** was unlocked by {interaction.user.mention}."
+            embed=make_embed(
+                description=f"🔓 {interaction.channel.mention} was unlocked by {interaction.user.mention}."
+            )
         )
 
         if self.cog:
@@ -141,14 +150,6 @@ class SpawnsConfig(commands.Cog):
         )
         return embed
 
-    @spawnsconfig.error
-    async def spawnsconfig_error(ctx: commands.Context, error: Exception):
-        # Remove 'self' from standalone error handler arguments
-        if isinstance(error, commands.MissingPermissions):
-            pass
-        else:
-            await ctx.send(f"⚠️ Internal error: `{error}`")
-
     def _is_target_mentioned(self, content: str, target_id: int) -> bool:
         tid = str(target_id)
         return f"<@{tid}>" in content or f"<@&{tid}>" in content or f"<@!{tid}>" in content
@@ -206,7 +207,9 @@ class SpawnsConfig(commands.Cog):
             return
 
         self.pending_locks.add(message.channel.id)
-        status_msg = await message.channel.send("⏳ **Auto-Lock Triggered:** Locking in 15 seconds...")
+        status_msg = await message.channel.send(
+            embed=make_embed(description="⏳ **Auto-Lock Triggered:** Locking in 15 seconds…")
+        )
 
         def poketwo_check(m: discord.Message) -> bool:
             return (
