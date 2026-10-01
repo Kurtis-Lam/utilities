@@ -34,11 +34,11 @@ class Recognize(commands.Cog):
         self.inference_semaphore = asyncio.Semaphore(1)   
         
         self.category_files = {    
-            "rare": "pokes/rare.json",    
-            "regional": "pokes/regional.json",    
-            "gmax": "pokes/gmax.json",    
-            "paradox": "pokes/paradox.json",    
-            "eevos": "pokes/eevos.json",    
+            "rare": "data/pokes/rare.json",    
+            "regional": "data/pokes/regional.json",    
+            "gmax": "data/pokes/gmax.json",    
+            "paradox": "data/pokes/paradox.json",    
+            "eevos": "data/pokes/eevos.json",    
         }
         self.category_pokes = {}    
         self.pokedex_cache = {}
@@ -194,7 +194,7 @@ class Recognize(commands.Cog):
             return pok_lower in cat_set or pok_norm in cat_set
 
         is_rare = _check_cat("rare")
-        is_regional = _check_cat("regional")  # Pings for Pokémon listed in pokes/regional.json
+        is_regional = _check_cat("regional")  # Pings for Pokémon listed in data/pokes/regional.json
         is_gmax = _check_cat("gmax") or "gmax" in pok_lower or "gigantamax" in pok_lower
         is_paradox = _check_cat("paradox")    
         is_eevos = _check_cat("eevos")    
