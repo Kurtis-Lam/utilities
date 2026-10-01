@@ -7,6 +7,9 @@ import discord
 from discord.ext import commands
 from pymongo import ASCENDING, DESCENDING, UpdateOne
 
+from views.common import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed
+from views.embeds import handle_command_error, send_usage
+
 POKETWO_ID = 716390085896962058
 HKT = timezone(timedelta(hours=8))
 
@@ -159,13 +162,16 @@ class Catches(commands.Cog):
             return None
         return TIMEFRAME_CONFIG[key]
 
-    async def _send_and_clean(self, ctx, content: str):
+    async def cog_command_error(self, ctx, error):
+        await handle_command_error(ctx, error)
+
+    async def _send_and_clean(self, ctx, embed: discord.Embed):
         if ctx.message:
             try:
                 await ctx.message.delete()
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 pass
-        await ctx.send(content, delete_after=1.0)
+        await ctx.send(embed=embed, delete_after=1.0)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -182,7 +188,9 @@ class Catches(commands.Cog):
 
         group_id = await self.get_group_id(str(message.guild.id))
 
-        await message.channel.send(f"**{caught_user.name}** caught a Pokémon!")
+        await message.channel.send(
+            embed=make_embed(description=f"🎉 **{caught_user.name}** caught a Pokémon!")
+        )
 
         daily_k, weekly_k, monthly_k = get_hkt_period_keys()
 
@@ -236,10 +244,18 @@ class Catches(commands.Cog):
         description="Link two guilds together permanently so their catch data merges.",
     )
     @commands.has_permissions(administrator=True)
-    async def catches_link(self, ctx, guild_id_1: str, guild_id_2: str):
+    async def catches_link(
+        self,
+        ctx,
+        guild_id_1: str = commands.parameter(description="ID of the first server to link."),
+        guild_id_2: str = commands.parameter(description="ID of the second server to link."),
+    ):
+        if not (guild_id_1.isdigit() and guild_id_2.isdigit()):
+            return await send_usage(ctx, note="Guild IDs must be numbers.")
+
         if guild_id_1 == guild_id_2:
             return await self._send_and_clean(
-                ctx, "❌ You cannot link a guild to itself!"
+                ctx, error_embed("You cannot link a guild to itself!")
             )
 
         group1 = await self.get_group_id(guild_id_1)
@@ -247,7 +263,7 @@ class Catches(commands.Cog):
 
         if group1 == group2:
             return await self._send_and_clean(
-                ctx, "ℹ️ These guilds are already linked!"
+                ctx, info_embed("These guilds are already linked!")
             )
 
         target_group = group1
@@ -300,7 +316,7 @@ class Catches(commands.Cog):
 
         await self._send_and_clean(
             ctx,
-            f"✅ Linked Guild `{guild_id_1}` & `{guild_id_2}`! All catch records merged.",
+            success_embed(f"Linked Guild `{guild_id_1}` & `{guild_id_2}`! All catch records merged."),
         )
 
     @commands.hybrid_command(
@@ -314,12 +330,12 @@ class Catches(commands.Cog):
         ),
     ):
         if not ctx.guild:
-            return await ctx.send("❌ This command can only be used in a server!")
+            return await ctx.send(embed=error_embed("This command can only be used in a server!"))
 
         tf_config = self.parse_timeframe(timeframe)
         if not tf_config:
-            return await ctx.send(
-                "❌ Invalid timeframe! Use `d`/`daily`, `w`/`weekly`, `m`/`monthly`, or `all`."
+            return await send_usage(
+                ctx, note="Invalid timeframe! Use `d`/`daily`, `w`/`weekly`, `m`/`monthly`, or `all`."
             )
 
         daily_k, weekly_k, monthly_k = get_hkt_period_keys()
@@ -349,7 +365,7 @@ class Catches(commands.Cog):
 
         embed = discord.Embed(
             title=f"{tf_config['icon']}  {ctx.author.name}'s Catch Stats",
-            color=tf_config["color"],
+            color=EMBED_COLOR,
         )
         embed.set_thumbnail(url=ctx.author.display_avatar.url)
 
@@ -394,12 +410,12 @@ class Catches(commands.Cog):
         ),
     ):
         if not ctx.guild:
-            return await ctx.send("❌ This command can only be used in a server!")
+            return await ctx.send(embed=error_embed("This command can only be used in a server!"))
 
         tf_config = self.parse_timeframe(timeframe)
         if not tf_config:
-            return await ctx.send(
-                "❌ Invalid timeframe! Use `d`/`daily`, `w`/`weekly`, `m`/`monthly`, or `all`."
+            return await send_usage(
+                ctx, note="Invalid timeframe! Use `d`/`daily`, `w`/`weekly`, `m`/`monthly`, or `all`."
             )
 
         daily_k, weekly_k, monthly_k = get_hkt_period_keys()
@@ -450,7 +466,7 @@ class Catches(commands.Cog):
 
         embed = discord.Embed(
             title=f"{tf_config['icon']}  {tf_config['label']} Leaderboard",
-            color=tf_config["color"],
+            color=EMBED_COLOR,
         )
 
         reset_unix = get_next_reset_unix(active_key)
