@@ -1,6 +1,9 @@
 import discord
 from discord.ext import commands
 
+from views.common import EMBED_COLOR, error_embed, warning_embed
+from views.embeds import handle_command_error
+
 
 class AFKButton(discord.ui.Button):
     def __init__(self, is_afk: bool):
@@ -14,7 +17,9 @@ class AFKButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         view: AFKView = self.view
         if interaction.user.id != view.user_id:
-            return await interaction.response.send_message("This button is not for you.", ephemeral=True)
+            return await interaction.response.send_message(
+                embed=warning_embed("This button isn't for you. Run `.afk` yourself to get your own."), ephemeral=True
+            )
 
         new_afk_status = not self.is_afk
 
@@ -56,7 +61,9 @@ class PingToggleButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         view: SetAFKView = self.view
         if interaction.user.id != view.user_id:
-            return await interaction.response.send_message("This menu is not for you.", ephemeral=True)
+            return await interaction.response.send_message(
+                embed=warning_embed("This menu isn't for you. Run `.setafk` yourself to get your own."), ephemeral=True
+            )
 
         self.is_active = not self.is_active
         self.style = discord.ButtonStyle.green if self.is_active else discord.ButtonStyle.red
@@ -100,6 +107,9 @@ class AFK(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def cog_command_error(self, ctx: commands.Context, error: Exception):
+        await handle_command_error(ctx, error)
+
     # Retrieves database and collection dynamically via main.py's bot.mongo_client
     @property
     def mongo_client(self):
@@ -121,7 +131,7 @@ class AFK(commands.Cog):
         embed = discord.Embed(
             title="🌙 AFK Status",
             description="You are currently **AFK**.\nYou will not be pinged for SH/CL/TP/RP. Instead, you will appear as `userid (AFK)`." if is_afk else "You are currently **Active**.\nYou will receive standard pings.",
-            color=discord.Color.dark_theme() if is_afk else discord.Color.green()
+            color=EMBED_COLOR
         )
         return embed
 
@@ -140,7 +150,7 @@ class AFK(commands.Cog):
                 "**Red** = Ignore ping when AFK (Default).\n\n"
                 + "\n".join(statuses)
             ),
-            color=discord.Color.blue()
+            color=EMBED_COLOR
         )
         return embed
 
@@ -156,7 +166,7 @@ class AFK(commands.Cog):
     @commands.hybrid_command(name="setafk", description="Configure ping exceptions while AFK.")
     async def setafk(self, ctx: commands.Context):
         if not ctx.guild:
-            return await ctx.send("This command can only be used in a server.")
+            return await ctx.send(embed=error_embed("This command can only be used in a server."))
 
         doc_id = f"{ctx.guild.id}_{ctx.author.id}"
         doc = await self.afk_settings.find_one({"_id": doc_id})
