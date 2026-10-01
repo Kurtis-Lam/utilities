@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 import aiohttp
 import discord
 from discord.ext import commands
+
+from views.embeds import BRAND_COLOR, ok_embed, err_embed, warn_embed, info_embed, handle_common_error
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -160,60 +163,63 @@ def extract_inline_thinking(content: str) -> tuple[str, str]:
     return "\n\n".join(found), cleaned
 
 
-DISCORD_MESSAGE_LIMIT = 2000
+# Embed descriptions can hold 4096 chars; stay a little under it.
+EMBED_DESCRIPTION_LIMIT = 4000
 
 
-class StatusUpdater:
+def format_duration(seconds: float) -> str:
+    seconds = max(1, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds} second{'s' if seconds != 1 else ''}"
+    minutes, secs = divmod(seconds, 60)
+    return f"{minutes}m {secs}s"
 
-    def __init__(self, first_message: discord.Message):
-        self.channel = first_message.channel
-        self.messages: list[discord.Message] = [first_message]
-        self.current_text = first_message.content or ""
 
-    async def append(self, text: str):
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()] or [text.strip()]
-        for line in lines:
-            if not line:
-                continue
-            subtext_line = f"-# {line}"
-            candidate = f"{self.current_text}\n{subtext_line}" if self.current_text else subtext_line
+class ThinkingStatus:
+    """
+    Shows a single #0414c7 embed while the AI works:
+      - while running:  "Thinking..." + a live Discord relative timestamp (<t:...:R>)
+      - when finished:  "Thought for N seconds" + a Discord timestamp of when it finished
+    The model's reasoning / tool-call steps are never displayed.
+    """
 
-            if len(candidate) <= DISCORD_MESSAGE_LIMIT:
-                self.current_text = candidate
-                try:
-                    await self.messages[-1].edit(content=self.current_text)
-                except discord.HTTPException:
-                    pass
-            else:
-                try:
-                    new_msg = await self.channel.send(subtext_line)
-                    self.messages.append(new_msg)
-                    self.current_text = subtext_line
-                except discord.HTTPException:
-                    pass
+    def __init__(self, source_message: discord.Message):
+        self.source = source_message
+        self.status_msg: discord.Message | None = None
+        self.started_at = time.time()
 
-    async def append_block(self, text: str):
-        if len(text) > DISCORD_MESSAGE_LIMIT:
-            inner_limit = DISCORD_MESSAGE_LIMIT - 8  # leave room for ``` fences
-            raw = text.strip("`\n")
-            for i in range(0, len(raw), inner_limit):
-                await self.append_block(f"```\n{raw[i:i + inner_limit]}\n```")
+    async def start(self):
+        embed = discord.Embed(
+            title="🧠 Thinking...",
+            description=f"⏳ Started <t:{int(self.started_at)}:R>",
+            color=BRAND_COLOR,
+        )
+        try:
+            self.status_msg = await self.source.reply(embed=embed, mention_author=False)
+        except discord.HTTPException:
+            self.status_msg = None
+
+    async def finish(self, success: bool = True):
+        if not self.status_msg:
             return
-
-        candidate = f"{self.current_text}\n{text}" if self.current_text else text
-        if len(candidate) <= DISCORD_MESSAGE_LIMIT:
-            self.current_text = candidate
-            try:
-                await self.messages[-1].edit(content=self.current_text)
-            except discord.HTTPException:
-                pass
+        now = time.time()
+        duration = format_duration(now - self.started_at)
+        if success:
+            embed = discord.Embed(
+                title=f"✅ Thought for {duration}",
+                description=f"🕒 Finished <t:{int(now)}:T> (<t:{int(now)}:R>)",
+                color=BRAND_COLOR,
+            )
         else:
-            try:
-                new_msg = await self.channel.send(text)
-                self.messages.append(new_msg)
-                self.current_text = text
-            except discord.HTTPException:
-                pass
+            embed = discord.Embed(
+                title=f"❌ Stopped after {duration}",
+                description=f"🕒 Ended <t:{int(now)}:T> (<t:{int(now)}:R>)",
+                color=BRAND_COLOR,
+            )
+        try:
+            await self.status_msg.edit(embed=embed)
+        except discord.HTTPException:
+            pass
 
 
 class AIChat(commands.Cog):
@@ -246,6 +252,10 @@ class AIChat(commands.Cog):
     async def cog_unload(self):
         if self.session and not self.session.closed:
             await self.session.close()
+
+    async def cog_command_error(self, ctx, error):
+        if not await handle_common_error(ctx, error):
+            raise error
 
     def _check_daily_reset(self):
         today = datetime.now(timezone.utc).date()
@@ -791,24 +801,24 @@ class AIChat(commands.Cog):
     @commands.command(name="reset", help="Clears the AI chatbot memory for this channel.")
     async def reset_memory(self, ctx: commands.Context):
         if ctx.channel.id != AI_CHATBOT_CHANNELID:
-            await ctx.send("The AI Chatbot is not active in this channel.")
+            await ctx.send(embed=err_embed("Wrong Channel", "The AI Chatbot is not active in this channel.", emoji="🚫"))
             return
 
-        if ctx.channel.id in self.history:
+        if self.history.get(ctx.channel.id):
             self.history[ctx.channel.id].clear()
-            await ctx.send("🧹 Conversation memory has been cleared!")
+            await ctx.send(embed=ok_embed("Memory Cleared", "Conversation memory has been cleared!", emoji="🧹", color=BRAND_COLOR))
         else:
-            await ctx.send("Memory is already empty.")
+            await ctx.send(embed=info_embed("Memory Empty", "Memory is already empty.", emoji="🧠"))
 
     @commands.command(name="memory", help="Displays the AI chatbot's current conversation memory for this channel.")
     async def show_memory(self, ctx: commands.Context):
         if ctx.channel.id != AI_CHATBOT_CHANNELID:
-            await ctx.send("The AI Chatbot is not active in this channel.")
+            await ctx.send(embed=err_embed("Wrong Channel", "The AI Chatbot is not active in this channel.", emoji="🚫"))
             return
 
         history = self.history.get(ctx.channel.id)
         if not history:
-            await ctx.send("🧠 Memory is currently empty.")
+            await ctx.send(embed=info_embed("Memory Empty", "Memory is currently empty.", emoji="🧠"))
             return
 
         def _content_to_str(content) -> str:
@@ -825,14 +835,17 @@ class AIChat(commands.Cog):
                 return "\n".join(p for p in parts if p) or "[empty]"
             return content or "[empty]"
 
-        lines = [f"🧠 **Current memory for this channel** — `{len(history)}` message(s) stored:\n"]
+        lines = []
         for i, msg in enumerate(history, start=1):
             role = msg.get("role", "unknown")
             lines.append(f"**[{i}] {role}:** {_content_to_str(msg.get('content'))}")
 
         text = "\n\n".join(lines)
-        for chunk in split_message(text):
-            await ctx.send(chunk)
+        for idx, chunk in enumerate(split_message(text, EMBED_DESCRIPTION_LIMIT)):
+            embed = discord.Embed(description=chunk, color=BRAND_COLOR)
+            if idx == 0:
+                embed.title = f"🧠 Current Memory — {len(history)} message(s) stored"
+            await ctx.send(embed=embed)
 
     @commands.command(name="ai-info", help="Displays model status, and daily usage grouped by OpenRouter account.")
     @commands.is_owner()
@@ -846,7 +859,7 @@ class AIChat(commands.Cog):
 
         total_accounts = len(account_groups)
 
-        embed = discord.Embed(title="🤖 AI Key Pool & Usage Status", color=discord.Color.blue())
+        embed = discord.Embed(title="🤖 AI Key Pool & Usage Status", color=BRAND_COLOR)
         embed.add_field(name="Active Model", value=f"`{self.current_model}`", inline=False)
         embed.add_field(
             name="Configured Key Pool",
@@ -955,11 +968,6 @@ class AIChat(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @ai_info.error
-    async def ai_info_error(self, ctx: commands.Context, error: commands.CommandError):
-        if isinstance(error, commands.NotOwner):
-            await ctx.send("❌ Only the bot owner can use this command.")
-
     # -- main listener -------------------------------------------------------
 
     @commands.Cog.listener()
@@ -981,16 +989,31 @@ class AIChat(commands.Cog):
                 print(f"Unhandled exception in AIChat.on_message:\n{tb}")
                 try:
                     await message.reply(
-                        "❌ Something went wrong handling that message. Check console logs."
+                        embed=err_embed(
+                            "Something Went Wrong",
+                            "Something went wrong handling that message. Check console logs.",
+                        )
                     )
                 except Exception:
                     pass
 
+    async def _send_result(self, message: discord.Message, text: str):
+        """Sends the final answer as #0414c7 embed(s). Only the result is shown."""
+        chunks = split_message(text, EMBED_DESCRIPTION_LIMIT)
+        for i, chunk in enumerate(chunks):
+            embed = discord.Embed(description=chunk, color=BRAND_COLOR)
+            if i == 0:
+                await message.reply(embed=embed)
+            else:
+                await message.channel.send(embed=embed)
+
     async def _handle_ai_message(self, message: discord.Message):
         channel_id = message.channel.id
 
-        status_msg = await message.reply("🔄 Requesting response from OpenRouter...")
-        status = StatusUpdater(status_msg)
+        # Single "Thinking..." embed with a live Discord timestamp; edited to
+        # "Thought for N seconds" when done. No reasoning/steps are displayed.
+        status = ThinkingStatus(message)
+        await status.start()
 
         async with message.channel.typing():
             is_owner = (await self.bot.is_owner(message.author)) or (message.author.id in OWNER_IDS)
@@ -1047,11 +1070,6 @@ class AIChat(commands.Cog):
                 tools_for_call = self.get_owner_tools() if is_owner else None
                 max_tokens_for_call = TOOL_CALL_MAX_TOKENS if is_owner else CHAT_MAX_TOKENS
 
-                if iteration == 0:
-                    await status.append("Requesting response from OpenRouter...")
-                else:
-                    await status.append(f"Continuing (step {iteration + 1})...")
-
                 try:
                     data = await self._call_openrouter_with_rotation(
                         current_payload_messages,
@@ -1062,15 +1080,15 @@ class AIChat(commands.Cog):
                     )
                 except RuntimeError as e:
                     print(f"OpenRouter request failed: {e}")
-                    await status.append(f"Failed: {e}")
-                    await message.reply(f"❌ {e}")
+                    await status.finish(success=False)
+                    await message.reply(embed=err_embed("Request Failed", str(e)))
                     reply_sent = True
                     break
 
                 if "choices" not in data or not data["choices"]:
                     print(f"OpenRouter returned no choices: {data}")
-                    await status.append("Failed: empty response from OpenRouter.")
-                    await message.reply("Sorry, I got an empty response from the AI backend.")
+                    await status.finish(success=False)
+                    await message.reply(embed=err_embed("Empty Response", "Sorry, I got an empty response from the AI backend."))
                     reply_sent = True
                     break
 
@@ -1078,31 +1096,25 @@ class AIChat(commands.Cog):
                 choice_message = choice["message"]
                 finish_reason = choice.get("finish_reason")
 
-                # Some models put reasoning in a dedicated field; others embed
-                # it inline in `content` via <think>/<thinking> tags. Pull
-                # both out so `content` only ever holds the real output.
+                # Models may embed reasoning inline in `content` via <think> tags,
+                # or in a dedicated `reasoning`/`thinking` field. It is stripped
+                # and discarded here so only the real answer is ever shown.
                 raw_content = choice_message.get("content") or ""
-                inline_thinking, cleaned_content = extract_inline_thinking(raw_content)
+                _discarded_thinking, cleaned_content = extract_inline_thinking(raw_content)
                 choice_message["content"] = cleaned_content
 
-                field_thinking = (choice_message.get("reasoning") or choice_message.get("thinking") or "").strip()
-                thinking_text = "\n\n".join(t for t in (field_thinking, inline_thinking) if t)
-
-                if thinking_text:
-                    await status.append("Thinking...")
-                    await status.append_block(f"```\n{thinking_text}\n```")
-
                 if finish_reason == "length":
+                    await status.finish(success=False)
                     if choice_message.get("tool_calls"):
-                        await status.append("Cut off before finishing.")
-                        await message.reply(
-                            "⚠️ The AI's response was cut off before it finished. Try again with a narrower request."
-                        )
+                        await message.reply(embed=warn_embed(
+                            "Response Cut Off",
+                            "The AI's response was cut off before it finished. Try again with a narrower request."
+                        ))
                     else:
-                        await status.append("Ran out of tokens.")
-                        await message.reply(
-                            "⚠️ The AI ran out of tokens before it could act on your request."
-                        )
+                        await message.reply(embed=warn_embed(
+                            "Out of Tokens",
+                            "The AI ran out of tokens before it could act on your request."
+                        ))
                     reply_sent = True
                     break
 
@@ -1117,24 +1129,10 @@ class AIChat(commands.Cog):
                     for tool_call in tool_calls:
                         fn_name = tool_call["function"]["name"]
 
-                        if fn_name == "delegate_subtasks":
-                            try:
-                                n_tasks = len(json.loads(tool_call["function"].get("arguments", "{}")).get("tasks", []))
-                            except Exception:
-                                n_tasks = "?"
-                            await status.append(f"Delegating {n_tasks} sub-agent(s) to run in parallel...")
-                        else:
-                            await status.append(f"Calling tool `{fn_name}`...")
-
                         if fn_name in MUTATING_TOOLS:
                             mutation_happened = True
 
                         tool_result = await self.execute_tool_call(tool_call)
-
-                        if fn_name == "delegate_subtasks":
-                            await status.append("Sub-agents finished.")
-                        else:
-                            await status.append(f"`{fn_name}` finished.")
 
                         current_payload_messages.append({
                             "role": "tool",
@@ -1144,13 +1142,10 @@ class AIChat(commands.Cog):
                     continue
 
                 # `content` has already had any inline <think> tags stripped
-                # above, so this is purely the model's actual answer, never
-                # its reasoning. If it's empty, the "no text response" path
-                # below handles it rather than dumping raw thoughts on the user.
+                # above, so this is purely the model's actual answer.
                 reply_text = choice_message.get("content") or ""
 
                 if mutation_happened:
-                    await status.append("Generating summary of changes...")
                     current_payload_messages.append({
                         "role": "user",
                         "content": (
@@ -1164,19 +1159,9 @@ class AIChat(commands.Cog):
                         )
                         if "choices" in summary_data and summary_data["choices"]:
                             summary_msg = summary_data["choices"][0]["message"]
-                            summary_thinking, summary_cleaned = extract_inline_thinking(
+                            _summary_thinking, summary_cleaned = extract_inline_thinking(
                                 summary_msg.get("content") or ""
                             )
-                            summary_field_thinking = (
-                                summary_msg.get("reasoning") or summary_msg.get("thinking") or ""
-                            ).strip()
-                            summary_all_thinking = "\n\n".join(
-                                t for t in (summary_field_thinking, summary_thinking) if t
-                            )
-                            if summary_all_thinking:
-                                await status.append("Thinking...")
-                                await status.append_block(f"```\n{summary_all_thinking}\n```")
-
                             forced_summary = summary_cleaned.strip()
                             if forced_summary:
                                 reply_text = forced_summary
@@ -1185,26 +1170,31 @@ class AIChat(commands.Cog):
 
                 if reply_text.strip():
                     self.history[channel_id].append({"role": "assistant", "content": reply_text})
-                    await status.append("Done.")
-                    chunks = split_message(reply_text)
-                    for i, chunk in enumerate(chunks):
-                        if i == 0:
-                            await message.reply(chunk)
-                        else:
-                            await message.channel.send(chunk)
+                    await status.finish(success=True)
+                    await self._send_result(message, reply_text)
                 else:
-                    await status.append("Done, but no text summary was generated.")
-                    await message.reply("⚠️ Action completed, but no text response was returned.")
+                    await status.finish(success=False)
+                    await message.reply(embed=warn_embed(
+                        "No Response",
+                        "Action completed, but no text response was returned."
+                    ))
 
                 reply_sent = True
                 break
             else:
-                await status.append("Hit tool call iteration limit.")
-                await message.reply("⚠️ Task hit tool call iteration limits.")
+                await status.finish(success=False)
+                await message.reply(embed=warn_embed(
+                    "Iteration Limit",
+                    "Task hit tool call iteration limits."
+                ))
                 reply_sent = True
 
             if not reply_sent:
-                await message.reply("❌ Something unexpected happened and no response was generated.")
+                await status.finish(success=False)
+                await message.reply(embed=err_embed(
+                    "Unexpected Error",
+                    "Something unexpected happened and no response was generated."
+                ))
 
 
 async def setup(bot):
