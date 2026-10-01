@@ -4,6 +4,18 @@ import datetime
 import discord
 from discord.ext import commands
 
+from cogs.poketwo.lockcommon import (
+    WARN_COLOR,
+    already_unlocked_embed,
+    is_locked_overwrite,
+    locked_embed,
+    now_unix,
+    to_unix,
+    unlock_denied_embed,
+    unlocked_embed,
+)
+from views.common import error_embed
+
 POKETWO_ID = 716390085896962058
 DEFAULT_DELAY = 10
 
@@ -75,15 +87,32 @@ class AutoLockUnlockView(discord.ui.View):
             except Exception as e:
                 print(f"AutoLock: failed to read lock state: {e}")
                 return await interaction.response.send_message(
-                    "⚠️ Couldn't verify the lock state right now. Try again in a moment.", ephemeral=True
+                    embed=error_embed("Couldn't verify the lock state right now. Try again in a moment."),
+                    ephemeral=True,
                 )
-
-        if not can_unlock(lock_doc, interaction.user):
-            return await interaction.response.send_message(unlock_denied_message(lock_doc), ephemeral=True)
 
         target = await get_poketwo_target(interaction.guild)
         if target is None:
-            return await interaction.response.send_message("⚠️ Poketwo isn't in this server.", ephemeral=True)
+            return await interaction.response.send_message(
+                embed=error_embed("Pokétwo isn't in this server."), ephemeral=True
+            )
+
+        # Someone already unlocked it (e.g. with .unlock): retire the button and say so
+        if not is_locked_overwrite(interaction.channel.overwrites_for(target)):
+            if locks is not None and lock_doc:
+                await locks.delete_one({"_id": interaction.channel.id})
+            button.disabled = True
+            button.label = "Unlocked"
+            button.style = discord.ButtonStyle.secondary
+            await interaction.response.edit_message(view=self)
+            return await interaction.followup.send(
+                embed=already_unlocked_embed(interaction.channel), ephemeral=True
+            )
+
+        if not can_unlock(lock_doc, interaction.user):
+            return await interaction.response.send_message(
+                embed=unlock_denied_embed(interaction.channel, lock_doc), ephemeral=True
+            )
 
         await interaction.channel.set_permissions(target, view_channel=True, send_messages=True)
 
@@ -96,7 +125,11 @@ class AutoLockUnlockView(discord.ui.View):
 
         await interaction.response.edit_message(view=self)
         await interaction.followup.send(
-            f"🔓 **{interaction.channel.mention}** was unlocked by {interaction.user.mention}."
+            embed=unlocked_embed(
+                interaction.channel,
+                unlocked_by=interaction.user,
+                locked_at=to_unix((lock_doc or {}).get("locked_at")),
+            )
         )
 
 
@@ -196,7 +229,11 @@ class AutoLock(commands.Cog):
         try:
             if delay > 0:
                 status_msg = await channel.send(
-                    f"⏳ **Auto-Lock Triggered** (`{label}`): Locking in {delay} seconds..."
+                    embed=discord.Embed(
+                        title="⏳ Auto-Lock Triggered",
+                        description=f"`{label}` matched this spawn. Locking <t:{now_unix() + delay}:R>.",
+                        color=WARN_COLOR,
+                    )
                 )
                 caught = await self._wait_for_catch(channel, delay)
                 try:
@@ -265,19 +302,12 @@ class AutoLock(commands.Cog):
                 pass
             return
 
-        if allowed_unlockers is not None:
-            mentions = ", ".join(f"<@{uid}>" for uid in allowed_unlockers)
-            description = (
-                f"Only {mentions} can unlock this channel "
-                f"(`{'/'.join(SHORT_NAMES.get(c, c) for c in restrict_cats)}` lock). "
-            )
-        else:
-            description = "Use `.u` or the button to unlock!"
-
-        lock_embed = discord.Embed(
-            title="🔒 Channel Locked",
-            description=description,
-            color=discord.Color.red(),
+        lock_embed = locked_embed(
+            channel,
+            trigger="/".join(SHORT_NAMES.get(c, c) for c in active),
+            allowed_users=allowed_unlockers,
+            restricted_by=restrict_cats,
+            when=now_unix(),
         )
         await channel.send(embed=lock_embed, view=AutoLockUnlockView(cog=self))
 
