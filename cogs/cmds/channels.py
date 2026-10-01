@@ -7,6 +7,7 @@ from discord.ext import commands
 
 # Import ConfirmView from views/common.py
 from views.common import ConfirmView
+from views.embeds import handle_common_error, send_usage
 
 
 class Channels(commands.Cog):
@@ -14,23 +15,7 @@ class Channels(commands.Cog):
         self.bot = bot
 
     async def cog_command_error(self, ctx, error):
-        if isinstance(error, commands.MissingPermissions):
-            perms = ", ".join([f"`{p}`" for p in error.missing_permissions])
-            embed = discord.Embed(
-                title="❌ Missing Permissions",
-                description=f"You lack the required permissions to use this command: {perms}",
-                color=discord.Color.red()
-            )
-            await ctx.send(embed=embed)
-        elif isinstance(error, commands.BotMissingPermissions):
-            perms = ", ".join([f"`{p}`" for p in error.missing_permissions])
-            embed = discord.Embed(
-                title="❌ Bot Missing Permissions",
-                description=f"I am missing permissions to do this. Please give me: {perms}",
-                color=discord.Color.red()
-            )
-            await ctx.send(embed=embed)
-        else:
+        if not await handle_common_error(ctx, error):
             raise error
 
     async def confirm_action(self, ctx, prompt: str) -> bool:
@@ -99,8 +84,7 @@ class Channels(commands.Cog):
             name = re.sub(r'(?i)--prehide', '', name).strip()
             
             if not name:
-                embed = discord.Embed(title="❌ Error", description="Please provide a name for the channel.", color=discord.Color.red())
-                return await ctx.send(embed=embed)
+                return await send_usage(ctx, note="Please provide a name for the channel.")
         else:
             if preaction in ("prelock", "both"):
                 prelock = True
@@ -339,7 +323,12 @@ class Channels(commands.Cog):
             else:
                 skipped_count += 1
 
-        await ctx.send(f"Successfully synced **{synced_count}** channels with their categories. Skipped **{skipped_count}** channels.")
+        embed = discord.Embed(
+            title="🔄 Channels Synced",
+            description=f"✅ Synced **{synced_count}** channel(s) with their categories.\n⏭️ Skipped **{skipped_count}** channel(s).",
+            color=discord.Color.green()
+        )
+        await ctx.send(embed=embed)
 
 
 async def setup(bot):
