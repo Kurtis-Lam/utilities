@@ -1,32 +1,75 @@
 import discord
 from discord.ext import commands
 
-USAGE = (
-    "⚠️ **Usage**\n"
-    "`.toggle <lock>` — turn a lock on/off **for the current channel**\n"
-    "`.toggle lockdelay <lock> [<lock> ...]` — delay on (waits) / off (locks immediately) **for the current channel**\n"
-    "`.toggle restrictunlockers <lock> [<lock> ...]` — only the pinged user(s) can unlock on/off "
-    "(`res`, `sh`, `cl`, `tp`, `rp` only) **for the current channel**\n\n"
-    "**Global flag:** Append `--global` at the end to apply the setting to the whole server instead of just the current channel.\n"
-    "Examples:\n"
-    "• `.toggle shlock --global` — toggle Shiny Hunt lock globally\n"
-    "• `.toggle lockdelay sh cl --global` — toggle lock delay globally for Shiny and Collection\n"
-    "• `.toggle restrictunlockers res --global` — restrict unlockers globally\n\n"
-    "**Locks:** `reslock`, `shlock`, `cllock`, `tplock`, `rplock`, `ralock`, `reglock`, "
-    "`gmaxlock`, `paralock`, `eevoslock`\n"
-    "-# Long names work too, e.g. `shinyhuntlock`, `collectionlock`, `typepingslock`, `regionpingslock`, "
-    "`rarelock`, `regionallock`, `gigantamaxlock`, `paradoxlock`, `eeveelutionslock`, `reserveslock`."
+from views.embeds import (
+    err_embed,
+    handle_command_error,
+    make_embed,
+    ok_embed,
+    send_usage,
+    warn_embed,
 )
+
+
+def _toggle_usage_embed(p: str) -> discord.Embed:
+    """'#0414c7' how-to-use embed for `.toggle` (shown when used with no arguments)."""
+    embed = make_embed(
+        "How to use `{0}toggle`".format(p),
+        "Turn locks, lock delays and unlocker restrictions on/off.\n"
+        "By default changes apply to **the current channel**.",
+        emoji="📖",
+    )
+    embed.add_field(
+        name="📝 Usage",
+        value=(
+            f"`{p}toggle <lock>` — turn a lock on/off\n"
+            f"`{p}toggle lockdelay <lock> [<lock> ...]` — delay on (waits) / off (locks immediately)\n"
+            f"`{p}toggle restrictunlockers <lock> [<lock> ...]` — only the pinged user(s) can unlock on/off "
+            "(`res`, `sh`, `cl`, `tp`, `rp` only)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🌐 Global Flag",
+        value="Append `--global` at the end to apply the setting to the **whole server** instead of just the current channel.",
+        inline=False,
+    )
+    embed.add_field(
+        name="💡 Examples",
+        value=(
+            f"`{p}toggle shlock`\n"
+            f"`{p}toggle shlock --global`\n"
+            f"`{p}toggle lockdelay sh cl --global`\n"
+            f"`{p}toggle restrictunlockers res --global`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🔒 Locks",
+        value=(
+            "`reslock`, `shlock`, `cllock`, `tplock`, `rplock`, `ralock`, `reglock`, "
+            "`gmaxlock`, `paralock`, `eevoslock`\n"
+            "-# Long names work too, e.g. `shinyhuntlock`, `collectionlock`, `typepingslock`, `regionpingslock`, "
+            "`rarelock`, `regionallock`, `gigantamaxlock`, `paradoxlock`, `eeveelutionslock`, `reserveslock`."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="<required>  [optional]")
+    return embed
 
 
 class Toggle(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def cog_command_error(self, ctx: commands.Context, error):
+        await handle_command_error(ctx, error)
+
     async def _config_cog(self, ctx: commands.Context):
         cog = self.bot.get_cog("AutoLockConfig")
         if not cog:
-            await ctx.send("⚠️ Internal error: `AutoLockConfig` cog is not loaded.")
+            await ctx.send(embed=err_embed(
+                "Internal Error", "`AutoLockConfig` cog is not loaded.", emoji="⚠️"))
         return cog
 
     @staticmethod
@@ -45,17 +88,25 @@ class Toggle(commands.Cog):
     # Unknown sub-command names fall through to this callback, so `.toggle shlock`,
     # `.toggle cllock`, `.toggle reslock`, ... are all handled here.
 
-    @commands.group(name="toggle", invoke_without_command=True)
+    @commands.group(
+        name="toggle",
+        invoke_without_command=True,
+        usage="<lock...> [--global]",
+        description="Turn locks, lock delays and unlocker restrictions on/off.",
+    )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def toggle_group(self, ctx: commands.Context, lock: str = None, *rest: str):
         if lock is None:
-            return await ctx.send(USAGE)
+            return await ctx.send(embed=_toggle_usage_embed(ctx.clean_prefix))
 
         # Check for --global flag in the remaining arguments
-        global_flag = any(a.lower() == "--global" for a in rest)
+        global_flag = any(a.lower() == "--global" for a in rest) or lock.lower() == "--global"
         rest = tuple(a for a in rest if a.lower() != "--global")
-        locks = [lock] + list(rest)
+        locks = [lock] + list(rest) if lock.lower() != "--global" else list(rest)
+
+        if not locks:
+            return await ctx.send(embed=_toggle_usage_embed(ctx.clean_prefix))
 
         cog = await self._config_cog(ctx)
         if not cog:
@@ -64,8 +115,11 @@ class Toggle(commands.Cog):
         # Resolve all categories
         cats, unknown = self._resolve_all(cog, locks)
 
-        if not cats and not unknown:
-            return await ctx.send(f"⚠️ Unknown lock(s): {', '.join(f'`{u}`' for u in locks)}")
+        if not cats:
+            return await ctx.send(embed=err_embed(
+                "Unknown Lock",
+                f"Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}\n"
+                f"-# Use `{ctx.clean_prefix}toggle` to see all valid locks."))
 
         scope = "whole server" if global_flag else ctx.channel.mention
 
@@ -81,14 +135,23 @@ class Toggle(commands.Cog):
             status = "Enabled ✅" if new_state else "Disabled ❌"
             lines.append(f"🔒 **{cog.display_name(cat)}** is now **{status}** for {scope}.")
 
+        embed = ok_embed("Lock Toggled", "\n".join(lines)[:4096])
         if unknown:
-            lines.append(f"⚠️ Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}")
-
-        await ctx.send("\n".join(lines))
+            embed.add_field(
+                name="⚠️ Unknown Lock(s)",
+                value=", ".join(f"`{u}`" for u in unknown)[:1024],
+                inline=False,
+            )
+        await ctx.send(embed=embed)
 
     # --- .toggle lockdelay <lock...> -------------------------------------------
 
-    @toggle_group.command(name="lockdelay", aliases=["ld", "delay", "lock-delay"])
+    @toggle_group.command(
+        name="lockdelay",
+        aliases=["ld", "delay", "lock-delay"],
+        usage="<lock...> [--global]",
+        description="Turn the lock delay on (waits) or off (locks immediately).",
+    )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def toggle_lockdelay(self, ctx: commands.Context, *locks_and_flags: str):
@@ -103,25 +166,26 @@ class Toggle(commands.Cog):
                 locks.append(arg)
 
         if not locks:
-            return await ctx.send("⚠️ Usage: `.toggle lockdelay <lock> [<lock> ...]` [--global] (e.g. `.toggle lockdelay sh cl` or `.toggle lockdelay sh cl --global`)")
+            return await send_usage(ctx, note="Missing required argument: `lock`")
 
         cog = await self._config_cog(ctx)
         if not cog:
             return
 
         cats, unknown = self._resolve_all(cog, locks)
+        if not cats:
+            return await ctx.send(embed=err_embed(
+                "Unknown Lock", f"Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}"))
+
         lines = []
         for cat in cats:
             if global_flag:
                 # Toggle delay for whole server (guild level)
                 new_state = await cog.toggle_delay(ctx.guild.id, cat)
+                cfg = await cog.get_category_config(ctx.guild.id, cat)
             else:
                 # Toggle delay for current channel only
                 new_state = await cog.toggle_delay_channel(ctx.guild.id, ctx.channel.id, cat)
-
-            if global_flag:
-                cfg = await cog.get_category_config(ctx.guild.id, cat)
-            else:
                 cfg = await cog.get_category_config_channel(ctx.guild.id, ctx.channel.id, cat)
 
             if new_state:
@@ -131,16 +195,22 @@ class Toggle(commands.Cog):
             scope = "whole server" if global_flag else ctx.channel.mention
             lines.append(f"⏱️ Lock delay for **{cog.display_name(cat)}** is now {state} in {scope}.")
 
+        embed = ok_embed("Lock Delay Toggled", "\n".join(lines)[:4096], emoji="⏱️")
         if unknown:
-            lines.append(f"⚠️ Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}")
-
-        await ctx.send("\n".join(lines))
+            embed.add_field(
+                name="⚠️ Unknown Lock(s)",
+                value=", ".join(f"`{u}`" for u in unknown)[:1024],
+                inline=False,
+            )
+        await ctx.send(embed=embed)
 
     # --- .toggle restrictunlockers <lock...> -----------------------------------
 
     @toggle_group.command(
         name="restrictunlockers",
         aliases=["restuls", "restrict-unlockers", "restrict", "ru"],
+        usage="<lock...> [--global]",
+        description="Restrict unlocking to only the pinged user(s) (res, sh, cl, tp, rp only).",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -156,16 +226,19 @@ class Toggle(commands.Cog):
                 locks.append(arg)
 
         if not locks:
-            return await ctx.send(
-                "⚠️ Usage: `.toggle restrictunlockers <lock> [<lock> ...]` [--global] (e.g. `.toggle restuls res sh` or `.toggle restuls res sh --global`)"
-            )
+            return await send_usage(ctx, note="Missing required argument: `lock`")
 
         cog = await self._config_cog(ctx)
         if not cog:
             return
 
         cats, unknown = self._resolve_all(cog, locks)
+        if not cats:
+            return await ctx.send(embed=err_embed(
+                "Unknown Lock", f"Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}"))
+
         lines = []
+        changed = 0
         for cat in cats:
             if not cog.can_restrict(cat):
                 lines.append(
@@ -183,11 +256,20 @@ class Toggle(commands.Cog):
             state = "**Enabled ✅** (only the pinged user(s) can unlock)" if new_state else "**Disabled ❌** (anyone can unlock)"
             scope = "whole server" if global_flag else ctx.channel.mention
             lines.append(f"🔐 Restrict Unlockers for **{cog.display_name(cat)}** is now {state} in {scope}.")
+            changed += 1
 
+        description = "\n".join(lines)[:4096]
+        if changed:
+            embed = ok_embed("Restrict Unlockers Toggled", description, emoji="🔐")
+        else:
+            embed = warn_embed("Nothing Changed", description)
         if unknown:
-            lines.append(f"⚠️ Unknown lock(s): {', '.join(f'`{u}`' for u in unknown)}")
-
-        await ctx.send("\n".join(lines))
+            embed.add_field(
+                name="⚠️ Unknown Lock(s)",
+                value=", ".join(f"`{u}`" for u in unknown)[:1024],
+                inline=False,
+            )
+        await ctx.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):
