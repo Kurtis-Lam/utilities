@@ -8,6 +8,8 @@ Shared embed helpers used by every cog in cogs/cmds/.
 - handle_common_error() turns the usual command errors into embeds, and shows a
   usage guide when a command is used without its required arguments.
 """
+import traceback
+
 import discord
 from discord.ext import commands
 
@@ -87,6 +89,24 @@ USAGE_EXAMPLES = {
     "addprefix": ["{p}addprefix 10"],
     "remind": ["{p}remind 10m Take a break", "{p}rm 2h Check the oven", "{p}rm 1d Pay rent"],
     "reminders remove": ["{p}reminders remove a1b2c3", "{p}reminders r a1b2c3"],
+    # config
+    "config": [
+        "{p}config autolock",
+        "{p}c a",
+        "{p}c spawns",
+        "{p}c joins",
+    ],
+    # grinder
+    "edit": [
+        "{p}edit @user datafile1",
+        "{p}edit 123456789012345678 file1 file2.json",
+    ],
+    "syncguilds": [
+        "{p}syncguilds 123456789012345678 987654321098765432",
+        "{p}sg 123456789012345678 987654321098765432",
+    ],
+    "pause": ["{p}pause", "{p}pause 1 2 3", "{p}pause 1 2h", "{p}p 4 30m"],
+    "resume": ["{p}resume", "{p}resume 1 2", "{p}r 3"],
 }
 
 
@@ -150,8 +170,64 @@ def usage_embed(ctx, note: str = None) -> discord.Embed:
     return embed
 
 
+async def group_usage_embed(ctx, note: str = None) -> discord.Embed:
+    """Builds a '#0414c7' embed listing the subcommands of ctx.command (a command group).
+
+    Only subcommands the invoker is actually allowed to run are listed."""
+    group = ctx.command
+    prefix = ctx.clean_prefix
+    qname = group.qualified_name
+
+    embed = discord.Embed(
+        title=f"📖 How to use `{prefix}{qname}`",
+        description=(f"❌ {note}\n\n" if note else "")
+        + (group.description or group.help or "Pick one of the subcommands below."),
+        color=BRAND_COLOR,
+    )
+    embed.add_field(name="📝 Usage", value=f"`{prefix}{qname} <subcommand>`", inline=False)
+
+    if group.aliases:
+        alias_text = ", ".join(f"`{prefix}{a}`" for a in group.aliases)
+        embed.add_field(name="🏷️ Aliases", value=alias_text, inline=False)
+
+    lines = []
+    for sub in sorted(group.commands, key=lambda c: c.name):
+        if sub.hidden:
+            continue
+        try:
+            if not await sub.can_run(ctx):
+                continue
+        except commands.CommandError:
+            continue
+        sub_aliases = ", ".join("`" + a + "`" for a in sub.aliases)
+        alias_text = f" *(aliases: {sub_aliases})*" if sub_aliases else ""
+        summary = sub.description or sub.short_doc or "No description provided."
+        lines.append(f"• `{prefix}{sub.qualified_name}`{alias_text}\n   {summary}")
+    embed.add_field(
+        name="📂 Subcommands",
+        value="\n".join(lines)[:1024] if lines else "*No subcommands are available to you.*",
+        inline=False,
+    )
+
+    examples = USAGE_EXAMPLES.get(qname)
+    if examples:
+        embed.add_field(
+            name="💡 Examples",
+            value="\n".join(f"`{e.format(p=prefix)}`" for e in examples)[:1024],
+            inline=False,
+        )
+
+    embed.set_footer(text="<required>  [optional]")
+    return embed
+
+
 async def send_usage(ctx, note: str = None):
-    await ctx.send(embed=usage_embed(ctx, note=note))
+    """Send the '#0414c7' how-to-use embed for ctx.command (works for groups too)."""
+    if isinstance(ctx.command, commands.Group):
+        embed = await group_usage_embed(ctx, note=note)
+    else:
+        embed = usage_embed(ctx, note=note)
+    await ctx.send(embed=embed)
 
 
 async def handle_common_error(ctx, error) -> bool:
@@ -183,3 +259,13 @@ async def handle_common_error(ctx, error) -> bool:
     else:
         return False
     return True
+
+
+async def handle_command_error(ctx, error) -> None:
+    """One-stop error handler: common errors become embeds (missing arguments show
+    the how-to-use embed); anything else becomes an 'Internal Error' embed."""
+    if await handle_common_error(ctx, error):
+        return
+    original = getattr(error, "original", error)
+    traceback.print_exception(type(original), original, original.__traceback__)
+    await ctx.send(embed=err_embed("Internal Error", f"Something went wrong: `{original}`", emoji="⚠️"))
