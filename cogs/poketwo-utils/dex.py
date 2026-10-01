@@ -3,6 +3,8 @@ import io
 import discord
 from discord.ext import commands
 
+from views.embeds import err_embed, handle_command_error, send_usage, warn_embed
+
 TYPE_EMOJIS = {
     "normal": "🔘",
     "fire": "🔥",
@@ -30,6 +32,9 @@ class Dex(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.pokedex = {}
+
+    async def cog_command_error(self, ctx: commands.Context, error):
+        await handle_command_error(ctx, error)
 
     # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
     @property
@@ -68,9 +73,22 @@ class Dex(commands.Cog):
             print(f"❌ Failed to load Pokédex from MongoDB: {e}")
             self.pokedex = {}
 
-    @commands.command(name="dex", aliases=["pokedex"])
-    async def dex_cmd(self, ctx: commands.Context, *, query: str):
+    @commands.command(
+        name="dex",
+        aliases=["pokedex"],
+        usage="<pokémon name or dex number>",
+        description="Look up a Pokémon in the Pokédex by name or dex number.",
+    )
+    async def dex_cmd(self, ctx: commands.Context, *, query: str = None):
+        if query is None or not query.strip():
+            return await send_usage(ctx, note="Missing required argument: `query`")
+
         query_clean = query.strip().lower().lstrip("#")
+
+        if not self.pokedex:
+            return await ctx.reply(embed=warn_embed(
+                "Pokédex Unavailable",
+                "The Pokédex hasn't been loaded yet. Please try again in a moment."))
 
         matched_name = None
         data = None
@@ -88,10 +106,13 @@ class Dex(commands.Cog):
                 break
 
         if not data:
-            await ctx.reply("❌ Pokémon not found in Pokédex.")
+            await ctx.reply(embed=err_embed(
+                "Pokémon Not Found",
+                f"Couldn't find `{query.strip()[:100]}` in the Pokédex.\n"
+                f"-# Try the exact name or dex number, e.g. `{ctx.clean_prefix}dex pikachu` or `{ctx.clean_prefix}dex 25`."))
             return
 
-        dex_num = data.get("pokedex_number", "???").lstrip("#")
+        dex_num = str(data.get("pokedex_number", "???")).lstrip("#")
         embed_title = f"#{dex_num} — {matched_name}"
 
         description = data.get("description", "")
@@ -138,9 +159,9 @@ class Dex(commands.Cog):
         # 3. Catchable
         catchable = data.get("catchable")
         catchable_str = (
-            "Yes"
+            "✅ Yes"
             if catchable is True
-            else ("No" if catchable is False else str(catchable))
+            else ("❌ No" if catchable is False else str(catchable))
         )
         embed.add_field(name="Catchable", value=catchable_str, inline=True)
 
