@@ -5,6 +5,10 @@ import time
 import discord
 from discord.ext import commands, tasks
 
+from views.embeds import (
+    BRAND_COLOR, ok_embed, err_embed, info_embed, handle_common_error, send_usage
+)
+
 # Compile regex once at module level to avoid recompiling on every command call
 TIME_PATTERN = re.compile(r"^(\d+)([smhd])$")
 
@@ -37,6 +41,10 @@ class Utilities(commands.Cog):
     def cog_unload(self):
         self.check_reminders.cancel()
 
+    async def cog_command_error(self, ctx, error):
+        if not await handle_common_error(ctx, error):
+            raise error
+
     @tasks.loop(seconds=10)
     async def check_reminders(self):
         current_time = time.time()
@@ -50,7 +58,14 @@ class Utilities(commands.Cog):
             try:
                 channel = self.bot.get_channel(rem["channel_id"]) or await self.bot.fetch_channel(rem["channel_id"])
                 if channel:
-                    await channel.send(f"<@{rem['user_id']}> ⏰ **Reminder:** {rem['message']}")
+                    embed = discord.Embed(
+                        title="⏰ Reminder",
+                        description=rem["message"],
+                        color=BRAND_COLOR
+                    )
+                    embed.set_footer(text=f"ID: {rem['id']}")
+                    # The ping stays in `content` so the user is actually notified.
+                    await channel.send(content=f"<@{rem['user_id']}>", embed=embed)
             except Exception as e:
                 print(f"Failed to send reminder {rem['id']}: {e}")
 
@@ -64,21 +79,25 @@ class Utilities(commands.Cog):
     @commands.is_owner()
     async def addprefix(self, ctx, amt: int):
         if amt <= 0:
-            return await ctx.send("Amount must be greater than 0.")
+            return await ctx.send(embed=err_embed("Invalid Amount", "Amount must be greater than 0."))
 
         result = " ".join(f"#{i}" for i in range(1, amt + 1))
         formatted_result = f"```\n{result}\n```"
 
-        if len(formatted_result) > 2000:
-            return await ctx.send("Result is too long to fit in a single Discord message (2000 char limit).")
+        if len(formatted_result) > 4096:
+            return await ctx.send(embed=err_embed("Result Too Long", "Result is too long to fit in a single embed (4096 char limit)."))
 
-        await ctx.send(formatted_result)
+        await ctx.send(embed=discord.Embed(
+            title="🔢 Numbered List",
+            description=formatted_result,
+            color=BRAND_COLOR
+        ))
 
     @commands.command(name="note", description="Notes a referral message on a specific channel")
     @commands.is_owner()
     async def note(self, ctx):
         if not ctx.message.reference:
-            return await ctx.send("Please reply to the message you want to note with `.note`")
+            return await send_usage(ctx, note="Reply to the message you want to note.")
 
         try:
             replied_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
@@ -86,50 +105,64 @@ class Utilities(commands.Cog):
             target_channel = self.bot.get_channel(target_channel_id) or await self.bot.fetch_channel(target_channel_id)
 
             if not target_channel:
-                return await ctx.send(f"Could not find target channel ID {target_channel_id}.")
+                return await ctx.send(embed=err_embed("Channel Not Found", f"Could not find target channel ID `{target_channel_id}`."))
 
-            final_content = f"{replied_message.content}\n\n{replied_message.jump_url}"
+            note_embed = discord.Embed(
+                title="📝 Noted Message",
+                description=(replied_message.content or "*No text content*")[:4096],
+                color=BRAND_COLOR
+            )
+            note_embed.set_author(
+                name=str(replied_message.author),
+                icon_url=replied_message.author.display_avatar.url
+            )
+            note_embed.add_field(name="🔗 Source", value=f"[Jump to message]({replied_message.jump_url})", inline=False)
 
             if replied_message.attachments:
                 attachment_urls = "\n".join(a.url for a in replied_message.attachments)
-                final_content += f"\n\n**Attachments:**\n{attachment_urls}"
+                note_embed.add_field(name="📎 Attachments", value=attachment_urls[:1024], inline=False)
 
-            await target_channel.send(content=final_content, embeds=replied_message.embeds)
+            # Discord allows up to 10 embeds per message; keep the original embeds too.
+            await target_channel.send(embeds=[note_embed] + list(replied_message.embeds)[:9])
             await ctx.message.add_reaction("✅")
 
         except discord.Forbidden:
-            await ctx.send("I do not have permission to send messages to the target channel.")
+            await ctx.send(embed=err_embed("Missing Access", "I do not have permission to send messages to the target channel."))
         except discord.HTTPException as e:
-            await ctx.send(f"Failed to send message: {e}")
+            await ctx.send(embed=err_embed("Send Failed", f"Failed to send message: {e}"))
         except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
+            await ctx.send(embed=err_embed("Unexpected Error", f"An error occurred: {e}"))
 
     @commands.command(name="remind", aliases=["rm"], description="Sets a reminder.")
     @commands.is_owner()
     async def remind(self, ctx, time_str: str, *, message: str):
         match = TIME_PATTERN.match(time_str)
         if not match:
-            return await ctx.send("Invalid time format. Use `<number><unit>` (e.g., `10s`, `5m`, `2h`, `1d`).")
+            return await send_usage(ctx, note="Invalid time format. Use `<number><unit>` (e.g., `10s`, `5m`, `2h`, `1d`).")
 
         amount, unit = int(match.group(1)), match.group(2)
         multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
         seconds = amount * multipliers[unit]
 
         if seconds > 2592000:
-            return await ctx.send("Reminder cannot be longer than 30 days.")
+            return await ctx.send(embed=err_embed("Too Long", "Reminder cannot be longer than 30 days."))
 
         reminder_id = secrets.token_hex(3)
+        ends_at = time.time() + seconds
         reminder_data = {
             "id": reminder_id,
             "user_id": ctx.author.id,
             "channel_id": ctx.channel.id,
-            "ends_at": time.time() + seconds,
+            "ends_at": ends_at,
             "message": message,
         }
 
         await self.collection.insert_one(reminder_data)
 
-        await ctx.send(f"I will remind you in **{time_str}** (ID: `{reminder_id}`): {message}")
+        embed = ok_embed("Reminder Set", message, emoji="⏰")
+        embed.add_field(name="⏳ Fires", value=f"<t:{int(ends_at)}:R> (in **{time_str}**)", inline=True)
+        embed.add_field(name="🆔 ID", value=f"`{reminder_id}`", inline=True)
+        await ctx.send(embed=embed)
 
     @commands.group(name="reminders", invoke_without_command=True, description="View your active reminders.")
     @commands.is_owner()
@@ -137,9 +170,9 @@ class Utilities(commands.Cog):
         user_reminders = await self.collection.find({"user_id": ctx.author.id}).to_list(length=None)
         
         if not user_reminders:
-            return await ctx.send("You have no active reminders.")
+            return await ctx.send(embed=info_embed("No Reminders", "You have no active reminders.", emoji="📭"))
 
-        embed = discord.Embed(title="Your Active Reminders", color=discord.Color.blue())
+        embed = discord.Embed(title="⏰ Your Active Reminders", color=BRAND_COLOR)
         current_time = time.time()
 
         for r in user_reminders:
@@ -156,7 +189,7 @@ class Utilities(commands.Cog):
 
             msg_preview = r["message"] if len(r["message"]) <= 50 else r["message"][:47] + "..."
             embed.add_field(
-                name=f"ID: {r['id']} (in {' '.join(parts)})",
+                name=f"🆔 {r['id']} (in {' '.join(parts)})",
                 value=msg_preview,
                 inline=False,
             )
@@ -169,9 +202,9 @@ class Utilities(commands.Cog):
         result = await self.collection.delete_one({"id": reminder_id, "user_id": ctx.author.id})
 
         if result.deleted_count > 0:
-            await ctx.send(f"✅ Successfully removed reminder `{reminder_id}`.")
+            await ctx.send(embed=ok_embed("Reminder Removed", f"Successfully removed reminder `{reminder_id}`.", emoji="🗑️"))
         else:
-            await ctx.send(f"❌ Could not find a reminder with ID `{reminder_id}` belonging to you.")
+            await ctx.send(embed=err_embed("Reminder Not Found", f"Could not find a reminder with ID `{reminder_id}` belonging to you."))
 
 
 async def setup(bot):
