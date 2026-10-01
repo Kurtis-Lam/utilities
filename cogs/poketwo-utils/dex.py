@@ -29,14 +29,24 @@ TYPE_EMOJIS = {
 }
 
 
-# --- Alt-name helpers ---------------------------------------------------------
-# Alt names live in the "names" list of each Pokédex entry (the same list the
-# "Names" field of .dex displays). These helpers turn those raw strings into
-# normalized lookup keys so that "ghos", "Ghos", "ゴース" etc. all resolve.
+# --- Alt-name & Key Normalization Helpers -------------------------------------
 
 _LEADING_JUNK_RE = re.compile(r"^[^\w]+")
 _SPLIT_RE = re.compile(r"[/;|\n]")
 _PAREN_RE = re.compile(r"[(\[（]([^)\]）]*)[)\]）]")
+
+
+def normalize_key(name: str) -> str:
+    """
+    Normalizes a name/key by stripping accents (é -> e), removing special characters,
+    and converting to lower case for database image lookups.
+    """
+    if not name:
+        return ""
+    nfd = unicodedata.normalize("NFD", name)
+    without_accents = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+    cleaned = re.sub(r"[^\w\s-]", "", without_accents)
+    return " ".join(cleaned.split()).lower()
 
 
 def _strip_accents(text: str) -> str:
@@ -62,7 +72,7 @@ def name_keys(text: str) -> set:
     base = " ".join(base.split()).casefold()
     if not base:
         return set()
-    return {base, _strip_accents(base)}
+    return {base, _strip_accents(base), normalize_key(base)}
 
 
 def extract_name_variants(entry) -> list:
@@ -84,8 +94,6 @@ def extract_name_variants(entry) -> list:
         if ":" in part:
             part = part.split(":", 1)[1]
         outer = _PAREN_RE.sub(" ", part)
-        # Parenthesised romanization only counts when the outer text is non-Latin
-        # (otherwise the parentheses are just a label like "(French)").
         if not _is_latin(_LEADING_JUNK_RE.sub("", outer.strip())):
             for inner in _PAREN_RE.findall(part):
                 add(inner)
@@ -114,12 +122,11 @@ class Dex(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.pokedex = {}
-        self.alt_index = {}  # normalized alt name -> pokedex key
+        self.alt_index = {}
 
     async def cog_command_error(self, ctx: commands.Context, error):
         await handle_command_error(ctx, error)
 
-    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
     @property
     def mongo_client(self):
         return self.bot.mongo_client
@@ -179,7 +186,7 @@ class Dex(commands.Cog):
         data = None
 
         for name, info in self.pokedex.items():
-            if name.lower() == query_clean:
+            if name.lower() == query_clean or normalize_key(name) == normalize_key(query_clean):
                 matched_name = name
                 data = info
                 break
@@ -190,8 +197,6 @@ class Dex(commands.Cog):
                 data = info
                 break
 
-        # Fallback: alt names in any language (e.g. "ghos" or "ゴース" -> Gastly).
-        # Real names / dex numbers are checked first so they always take priority.
         if not data:
             for key in name_keys(query.strip().lstrip("#")):
                 alt_target = self.alt_index.get(key)
@@ -220,12 +225,16 @@ class Dex(commands.Cog):
             description=description
         )
 
+        # Lookup image by direct lowercase name OR normalized key fallback
         img_doc = await self.img_collection.find_one({"_id": matched_name.lower()})
+        if not img_doc or "image" not in img_doc:
+            img_doc = await self.img_collection.find_one({"_id": normalize_key(matched_name)})
+
         file = None
 
         if img_doc and "image" in img_doc:
             image_bytes = img_doc["image"]
-            filename = f"{matched_name.lower()}.png"
+            filename = f"{normalize_key(matched_name)}.png"
 
             image_stream = io.BytesIO(image_bytes)
             file = discord.File(fp=image_stream, filename=filename)
