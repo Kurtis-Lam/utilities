@@ -15,7 +15,7 @@ TYPE_EMOJIS = {
     "grass": "🌿",
     "ice": "❄️",
     "fighting": "🥊",
-    "poison": "☠️",
+    "poison": "☠️️",
     "ground": "⏳",
     "flying": "🕊️",
     "psychic": "🔮",
@@ -59,7 +59,7 @@ def _strip_accents(text: str) -> str:
     return unicodedata.normalize("NFC", "".join(out))
 
 
-def _is_latin(text: str) -> bool:
+def _is_latin(text: str) -> str:
     return all(
         ch.isascii() or ch in "’♀♂" or unicodedata.name(ch, "").startswith("LATIN")
         for ch in text
@@ -78,8 +78,6 @@ def name_keys(text: str) -> set:
 def extract_name_variants(entry) -> list:
     """
     Cleans one raw entry of a Pokémon's "names" list into usable name strings.
-    Handles flag/emoji prefixes, "Language: name" labels, "a / b" lists and
-    "ゴース (Gōsu)" style parentheses.
     """
     if not isinstance(entry, str):
         return []
@@ -225,10 +223,16 @@ class Dex(commands.Cog):
             description=description
         )
 
-        # Lookup image by direct lowercase name OR normalized key fallback
-        img_doc = await self.img_collection.find_one({"_id": matched_name.lower()})
-        if not img_doc or "image" not in img_doc:
-            img_doc = await self.img_collection.find_one({"_id": normalize_key(matched_name)})
+        # Explicit image lookup key (maps "MissingNo." or "missingno" -> "missingno")
+        img_lookup_keys = [matched_name.lower(), normalize_key(matched_name)]
+        if normalize_key(matched_name) == "missingno":
+            img_lookup_keys.insert(0, "missingno")
+
+        img_doc = None
+        for key in img_lookup_keys:
+            img_doc = await self.img_collection.find_one({"_id": key})
+            if img_doc and "image" in img_doc:
+                break
 
         file = None
 
@@ -241,17 +245,20 @@ class Dex(commands.Cog):
 
             embed.set_thumbnail(url=f"attachment://{filename}")
 
-        # 1. Types
-        raw_types = data.get("types", [])
+        # 1. Types (safely handles null / None)
+        raw_types = data.get("types")
         if isinstance(raw_types, list):
             types_formatted = "\n".join(
                 f"{TYPE_EMOJIS.get(t.lower(), '')} {t}".strip()
                 for t in raw_types
             )
+        elif isinstance(raw_types, str):
+            types_formatted = raw_types
         else:
-            types_formatted = str(raw_types)
+            types_formatted = "N/A"
+
         embed.add_field(
-            name="Types", value=types_formatted or "N/A", inline=True
+            name="Types", value=types_formatted, inline=True
         )
 
         # 2. Region
