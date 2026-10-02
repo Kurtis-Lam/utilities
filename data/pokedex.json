@@ -1,4 +1,39 @@
 {
+    "MissingNo.": {
+        "pokedex_number": "0",
+        "types": [
+            "???"
+        ],
+        "region": "???",
+        "catchable": true,
+        "description": "???",
+        "evolution": "???",
+        "base_stats": {
+            "hp": "???",
+            "attack": "???",
+            "defense": "???",
+            "sp_atk": "???",
+            "sp_def": "???",
+            "speed": "???",
+            "total": "???"
+        },
+        "names": [
+            "🇯🇵 MissingNo.",
+            "🇬🇧 MissingNo.",
+            "🇩🇪 MissingNo.",
+            "🇫🇷 MissingNo.",
+            "❓ ???"
+        ],
+        "appearance": {
+            "height": "???",
+            "weight": "???"
+        },
+        "gender_ratio": "Genderless",
+        "egg_group": [
+            "???"
+        ],
+        "hatch_time": "???"
+    },
     "Bulbasaur": {
         "pokedex_number": "1",
         "types": [

@@ -1,6 +1,7 @@
 {
     "_id": "pokevars",
     "data": [
+        "MissingNo.",
         "Bulbasaur",
         "Ivysaur",
         "Venusaur",
