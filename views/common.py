@@ -6,7 +6,7 @@ Everything visual lives here so the whole bot stays consistent:
 * ``themed()``      – force that color onto an embed built elsewhere (cogs, config modules).
 * ``*_embed()``     – small ready-made embeds for success / error / warning / info replies.
 * ``BaseView``      – owner-only check + auto-disable on timeout + safe page swapping.
-* ``ConfirmView``   – the confirm / cancel prompt (same API as before).
+* ``ConfirmView``   – red Confirm / grey Cancel prompt, no emojis (same API as before).
 """
 from __future__ import annotations
 
@@ -158,11 +158,11 @@ class ConfirmView(BaseView):
         await interaction.response.edit_message(view=self)
         self.stop()
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green, emoji="✅")
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._finish(interaction, True)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._finish(interaction, False)
 
