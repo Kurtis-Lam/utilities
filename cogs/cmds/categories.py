@@ -23,8 +23,8 @@ class Categories(commands.Cog):
     async def confirm_action(self, ctx, prompt: str) -> bool:
         view = ConfirmView(ctx.author)
         embed = discord.Embed(
-            title="⚠️ Confirmation Required",
-            description=f"{prompt}\n\nClick a button below to confirm or cancel.",
+            title="⚠️ Confirm",
+            description=prompt,
             color=discord.Color.gold(),
         )
         msg = await ctx.send(embed=embed, view=view)
@@ -38,7 +38,7 @@ class Categories(commands.Cog):
             return True
         elif view.value is False:
             cancel_embed = discord.Embed(
-                title="❌ Action Cancelled", color=discord.Color.red()
+                title="❌ Cancelled", color=discord.Color.red()
             )
             try:
                 await msg.edit(embed=cancel_embed, view=None)
@@ -60,11 +60,7 @@ class Categories(commands.Cog):
     async def prompt_category_selection(self, ctx, categories):
         view = CategorySelectView(ctx.author, categories)
         embed = discord.Embed(
-            title="🔍 Multiple Categories Found",
-            description=(
-                "Found multiple categories matching that name. Please select"
-                " one from the dropdown below:"
-            ),
+            title="🔍 Pick a category",
             color=discord.Color.gold(),
         )
         msg = await ctx.send(embed=embed, view=view)
@@ -275,7 +271,7 @@ class Categories(commands.Cog):
 
         confirmed = await self.confirm_action(
             ctx,
-            f"Are you sure you want to delete the category **{target_category.name}** and ALL channels inside it?",
+            f"Delete category **{target_category.name}** and all its channels?",
         )
         if not confirmed:
             return
