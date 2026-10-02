@@ -6,12 +6,19 @@ Shared embed helpers used by every cog in cogs/cmds/.
 - BRAND_COLOR (#0414c7) is used for AI output and "how to use" embeds.
 - ok_embed / err_embed / warn_embed / info_embed build consistent embeds with emojis.
 - handle_common_error() turns the usual command errors into embeds, and shows a
-  usage guide when a command is used without its required arguments.
+  compact usage embed when a command is used without its required arguments.
+- Usage embeds are intentionally tiny: just one usage line (aliases written
+  inline, e.g. `.createcategory|ccat`) and an "Example" button that opens an
+  ephemeral message with examples and argument descriptions.
+- Missing arguments show the title "Missing arg: `name`" plus that usage line.
 """
 import traceback
+import typing
 
 import discord
 from discord.ext import commands
+
+from views.common import BaseView
 
 BRAND_COLOR = discord.Color(0x0414C7)
 SUCCESS_COLOR = discord.Color.green()
@@ -42,10 +49,13 @@ def info_embed(title, description=None, *, emoji="ℹ️", color=BRAND_COLOR):
 
 
 # ---------------------------------------------------------------------------
-# Usage examples shown in "how to use" embeds. {p} is replaced by the prefix.
+# Usage examples shown by the "Example" button. {p} is replaced by the prefix.
 # Keys are command qualified names.
 # ---------------------------------------------------------------------------
 USAGE_EXAMPLES = {
+    # ai
+    "ai add": ["{p}ai add #chat", "{p}ai a #chat #bots"],
+    "ai remove": ["{p}ai remove #chat", "{p}ai r #chat #bots"],
     # channels
     "createchannel": [
         "{p}createchannel general-chat",
@@ -66,6 +76,19 @@ USAGE_EXAMPLES = {
     "nick": ["{p}nick @user Cool Name", "{p}nick @user reset"],
     "mute": ["{p}mute @user", "{p}mute @user 10m", "{p}mute @user 2h Spamming"],
     "unmute": ["{p}unmute @user"],
+    "muterole": ["{p}muterole", "{p}muterole @Muted", "{p}muterole 123456789012345678"],
+    "warn": [
+        "{p}warn @user",
+        "{p}warn @user Spamming",
+        "{p}warn remove @user a1b2c3",
+    ],
+    "warn remove": ["{p}warn remove @user a1b2c3", "{p}warn r @user a1b2c3"],
+    "warns": [
+        "{p}warns @user",
+        "{p}warns 123456789012345678",
+        "{p}warns remove @user a1b2c3",
+    ],
+    "warns remove": ["{p}warns remove @user a1b2c3", "{p}warns r @user a1b2c3"],
     # roles
     "giverole": ["{p}giverole @user @role", "{p}gr @user @role"],
     "removerole": ["{p}removerole @user @role", "{p}rr @user @role"],
@@ -148,6 +171,10 @@ USAGE_EXAMPLES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _param_descriptions(command) -> dict:
     """Collect per-argument descriptions from commands.parameter / app_commands.describe."""
     out = {}
@@ -163,26 +190,32 @@ def _param_descriptions(command) -> dict:
     return out
 
 
-def usage_embed(ctx, note: str = None) -> discord.Embed:
-    """Builds a '#0414c7' embed explaining how to use ctx.command."""
+def _command_label(cmd, prefix: str) -> str:
+    """'.createcategory|ccat' / '.reminders remove|r' (aliases written inline)."""
+    parent = f"{cmd.parent.qualified_name} " if cmd.parent else ""
+    names = "|".join([cmd.name, *cmd.aliases])
+    return f"{prefix}{parent}{names}"
+
+
+def _usage_line(cmd, prefix: str) -> str:
+    return f"{_command_label(cmd, prefix)} {cmd.signature}".strip()
+
+
+def example_embed(ctx) -> typing.Optional[discord.Embed]:
+    """Builds the ephemeral 'Example' message for ctx.command (None if there is nothing to show)."""
     cmd = ctx.command
+    if cmd is None:
+        return None
     prefix = ctx.clean_prefix
-    qname = cmd.qualified_name
 
-    embed = discord.Embed(
-        title=f"📖 How to use `{prefix}{qname}`",
-        description=(f"❌ {note}\n\n" if note else "") + (cmd.description or cmd.help or "No description provided."),
-        color=BRAND_COLOR,
-    )
+    examples = list(USAGE_EXAMPLES.get(cmd.qualified_name, []))
+    if not examples and isinstance(cmd, commands.Group):
+        for sub in sorted(cmd.commands, key=lambda c: c.name):
+            examples.extend(USAGE_EXAMPLES.get(sub.qualified_name, []))
 
-    signature = f"{prefix}{qname} {cmd.signature}".strip()
-    embed.add_field(name="📝 Usage", value=f"`{signature}`", inline=False)
-
-    if cmd.aliases:
-        # Subcommand aliases belong to the parent, e.g. "reminders r"
-        parent = f"{cmd.parent.qualified_name} " if cmd.parent else ""
-        alias_text = ", ".join(f"`{prefix}{parent}{a}`" for a in cmd.aliases)
-        embed.add_field(name="🏷️ Aliases", value=alias_text, inline=False)
+    sections = []
+    if examples:
+        sections.append("\n".join(f"`{e.format(p=prefix)}`" for e in examples))
 
     descriptions = _param_descriptions(cmd)
     if descriptions:
@@ -191,44 +224,72 @@ def usage_embed(ctx, note: str = None) -> discord.Embed:
             if name not in descriptions:
                 continue
             shown = getattr(param, "displayed_name", None) or name
-            tag = "required" if param.required else "optional"
-            lines.append(f"• `{shown}` *({tag})* — {descriptions[name]}")
+            tag = "" if param.required else " *(optional)*"
+            lines.append(f"`{shown}`{tag} — {descriptions[name]}")
         if lines:
-            embed.add_field(name="📋 Arguments", value="\n".join(lines)[:1024], inline=False)
+            body = "\n".join(lines)
+            sections.append(f"**Arguments**\n{body}" if examples else body)
 
-    examples = USAGE_EXAMPLES.get(qname)
-    if examples:
-        embed.add_field(
-            name="💡 Examples",
-            value="\n".join(f"`{e.format(p=prefix)}`" for e in examples)[:1024],
-            inline=False,
-        )
-
-    embed.set_footer(text="<required>  [optional]")
-    return embed
+    if not sections:
+        return None
+    return discord.Embed(
+        title="Example" if examples else "Arguments",
+        description="\n\n".join(sections)[:4096],
+        color=BRAND_COLOR,
+    )
 
 
-async def group_usage_embed(ctx, note: str = None) -> discord.Embed:
-    """Builds a '#0414c7' embed listing the subcommands of ctx.command (a command group).
+class ExampleView(BaseView):
+    """One 'Example' button. Pressing it sends the examples as an ephemeral message
+    (anyone can press it; only the presser sees the reply)."""
+
+    def __init__(self, embed: discord.Embed):
+        super().__init__(timeout=120)
+        self.example_embed = embed
+
+    @discord.ui.button(label="Example", style=discord.ButtonStyle.secondary)
+    async def example_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=self.example_embed, ephemeral=True)
+
+
+def example_view(ctx) -> typing.Optional[ExampleView]:
+    embed = example_embed(ctx)
+    return ExampleView(embed) if embed else None
+
+
+# ---------------------------------------------------------------------------
+# Usage embeds
+# ---------------------------------------------------------------------------
+
+def usage_embed(ctx, note: str = None, title: str = None) -> discord.Embed:
+    """Compact '#0414c7' usage embed for ctx.command: optional short note + one usage line."""
+    cmd = ctx.command
+    prefix = ctx.clean_prefix
+
+    lines = []
+    if note:
+        lines.append(note)
+    lines.append(f"`{_usage_line(cmd, prefix)}`")
+
+    return discord.Embed(
+        title=title or "Usage",
+        description="\n".join(lines),
+        color=BRAND_COLOR,
+    )
+
+
+async def group_usage_embed(ctx, note: str = None, title: str = None) -> discord.Embed:
+    """Compact '#0414c7' embed listing the subcommands of ctx.command (a command group).
 
     Only subcommands the invoker is actually allowed to run are listed."""
     group = ctx.command
     prefix = ctx.clean_prefix
-    qname = group.qualified_name
-
-    embed = discord.Embed(
-        title=f"📖 How to use `{prefix}{qname}`",
-        description=(f"❌ {note}\n\n" if note else "")
-        + (group.description or group.help or "Pick one of the subcommands below."),
-        color=BRAND_COLOR,
-    )
-    embed.add_field(name="📝 Usage", value=f"`{prefix}{qname} <subcommand>`", inline=False)
-
-    if group.aliases:
-        alias_text = ", ".join(f"`{prefix}{a}`" for a in group.aliases)
-        embed.add_field(name="🏷️ Aliases", value=alias_text, inline=False)
 
     lines = []
+    if note:
+        lines.append(note)
+
+    subs = []
     for sub in sorted(group.commands, key=lambda c: c.name):
         if sub.hidden:
             continue
@@ -237,63 +298,57 @@ async def group_usage_embed(ctx, note: str = None) -> discord.Embed:
                 continue
         except commands.CommandError:
             continue
-        sub_aliases = ", ".join("`" + a + "`" for a in sub.aliases)
-        alias_text = f" *(aliases: {sub_aliases})*" if sub_aliases else ""
-        summary = sub.description or sub.short_doc or "No description provided."
-        lines.append(f"• `{prefix}{sub.qualified_name}`{alias_text}\n   {summary}")
-    embed.add_field(
-        name="📂 Subcommands",
-        value="\n".join(lines)[:1024] if lines else "*No subcommands are available to you.*",
-        inline=False,
+        subs.append(f"`{_usage_line(sub, prefix)}`")
+
+    lines.append("\n".join(subs) if subs else f"`{_command_label(group, prefix)} <subcommand>`")
+
+    return discord.Embed(
+        title=title or "Usage",
+        description="\n".join(lines)[:4096],
+        color=BRAND_COLOR,
     )
 
-    examples = USAGE_EXAMPLES.get(qname)
-    if examples:
-        embed.add_field(
-            name="💡 Examples",
-            value="\n".join(f"`{e.format(p=prefix)}`" for e in examples)[:1024],
-            inline=False,
-        )
 
-    embed.set_footer(text="<required>  [optional]")
-    return embed
-
-
-async def send_usage(ctx, note: str = None):
-    """Send the '#0414c7' how-to-use embed for ctx.command (works for groups too)."""
-    if isinstance(ctx.command, commands.Group):
-        embed = await group_usage_embed(ctx, note=note)
+async def send_usage(ctx, note: str = None, title: str = None):
+    """Send the compact usage embed for ctx.command (works for groups too),
+    with an 'Example' button when examples / argument descriptions exist."""
+    cmd = ctx.command
+    if isinstance(cmd, commands.Group) and not cmd.clean_params:
+        embed = await group_usage_embed(ctx, note=note, title=title)
     else:
-        embed = usage_embed(ctx, note=note)
-    await ctx.send(embed=embed)
+        embed = usage_embed(ctx, note=note, title=title)
+
+    view = example_view(ctx)
+    if view is None:
+        return await ctx.send(embed=embed)
+
+    msg = await ctx.send(embed=embed, view=view)
+    view.message = msg
+    return msg
 
 
 async def handle_common_error(ctx, error) -> bool:
     """Sends an embed for common errors. Returns True if handled, False otherwise."""
     if isinstance(error, commands.MissingRequiredArgument):
-        await send_usage(ctx, note=f"Missing required argument: `{error.param.name}`")
+        await send_usage(ctx, title=f"Missing arg: `{error.param.name}`")
     elif isinstance(error, commands.UserInputError):
         await send_usage(ctx, note=str(error) or "Invalid argument provided.")
     elif isinstance(error, commands.MissingPermissions):
         perms = ", ".join(f"`{p.replace('_', ' ').title()}`" for p in error.missing_permissions)
-        await ctx.send(embed=err_embed(
-            "Missing Permissions", f"You lack the required permissions to use this command: {perms}"))
+        await ctx.send(embed=err_embed("Missing Permissions", perms))
     elif isinstance(error, commands.BotMissingPermissions):
         perms = ", ".join(f"`{p.replace('_', ' ').title()}`" for p in error.missing_permissions)
-        await ctx.send(embed=err_embed(
-            "Bot Missing Permissions", f"I am missing permissions to do this. Please give me: {perms}"))
+        await ctx.send(embed=err_embed("Bot Missing Permissions", perms))
     elif isinstance(error, commands.NotOwner):
-        await ctx.send(embed=err_embed("Owner Only", "Only the bot owner can use this command.", emoji="🚫"))
+        await ctx.send(embed=err_embed("Owner Only", emoji="🚫"))
     elif isinstance(error, commands.NoPrivateMessage):
-        await ctx.send(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"))
+        await ctx.send(embed=err_embed("Server Only", emoji="🚫"))
     elif isinstance(error, commands.CommandOnCooldown):
-        await ctx.send(embed=warn_embed(
-            "Slow Down", f"Try again in **{error.retry_after:.1f}s**.", emoji="⏳"))
+        await ctx.send(embed=warn_embed("Slow Down", f"Retry in **{error.retry_after:.1f}s**.", emoji="⏳"))
     elif isinstance(error, commands.CheckFailure):
-        await ctx.send(embed=err_embed("Check Failed", "You can't use this command here.", emoji="🚫"))
+        await ctx.send(embed=err_embed("Check Failed", emoji="🚫"))
     elif isinstance(error, commands.CommandInvokeError) and isinstance(error.original, discord.Forbidden):
-        await ctx.send(embed=err_embed(
-            "Forbidden", "Discord refused that action. Check my permissions and role position."))
+        await ctx.send(embed=err_embed("Forbidden", "Check my permissions and role position."))
     else:
         return False
     return True
@@ -301,9 +356,9 @@ async def handle_common_error(ctx, error) -> bool:
 
 async def handle_command_error(ctx, error) -> None:
     """One-stop error handler: common errors become embeds (missing arguments show
-    the how-to-use embed); anything else becomes an 'Internal Error' embed."""
+    the usage embed); anything else becomes an 'Internal Error' embed."""
     if await handle_common_error(ctx, error):
         return
     original = getattr(error, "original", error)
     traceback.print_exception(type(original), original, original.__traceback__)
-    await ctx.send(embed=err_embed("Internal Error", f"Something went wrong: `{original}`", emoji="⚠️"))
+    await ctx.send(embed=err_embed("Internal Error", f"`{original}`", emoji="⚠️"))
