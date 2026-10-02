@@ -21,8 +21,8 @@ class Channels(commands.Cog):
     async def confirm_action(self, ctx, prompt: str) -> bool:
         view = ConfirmView(ctx.author)
         embed = discord.Embed(
-            title="⚠️ Confirmation Required",
-            description=f"{prompt}\n\nClick a button below to confirm or cancel.",
+            title="⚠️ Confirm",
+            description=prompt,
             color=discord.Color.gold()
         )
         msg = await ctx.send(embed=embed, view=view)
@@ -35,14 +35,14 @@ class Channels(commands.Cog):
                 pass
             return True
         elif view.value is False:
-            cancel_embed = discord.Embed(title="❌ Action Cancelled", color=discord.Color.red())
+            cancel_embed = discord.Embed(title="❌ Cancelled", color=discord.Color.red())
             try:
                 await msg.edit(embed=cancel_embed, view=None)
             except discord.HTTPException:
                 pass
             return False
         else:
-            timeout_embed = discord.Embed(title="⏱️ Timeout", description="You took too long to reply. Action cancelled.", color=discord.Color.red())
+            timeout_embed = discord.Embed(title="⏱️ Timed out", color=discord.Color.red())
             try:
                 await msg.edit(embed=timeout_embed, view=None)
             except discord.HTTPException:
@@ -148,7 +148,7 @@ class Channels(commands.Cog):
         channel: typing.Optional[discord.TextChannel] = None
     ):
         target = channel or ctx.channel
-        confirmed = await self.confirm_action(ctx, f"Are you sure you want to delete {target.mention}? This cannot be undone.")
+        confirmed = await self.confirm_action(ctx, f"Delete {target.mention}? This cannot be undone.")
         if not confirmed:
             return
 
@@ -288,7 +288,7 @@ class Channels(commands.Cog):
         channel: typing.Optional[discord.TextChannel] = None
     ):
         target = channel or ctx.channel
-        confirmed = await self.confirm_action(ctx, f"Are you sure you want to nuke {target.mention}? This cannot be undone.")
+        confirmed = await self.confirm_action(ctx, f"Nuke {target.mention}? This cannot be undone.")
         if not confirmed: 
             return
 
