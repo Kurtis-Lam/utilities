@@ -20,8 +20,8 @@ class RoleCog(commands.Cog):
     async def confirm_action(self, ctx, prompt: str) -> bool:
         view = ConfirmView(ctx.author)
         embed = discord.Embed(
-            title="⚠️ Confirmation Required",
-            description=f"{prompt}\n\nClick a button below to confirm or cancel.",
+            title="⚠️ Confirm",
+            description=prompt,
             color=discord.Color.gold()
         )
         msg = await ctx.send(embed=embed, view=view)
@@ -34,14 +34,14 @@ class RoleCog(commands.Cog):
                 pass
             return True
         elif view.value is False:
-            cancel_embed = discord.Embed(title="❌ Action Cancelled", color=discord.Color.red())
+            cancel_embed = discord.Embed(title="❌ Cancelled", color=discord.Color.red())
             try:
                 await msg.edit(embed=cancel_embed, view=None)
             except discord.HTTPException:
                 pass
             return False
         else:
-            timeout_embed = discord.Embed(title="⏱️ Timeout", description="You took too long to reply. Action cancelled.", color=discord.Color.red())
+            timeout_embed = discord.Embed(title="⏱️ Timed out", color=discord.Color.red())
             try:
                 await msg.edit(embed=timeout_embed, view=None)
             except discord.HTTPException:
@@ -308,7 +308,7 @@ class RoleCog(commands.Cog):
         role_name = role.name
         
         # Trigger Confirmation
-        confirmed = await self.confirm_action(ctx, f"Are you sure you want to permanently delete the role **{role_name}**?")
+        confirmed = await self.confirm_action(ctx, f"Delete role **{role_name}**?")
         if not confirmed:
             return
 
