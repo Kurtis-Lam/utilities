@@ -898,53 +898,29 @@ class AIChat(commands.Cog):
     )
     async def ai_group(self, ctx: commands.Context):
         p = ctx.clean_prefix
-        embed = make_embed(
-            title="🤖 AI Chatbot — How to Use",
-            description=(
-                "Just type a message in any AI-enabled channel and I'll reply. "
-                "Use the commands below to manage it."
-            ),
-        )
+        embed = make_embed(title="🤖 AI Chatbot")
         embed.add_field(
-            name="💬 Chatting",
-            value=(
-                "Send a normal message (no prefix) in an AI channel. "
-                "You can attach images too.\n"
-                f"-# Messages starting with `{p}` are treated as commands, not AI prompts."
-            ),
+            name="💬 Chat",
+            value=f"Message me in an AI channel. Messages starting with `{p}` are commands.",
             inline=False,
         )
         embed.add_field(
-            name="⚙️ Managing AI channels *(administrators only)*",
+            name="⚙️ Admin",
             value=(
-                f"`{p}ai-config` — see where the AI is enabled (anyone can view)\n"
-                f"`{p}ai add <#channel> [#channel ...]` — enable the AI in channel(s)\n"
-                f"`{p}ai remove <#channel> [#channel ...]` — disable the AI in channel(s)\n"
-                f"-# Aliases: `{p}ai a` = add, `{p}ai r` = remove"
+                f"`{p}ai config`\n"
+                f"`{p}ai add|a <#channel> [...]`\n"
+                f"`{p}ai remove|r <#channel> [...]`"
             ),
             inline=False,
         )
         embed.add_field(
             name="🧠 Memory",
-            value=(
-                f"`{p}ai memory` — view what I remember from your chat with me in this channel\n"
-                f"`{p}ai reset` — clear your memory in this channel\n"
-                "-# Memory is separate for every channel **and** every user. "
-                "Resetting only clears yours, and only in the channel you run it in."
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="⏳ One request at a time",
-            value=(
-                "If I'm still answering you, new messages get a ⏳ reaction and are "
-                f"deleted after {BUSY_DELETE_AFTER_SECONDS} seconds. Wait for my reply first."
-            ),
+            value=f"`{p}ai memory`\n`{p}ai reset`",
             inline=False,
         )
         await ctx.reply(embed=embed, mention_author=False)
 
-    @commands.command(name="ai-config", description="See which channels the AI chatbot is enabled in.")
+    @ai_group.command(name="config", description="See which channels the AI chatbot is enabled in.")
     async def ai_config(self, ctx: commands.Context):
         if ctx.guild is None:
             return await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"))
@@ -959,20 +935,11 @@ class AIChat(commands.Cog):
         p = ctx.clean_prefix
         if channel_ids:
             listing = "\n".join(f"• <#{cid}>" for cid in channel_ids)
-            description = f"The AI chatbot is enabled in **{len(channel_ids)}** channel(s):\n\n{listing}"
+            description = f"Enabled in **{len(channel_ids)}** channel(s):\n{listing}"
         else:
-            description = "The AI chatbot isn't enabled in any channel in this server yet."
+            description = "Not enabled in any channel yet."
 
         embed = make_embed(title="🤖 AI Configuration", description=description)
-        embed.add_field(
-            name="Manage *(administrators only)*",
-            value=(
-                f"`{p}ai add <#channel> [#channel ...]`\n"
-                f"`{p}ai remove <#channel> [#channel ...]`\n"
-                f"-# See `{p}ai` for the full guide."
-            ),
-            inline=False,
-        )
         await ctx.reply(embed=embed, mention_author=False)
 
     @ai_group.command(
@@ -987,7 +954,7 @@ class AIChat(commands.Cog):
 
         targets = self._unique_mentioned_channels(ctx)
         if not targets:
-            return await send_usage(ctx, note="Mention at least one channel, e.g. `#general`.")
+            return await send_usage(ctx, note="Mention a channel, e.g. `#general`.")
 
         try:
             existing = set(await self._fetch_guild_channels(ctx.guild.id))
@@ -1027,7 +994,7 @@ class AIChat(commands.Cog):
 
         targets = self._unique_mentioned_channels(ctx)
         if not targets:
-            return await send_usage(ctx, note="Mention at least one channel, e.g. `#general`.")
+            return await send_usage(ctx, note="Mention a channel, e.g. `#general`.")
 
         try:
             existing = set(await self._fetch_guild_channels(ctx.guild.id))
@@ -1057,7 +1024,7 @@ class AIChat(commands.Cog):
     @ai_group.command(name="reset", help="Clears your AI chatbot memory for this channel.")
     async def reset_memory(self, ctx: commands.Context):
         if not self._is_ai_channel(ctx.channel):
-            await ctx.send(embed=err_embed("Wrong Channel", "The AI Chatbot is not active in this channel.", emoji="🚫"))
+            await ctx.send(embed=err_embed(" AI not enabled", "", emoji="🚫"))
             return
 
         key = (ctx.channel.id, ctx.author.id)
@@ -1070,7 +1037,7 @@ class AIChat(commands.Cog):
     @ai_group.command(name="memory", help="Displays your AI chatbot memory for this channel.")
     async def show_memory(self, ctx: commands.Context):
         if not self._is_ai_channel(ctx.channel):
-            await ctx.send(embed=err_embed("Wrong Channel", "The AI Chatbot is not active in this channel.", emoji="🚫"))
+            await ctx.send(embed=err_embed(" AI not enabled", "", emoji="🚫"))
             return
 
         history = self.history.get((ctx.channel.id, ctx.author.id))
@@ -1104,7 +1071,7 @@ class AIChat(commands.Cog):
                 embed.title = f"🧠 Your Memory (this channel) — {len(history)} message(s) stored"
             await ctx.send(embed=embed)
 
-    @commands.command(name="ai-info", help="Owner only: displays model status, and daily usage grouped by OpenRouter account.")
+    @ai_group.command(name="info", help="Owner only: displays model status, and daily usage grouped by OpenRouter account.")
     @is_bot_owner()
     async def ai_info(self, ctx: commands.Context):
         self._check_daily_reset()
