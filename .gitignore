@@ -5,9 +5,10 @@ __pycache__/
 .DS_Store
 CONVENTIONAL_COMMITS.md
 
-assets/
-train/
+assets/utilities_new_avatar.jpg
+data/pokeimgs/
 models/pokemon_db.npz
+recognizer/traindata/
 
 firebase_key.json
 config.json
