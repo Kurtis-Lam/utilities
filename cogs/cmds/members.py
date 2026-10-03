@@ -1,5 +1,7 @@
 import asyncio
 import re
+import secrets
+import time
 import typing
 import discord
 from discord import app_commands
@@ -7,11 +9,40 @@ from discord.ext import commands
 
 # Import ConfirmView from views/common.py
 from views.common import ConfirmView
-from views.embeds import handle_common_error
+from views.embeds import handle_common_error, ok_embed, err_embed, warn_embed, info_embed
+
+MAX_REASON_LENGTH = 500
+
 
 class Members(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
+    @property
+    def db(self):
+        return self.mongo_client["utilities"]
+
+    @property
+    def settings_collection(self):
+        return self.db["guild_settings"]
+
+    @property
+    def warns_collection(self):
+        return self.db["warns"]
+
+    async def cog_load(self):
+        """Warms up the database connection and makes sure the warn indexes exist."""
+        try:
+            await self.mongo_client.admin.command("ping")
+            await self.warns_collection.create_index([("guild_id", 1), ("user_id", 1)])
+            await self.warns_collection.create_index([("guild_id", 1), ("id", 1)], unique=True)
+        except Exception as e:
+            print(f"Members Cog: MongoDB warmup failed: {e}")
 
     async def cog_command_error(self, ctx, error):
         if not await handle_common_error(ctx, error):
@@ -21,7 +52,7 @@ class Members(commands.Cog):
         view = ConfirmView(ctx.author)
         embed = discord.Embed(
             title="⚠️ Confirmation Required",
-            description=f"{prompt}\n\nClick a button below to confirm or cancel.",
+            description=prompt,
             color=discord.Color.gold()
         )
         msg = await ctx.send(embed=embed, view=view)
@@ -56,19 +87,62 @@ class Members(commands.Cog):
         multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
         return amount * multipliers[unit]
 
-    async def get_or_create_muted_role(self, guild: discord.Guild) -> discord.Role:
-        role = discord.utils.get(guild.roles, name="muted")
-        if not role:
-            role = discord.utils.get(guild.roles, name="Muted")
-        
-        if not role:
-            try:
-                role = await guild.create_role(name="muted", reason="Created automatically for server mutes.")
-                for channel in guild.channels:
-                    await channel.set_permissions(role, send_messages=False, add_reactions=False)
-            except discord.HTTPException:
-                return None
+    # ------------------------------------------------------------------
+    # Mute role (stored per server in MongoDB, set with .muterole)
+    # ------------------------------------------------------------------
+
+    async def get_mute_role(self, guild: discord.Guild) -> typing.Optional[discord.Role]:
+        doc = await self.settings_collection.find_one({"_id": guild.id})
+        role_id = doc.get("mute_role_id") if doc else None
+        return guild.get_role(role_id) if role_id else None
+
+    async def require_mute_role(self, ctx) -> typing.Optional[discord.Role]:
+        """Returns the configured mute role, or sends an error and returns None."""
+        role = await self.get_mute_role(ctx.guild)
+        if role is None:
+            await ctx.send(embed=err_embed(
+                "No Mute Role",
+                f"An admin must set one first: `{ctx.clean_prefix}muterole @role`"
+            ))
         return role
+
+    @commands.hybrid_command(name="muterole", with_app_command=True, description="Shows or sets the role used for mutes.")
+    @app_commands.describe(
+        role="The role to use for mutes (mention or ID). Leave blank to view the current one."
+    )
+    @commands.has_permissions(manage_roles=True)
+    async def muterole(self, ctx, role: discord.Role = None):
+        if role is None:
+            current = await self.get_mute_role(ctx.guild)
+            if current:
+                return await ctx.send(embed=info_embed("Mute Role", current.mention, emoji="🔇"))
+            return await ctx.send(embed=info_embed(
+                "Mute Role", f"Not set. Use `{ctx.clean_prefix}muterole @role`", emoji="🔇"
+            ))
+
+        if not ctx.author.guild_permissions.administrator:
+            return await ctx.send(embed=err_embed(
+                "Missing Permissions", "Only administrators can set the mute role."
+            ))
+        if role.is_default() or role.managed:
+            return await ctx.send(embed=err_embed(
+                "Invalid Role", "That role can't be used as a mute role."
+            ))
+        if role >= ctx.guild.me.top_role:
+            return await ctx.send(embed=err_embed(
+                "Role Too High", "That role is higher than or equal to my highest role."
+            ))
+
+        await self.settings_collection.update_one(
+            {"_id": ctx.guild.id},
+            {"$set": {"mute_role_id": role.id}},
+            upsert=True
+        )
+        await ctx.send(embed=ok_embed("Mute Role Set", role.mention, emoji="🔇"))
+
+    # ------------------------------------------------------------------
+    # Kick / ban / nick
+    # ------------------------------------------------------------------
 
     @commands.hybrid_command(name="kick", with_app_command=True, description="Removes a target user from the server.")
     @app_commands.describe(
@@ -191,7 +265,11 @@ class Members(commands.Cog):
             embed = discord.Embed(title="❌ Error", description=f"Failed to change nickname due to an error: {e}", color=discord.Color.red())
             await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="mute", with_app_command=True, description="Mutes a user globally using a muted role for a set duration.")
+    # ------------------------------------------------------------------
+    # Mute / unmute (uses the role configured with .muterole)
+    # ------------------------------------------------------------------
+
+    @commands.hybrid_command(name="mute", with_app_command=True, description="Mutes a user with the server's mute role for a set duration.")
     @app_commands.describe(
         user="The server member to mute.",
         duration="Duration of the mute (e.g. 30s, 10m, 2h, 1d). Leave blank for permanent.",
@@ -211,15 +289,22 @@ class Members(commands.Cog):
             embed = discord.Embed(title="❌ Action Denied", description="You cannot mute someone with a role higher than or equal to yours.", color=discord.Color.red())
             return await ctx.send(embed=embed)
 
-        muted_role = await self.get_or_create_muted_role(ctx.guild)
+        muted_role = await self.require_mute_role(ctx)
         if not muted_role:
-            embed = discord.Embed(title="❌ Error", description="Could not find or create the `muted` role.", color=discord.Color.red())
-            return await ctx.send(embed=embed)
+            return
+
+        if muted_role >= ctx.guild.me.top_role:
+            return await ctx.send(embed=err_embed(
+                "Role Too High", "The mute role is higher than or equal to my highest role."
+            ))
 
         seconds = self.parse_time(duration) if duration else None
         if duration and seconds is None:
             embed = discord.Embed(title="❌ Invalid Duration", description="Please use a valid time format like `30s`, `10m`, `2h`, or `1d`.", color=discord.Color.red())
             return await ctx.send(embed=embed)
+
+        if muted_role in user.roles:
+            return await ctx.send(embed=err_embed("Already Muted", f"{user.mention} is already muted."))
 
         try:
             await user.add_roles(muted_role, reason=f"Muted by {ctx.author}: {reason}")
@@ -249,14 +334,17 @@ class Members(commands.Cog):
         if seconds:
             await asyncio.sleep(seconds)
             if muted_role in user.roles:
-                await user.remove_roles(muted_role, reason="Mute duration expired.")
+                try:
+                    await user.remove_roles(muted_role, reason="Mute duration expired.")
+                except discord.HTTPException:
+                    return
                 unmute_dm = discord.Embed(title=f"You have been unmuted in {ctx.guild.name}", color=discord.Color.green())
                 try:
                     await user.send(embed=unmute_dm)
                 except discord.HTTPException:
                     pass
 
-    @commands.hybrid_command(name="unmute", with_app_command=True, description="Unmutes a user by removing the muted role.")
+    @commands.hybrid_command(name="unmute", with_app_command=True, description="Unmutes a user by removing the mute role.")
     @app_commands.describe(
         user="The server member to unmute."
     )
@@ -267,9 +355,11 @@ class Members(commands.Cog):
         ctx,
         user: discord.Member
     ):
-        muted_role = discord.utils.get(ctx.guild.roles, name="muted") or discord.utils.get(ctx.guild.roles, name="Muted")
-        
-        if not muted_role or muted_role not in user.roles:
+        muted_role = await self.require_mute_role(ctx)
+        if not muted_role:
+            return
+
+        if muted_role not in user.roles:
             embed = discord.Embed(title="❌ Error", description="This user is not currently muted.", color=discord.Color.red())
             return await ctx.send(embed=embed)
 
@@ -287,6 +377,132 @@ class Members(commands.Cog):
             color=discord.Color.green()
         )
         await ctx.send(embed=embed)
+
+    # ------------------------------------------------------------------
+    # Warns (saved in MongoDB, each warn has a unique ID)
+    # ------------------------------------------------------------------
+
+    async def _new_warn_id(self, guild_id: int) -> str:
+        while True:
+            warn_id = secrets.token_hex(3)
+            if not await self.warns_collection.find_one({"guild_id": guild_id, "id": warn_id}):
+                return warn_id
+
+    async def _remove_warn(self, ctx, user: discord.User, warn_id: str):
+        warn_id = warn_id.strip("` ").lower()
+        result = await self.warns_collection.delete_one(
+            {"guild_id": ctx.guild.id, "user_id": user.id, "id": warn_id}
+        )
+        if result.deleted_count:
+            await ctx.send(embed=ok_embed("Warn Removed", f"Removed `{warn_id}` from {user.mention}.", emoji="🗑️"))
+        else:
+            await ctx.send(embed=err_embed("Warn Not Found", f"{user.mention} has no warn with ID `{warn_id}`."))
+
+    @commands.hybrid_group(
+        name="warn",
+        fallback="add",
+        invoke_without_command=True,
+        with_app_command=True,
+        description="Warns a member and saves it."
+    )
+    @app_commands.describe(
+        user="The server member to warn.",
+        reason="The reason for the warn (optional)."
+    )
+    @commands.has_permissions(manage_messages=True)
+    async def warn(
+        self,
+        ctx,
+        user: discord.Member,
+        *,
+        reason: str = "No reason provided"
+    ):
+        if user.bot:
+            return await ctx.send(embed=err_embed("Action Denied", "You cannot warn a bot."))
+        if user == ctx.author:
+            return await ctx.send(embed=err_embed("Action Denied", "You cannot warn yourself."))
+        if user.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+            return await ctx.send(embed=err_embed(
+                "Action Denied", "You cannot warn someone with a role higher than or equal to yours."
+            ))
+
+        reason = reason.strip()[:MAX_REASON_LENGTH] or "No reason provided"
+        warn_id = await self._new_warn_id(ctx.guild.id)
+
+        await self.warns_collection.insert_one({
+            "id": warn_id,
+            "guild_id": ctx.guild.id,
+            "user_id": user.id,
+            "moderator_id": ctx.author.id,
+            "reason": reason,
+            "created_at": time.time(),
+        })
+        total = await self.warns_collection.count_documents(
+            {"guild_id": ctx.guild.id, "user_id": user.id}
+        )
+
+        dm_embed = warn_embed(f"You were warned in {ctx.guild.name}", f"**Reason:** {reason}")
+        try:
+            await user.send(embed=dm_embed)
+        except discord.HTTPException:
+            pass
+
+        await ctx.send(embed=warn_embed(
+            "Member Warned",
+            f"{user.mention} warned. ID `{warn_id}` · Total **{total}**\n**Reason:** {reason}"
+        ))
+
+    @warn.command(name="remove", aliases=["r"], description="Removes a warn by its ID.")
+    @app_commands.describe(
+        user="The member (mention or ID) the warn belongs to.",
+        warn_id="The ID of the warn to remove."
+    )
+    @commands.has_permissions(administrator=True)
+    async def warn_remove(self, ctx, user: discord.User, warn_id: str):
+        await self._remove_warn(ctx, user, warn_id)
+
+    @commands.hybrid_group(
+        name="warns",
+        fallback="view",
+        invoke_without_command=True,
+        with_app_command=True,
+        description="Shows a user's warns."
+    )
+    @app_commands.describe(user="The member (mention or ID) to look up.")
+    @commands.has_permissions(administrator=True)
+    async def warns(self, ctx, user: discord.User):
+        docs = await self.warns_collection.find(
+            {"guild_id": ctx.guild.id, "user_id": user.id}
+        ).sort("created_at", -1).to_list(length=None)
+
+        if not docs:
+            return await ctx.send(embed=info_embed("No Warns", f"{user.mention} has no warns.", emoji="📭"))
+
+        lines = []
+        used = 0
+        for doc in docs:
+            line = (
+                f"`{doc['id']}` — {doc['reason']} · "
+                f"<@{doc['moderator_id']}> · <t:{int(doc['created_at'])}:R>"
+            )
+            if used + len(line) > 3800:
+                lines.append(f"*…and {len(docs) - len(lines)} more*")
+                break
+            lines.append(line)
+            used += len(line) + 1
+
+        await ctx.send(embed=warn_embed(
+            f"Warns for {user.name} ({len(docs)})", "\n".join(lines)
+        ))
+
+    @warns.command(name="remove", aliases=["r"], description="Removes a warn by its ID.")
+    @app_commands.describe(
+        user="The member (mention or ID) the warn belongs to.",
+        warn_id="The ID of the warn to remove."
+    )
+    @commands.has_permissions(administrator=True)
+    async def warns_remove(self, ctx, user: discord.User, warn_id: str):
+        await self._remove_warn(ctx, user, warn_id)
 
 
 async def setup(bot):
