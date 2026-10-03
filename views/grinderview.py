@@ -31,7 +31,7 @@ async def _guild_only(interaction: discord.Interaction) -> bool:
     """Reply with a friendly error and return False when used outside a server."""
     if interaction.guild_id:
         return True
-    await interaction.response.send_message(embed=error_embed("This can only be used inside a server."), ephemeral=True)
+    await interaction.response.send_message(embed=error_embed("Server only."), ephemeral=True)
     return False
 
 
@@ -58,7 +58,7 @@ class AddAccountModal(ui.Modal, title="Add Account"):
     async def on_submit(self, interaction: discord.Interaction):
         token = self.token.value.strip()
         if not token:
-            return await interaction.response.send_message(embed=error_embed("The token can't be empty."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed("Token is empty."), ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
         data = await config.get_global_data()
@@ -86,7 +86,7 @@ class DeleteAccountModal(ui.Modal, title="Delete Account"):
         nums = parse_indices(self.index.value)
         if not nums:
             return await interaction.response.send_message(
-                embed=error_embed("Enter the account number as a digit, e.g. `1`."), ephemeral=True
+                embed=error_embed("Enter an account number."), ephemeral=True
             )
         number = nums[0]
 
@@ -95,7 +95,7 @@ class DeleteAccountModal(ui.Modal, title="Delete Account"):
 
         if not (1 <= number <= len(data["accounts"])):
             return await interaction.followup.send(
-                embed=error_embed(f"There's no account **#{number}**. You have {len(data['accounts'])} saved."),
+                embed=error_embed(f"No account #{number}."),
                 ephemeral=True,
             )
 
@@ -115,7 +115,7 @@ class EditAccountModal(ui.Modal, title="Edit Account Token"):
         nums = parse_indices(self.index.value)
         if not nums:
             return await interaction.response.send_message(
-                embed=error_embed("Enter the account number as a digit, e.g. `1`."), ephemeral=True
+                embed=error_embed("Enter an account number."), ephemeral=True
             )
         number = nums[0]
 
@@ -124,7 +124,7 @@ class EditAccountModal(ui.Modal, title="Edit Account Token"):
 
         if not (1 <= number <= len(data["accounts"])):
             return await interaction.followup.send(
-                embed=error_embed(f"There's no account **#{number}**. You have {len(data['accounts'])} saved."),
+                embed=error_embed(f"No account #{number}."),
                 ephemeral=True,
             )
 
@@ -200,13 +200,13 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
         if mode_val not in config.VALID_MODES:
             modes = ", ".join(f"`{m}`" for m in config.VALID_MODES)
             return await interaction.response.send_message(
-                embed=error_embed(f"Unknown mode `{mode_val}`.\nChoose one of: {modes}"), ephemeral=True
+                embed=error_embed(f"Unknown mode {mode_val}. Use: {modes}"), ephemeral=True
             )
 
         acc_indices = parse_indices(self.acc_index.value)
         if not acc_indices:
             return await interaction.response.send_message(
-                embed=error_embed("Account number must be one or more digits, e.g. `1, 2`."), ephemeral=True
+                embed=error_embed("Enter account number(s), e.g. 1, 2."), ephemeral=True
             )
 
         await interaction.response.defer(ephemeral=True)
@@ -217,7 +217,7 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
         if missing:
             return await interaction.followup.send(
                 embed=error_embed(
-                    f"Account {_fmt_nums(missing)} doesn't exist. You have **{total_accounts}** saved account(s)."
+                    f"No account {_fmt_nums(missing)}. You have {total_accounts}."
                 ),
                 ephemeral=True,
             )
@@ -443,7 +443,7 @@ class PromptEditConfigModal(ui.Modal, title="Edit Configuration"):
         indices = parse_indices(self.index.value)
         if not indices:
             return await interaction.response.send_message(
-                embed=error_embed("Enter one or more config numbers, e.g. `1, 2`."), ephemeral=True
+                embed=error_embed("Enter config number(s)."), ephemeral=True
             )
 
         guild_id = str(interaction.guild_id)
@@ -453,7 +453,7 @@ class PromptEditConfigModal(ui.Modal, title="Edit Configuration"):
         if invalid:
             return await interaction.response.send_message(
                 embed=error_embed(
-                    f"Config {_fmt_nums(invalid)} doesn't exist. This server has **{len(configs)}** configuration(s)."
+                    f"No config {_fmt_nums(invalid)}. This server has {len(configs)}."
                 ),
                 ephemeral=True,
             )
@@ -476,7 +476,7 @@ class RemoveConfigModal(ui.Modal, title="Remove Configuration"):
         numbers = parse_indices(self.index.value)
         if not numbers:
             return await interaction.response.send_message(
-                embed=error_embed("Enter one or more config numbers, e.g. `1, 2`."), ephemeral=True
+                embed=error_embed("Enter config number(s)."), ephemeral=True
             )
 
         await interaction.response.defer(ephemeral=True)
@@ -489,7 +489,7 @@ class RemoveConfigModal(ui.Modal, title="Remove Configuration"):
 
         if not removed:
             return await interaction.followup.send(
-                embed=error_embed(f"None of those exist. This server has **{len(configs)}** configuration(s)."),
+                embed=error_embed(f"None exist. This server has {len(configs)}."),
                 ephemeral=True,
             )
 
@@ -518,7 +518,7 @@ class AddExcludeModal(ui.Modal, title="Add Excludes"):
 
         items = [i.strip() for i in self.pokemon.value.strip().split(",") if i.strip()]
         if not items:
-            return await interaction.response.send_message(embed=error_embed("Enter at least one Pokemon name."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed("Enter a Pokemon name."), ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
         guild_id = str(interaction.guild_id)
@@ -552,7 +552,7 @@ class RemoveExcludeModal(ui.Modal, title="Remove Excludes"):
 
         targets = {i.strip().lower() for i in self.pokemon.value.strip().split(",") if i.strip()}
         if not targets:
-            return await interaction.response.send_message(embed=error_embed("Enter at least one Pokemon name."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed("Enter a Pokemon name."), ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
         guild_id = str(interaction.guild_id)
@@ -588,7 +588,7 @@ class AddBotModal(ui.Modal, title="Add Detector Bot"):
         bot_id_val = extract_id(self.bot_id.value)
         if not bot_id_val:
             return await interaction.response.send_message(
-                embed=error_embed("Enter a valid numeric bot ID or mention."), ephemeral=True
+                embed=error_embed("Invalid bot ID."), ephemeral=True
             )
 
         await interaction.response.defer(ephemeral=True)
@@ -616,7 +616,7 @@ class RemoveBotModal(ui.Modal, title="Remove Detector Bot"):
         numbers = parse_indices(self.index.value)
         if not numbers:
             return await interaction.response.send_message(
-                embed=error_embed("Enter one or more bot numbers, e.g. `1, 2`."), ephemeral=True
+                embed=error_embed("Enter bot number(s)."), ephemeral=True
             )
 
         await interaction.response.defer(ephemeral=True)
@@ -629,7 +629,7 @@ class RemoveBotModal(ui.Modal, title="Remove Detector Bot"):
 
         if not removed:
             return await interaction.followup.send(
-                embed=error_embed(f"None of those exist. There are **{len(bots)}** detector bot(s)."), ephemeral=True
+                embed=error_embed(f"None exist. There are {len(bots)}."), ephemeral=True
             )
 
         await config.save_guild_detector_bots(guild_id, bots)
@@ -776,12 +776,12 @@ class ConfigView(ui.View):
             return
 
         confirm_view = ConfirmView(
-            author=interaction.user, confirm_label=f"Yes, reset all {self.reset_noun}", cancel_label="Cancel"
+            author=interaction.user, confirm_label=f"Reset all {self.reset_noun}", cancel_label="Cancel"
         )
         await interaction.response.send_message(
             embed=warning_embed(
-                f"This permanently removes **all {self.reset_noun}** for this server and can't be undone.",
-                title="Reset everything?",
+                f"All {self.reset_noun} will be removed. This can't be undone.",
+                title="Reset?",
             ),
             view=confirm_view,
             ephemeral=True,
@@ -801,9 +801,9 @@ class ConfigView(ui.View):
             await config.refresh_config_embed(interaction, override_page=self.page)
             result = success_embed(f"All {self.reset_noun} have been reset.")
         elif confirm_view.value is False:
-            result = info_embed("Reset cancelled. Nothing was changed.")
+            result = info_embed("Cancelled.")
         else:
-            result = info_embed("Reset timed out. Nothing was changed.")
+            result = info_embed("Timed out.")
 
         try:
             await interaction.edit_original_response(embed=themed(result), view=None)
@@ -833,7 +833,7 @@ class SetLogModal(ui.Modal):
         channel_id = extract_id(self.channel_input.value)
         if not channel_id:
             return await interaction.response.send_message(
-                embed=error_embed("Enter a numeric channel ID or a #channel mention."), ephemeral=True
+                embed=error_embed("Invalid channel."), ephemeral=True
             )
 
         await interaction.response.defer(ephemeral=True)
