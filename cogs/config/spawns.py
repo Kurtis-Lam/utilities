@@ -2,7 +2,7 @@ import asyncio
 import discord
 from discord.ext import commands
 
-from views.common import error_embed, make_embed, themed
+from views.common import error_embed, make_embed
 from views.embeds import handle_command_error
 from views.spawnsview import SpawnsConfigView
 from .base import config_group
@@ -31,9 +31,9 @@ async def spawnsconfig(ctx: commands.Context):
         return await ctx.send(embed=error_embed("SpawnsConfig is not loaded."))
 
     # Use the retrieved cog instead of ctx.cog
-    embed = themed(await cog.build_config_embed(ctx.guild))
-    view = SpawnsConfigView(cog, author_id=ctx.author.id)
-    await ctx.send(embed=embed, view=view)
+    embed = await cog.build_config_embed(ctx.guild)
+    view = SpawnsConfigView(cog, author_id=ctx.author.id, embed=embed)
+    view.message = await ctx.send(view=view)
 
 
 @spawnsconfig.error
@@ -41,20 +41,42 @@ async def spawnsconfig_error(ctx: commands.Context, error: Exception):
     await handle_command_error(ctx, error)
 
 
-class UnlockView(discord.ui.View):
-    def __init__(self, cog=None):
+class UnlockView(discord.ui.LayoutView):
+    def __init__(self, cog=None, unlocked: bool = False):
         super().__init__(timeout=None)
         self.cog = cog
+        self.text = discord.ui.TextDisplay("")
+        self.button = discord.ui.Button(label="Unlock", style=discord.ButtonStyle.green)
+        self.button.callback = self.unlock
+        self.container = discord.ui.Container(
+            self.text,
+            discord.ui.Separator(),
+            discord.ui.ActionRow(self.button),
+        )
+        self.add_item(self.container)
+        self.apply_state(unlocked)
 
-    @discord.ui.button(label="Unlock", style=discord.ButtonStyle.green, emoji="🔓")
-    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
+    def apply_state(self, unlocked: bool):
+        if unlocked:
+            self.text.content = "## 🔓 Channel Unlocked"
+            self.container.accent_colour = discord.Color.green()
+            self.button.label = "Unlocked"
+            self.button.emoji = None
+            self.button.style = discord.ButtonStyle.secondary
+            self.button.disabled = True
+        else:
+            self.text.content = "## 🔒 Channel Locked\nUse `.u` or the button."
+            self.container.accent_colour = discord.Color.red()
+            self.button.label = "Unlock"
+            self.button.emoji = "🔓"
+            self.button.style = discord.ButtonStyle.green
+            self.button.disabled = False
+
+    async def unlock(self, interaction: discord.Interaction):
         target = await get_poketwo_target(interaction.guild)
         await interaction.channel.set_permissions(target, view_channel=True, send_messages=True)
 
-        button.disabled = True
-        button.label = "Unlocked"
-        button.style = discord.ButtonStyle.secondary
-
+        self.apply_state(True)
         await interaction.response.edit_message(view=self)
         await interaction.followup.send(
             embed=make_embed(
@@ -190,11 +212,7 @@ class SpawnsConfig(commands.Cog):
                 lock_msg = self.active_locks.pop(message.channel.id, None)
                 if lock_msg:
                     try:
-                        view = UnlockView(cog=self)
-                        view.children[0].disabled = True
-                        view.children[0].label = "Unlocked"
-                        view.children[0].style = discord.ButtonStyle.secondary
-                        await lock_msg.edit(view=view)
+                        await lock_msg.edit(view=UnlockView(cog=self, unlocked=True))
                     except discord.HTTPException:
                         pass
             return
@@ -233,12 +251,7 @@ class SpawnsConfig(commands.Cog):
             target = await get_poketwo_target(message.guild)
             await message.channel.set_permissions(target, view_channel=False, send_messages=False)
 
-            lock_embed = discord.Embed(
-                title="🔒 Channel Locked",
-                description="Use `.u` or the button.",
-                color=discord.Color.red(),
-            )
-            lock_msg = await message.channel.send(embed=lock_embed, view=UnlockView(cog=self))
+            lock_msg = await message.channel.send(view=UnlockView(cog=self))
             self.active_locks[message.channel.id] = lock_msg
         finally:
             self.pending_locks.remove(message.channel.id)
