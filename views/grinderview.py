@@ -13,7 +13,6 @@ from views.common import (
     make_embed,
     parse_indices,
     success_embed,
-    themed,
     warning_embed,
 )
 
