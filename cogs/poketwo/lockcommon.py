@@ -172,11 +172,13 @@ def locked_embed(
         title="🔒 Channel Locked",
         color=LOCK_COLOR,
     )
-    embed.add_field(name="🕒 Locked At", value=stamp(when), inline=True)
+    by_text = ""
     if locked_by is not None:
-        embed.add_field(name="👤 Locked By", value=locked_by.mention, inline=True)
+        by_text = f" by {locked_by.mention}"
     elif trigger:
-        embed.add_field(name="🤖 Triggered By", value=f"Auto-lock (`{trigger}`)", inline=True)
+        by_text = f" by Auto-lock (`{trigger}`)"
+
+    embed.add_field(name="🕒 Locked At", value=f"{stamp(when)}{by_text}", inline=False)
 
     text = who_can_unlock_text(allowed_users)
     if restricted_by:
@@ -204,16 +206,17 @@ def already_locked_embed(channel, lock_doc: dict | None = None) -> discord.Embed
     )
     if lock_doc:
         locked_at = to_unix(lock_doc.get("locked_at"))
-        if locked_at:
-            embed.add_field(name="🕒 Locked At", value=stamp(locked_at), inline=True)
+        by_text = ""
         if lock_doc.get("locked_by"):
-            embed.add_field(name="👤 Locked By", value=f"<@{lock_doc['locked_by']}>", inline=True)
+            by_text = f" by <@{lock_doc['locked_by']}>"
         elif lock_doc.get("source") == "autolock":
-            embed.add_field(
-                name="🤖 Triggered By",
-                value=f"Auto-lock (`{_categories_label(lock_doc.get('categories'))}`)",
-                inline=True,
-            )
+            by_text = f" by Auto-lock (`{_categories_label(lock_doc.get('categories'))}`)"
+
+        if locked_at:
+            embed.add_field(name="🕒 Locked At", value=f"{stamp(locked_at)}{by_text}", inline=False)
+        elif by_text:
+            embed.add_field(name="👤 Locked By", value=by_text.strip(), inline=False)
+
         embed.add_field(name="🔐 Who Can Unlock", value=who_can_unlock_text(lock_doc.get("allowed_users")), inline=False)
     return embed
 
