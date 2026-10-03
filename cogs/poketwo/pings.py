@@ -9,6 +9,87 @@ from discord.ext import commands
 from views.common import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed, warning_embed
 from views.embeds import handle_command_error, send_usage
 
+# --- Navigation View Integration ----------------------------------------------
+_NavViewClass = None
+try:
+    import views.navigate as nav_module
+    for attr in ["PaginatorView", "PaginatedView", "Paginator", "NavigationView", "NavigateView"]:
+        if hasattr(nav_module, attr):
+            _NavViewClass = getattr(nav_module, attr)
+            break
+except ImportError:
+    pass
+
+
+class DefaultPaginatorView(discord.ui.View):
+    """Fallback interactive pagination view with left and right arrow buttons."""
+
+    def __init__(self, pages: List[discord.Embed], user_id: int, timeout: float = 180):
+        super().__init__(timeout=timeout)
+        self.pages = pages
+        self.user_id = user_id
+        self.current_page = 0
+
+        self.prev_button = discord.ui.Button(
+            style=discord.ButtonStyle.secondary,
+            emoji="◀️",
+            custom_id="nav_prev",
+            disabled=True
+        )
+        self.next_button = discord.ui.Button(
+            style=discord.ButtonStyle.secondary,
+            emoji="▶️",
+            custom_id="nav_next",
+            disabled=(len(pages) <= 1)
+        )
+
+        self.prev_button.callback = self.on_prev_click
+        self.next_button.callback = self.on_next_click
+
+        self.add_item(self.prev_button)
+        self.add_item(self.next_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                embed=warning_embed("Not your menu."),
+                ephemeral=True
+            )
+            return False
+        return True
+
+    def _update_buttons(self):
+        self.prev_button.disabled = (self.current_page == 0)
+        self.next_button.disabled = (self.current_page == len(self.pages) - 1)
+
+    async def on_prev_click(self, interaction: discord.Interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    async def on_next_click(self, interaction: discord.Interaction):
+        if self.current_page < len(self.pages) - 1:
+            self.current_page += 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+
+def create_paginator_view(pages: List[discord.Embed], user_id: int) -> discord.ui.View:
+    if _NavViewClass is not None:
+        try:
+            return _NavViewClass(pages=pages, user_id=user_id)
+        except TypeError:
+            try:
+                return _NavViewClass(pages, user_id)
+            except TypeError:
+                try:
+                    return _NavViewClass(pages)
+                except Exception:
+                    pass
+    return DefaultPaginatorView(pages, user_id)
+
+
 TYPES = [
     "Normal", "Fire", "Water", "Grass", "Electric", "Ice",
     "Fighting", "Poison", "Ground", "Flying", "Psychic", "Bug",
@@ -24,9 +105,6 @@ EXTRA_RP_CATEGORIES = ["Gmax", "Paradox", "Eevos"]
 
 
 # --- Alt-name helpers ---------------------------------------------------------
-# Alt names live in the "names" list of each Pokédex entry (the same list the
-# "Names" field of .dex displays). These helpers turn those raw strings into
-# normalized lookup keys so that "ghos", "Ghos", "ゴース" etc. all resolve.
 
 _LEADING_JUNK_RE = re.compile(r"^[^\w]+")
 _SPLIT_RE = re.compile(r"[/;|\n]")
@@ -78,8 +156,6 @@ def extract_name_variants(entry) -> list:
         if ":" in part:
             part = part.split(":", 1)[1]
         outer = _PAREN_RE.sub(" ", part)
-        # Parenthesised romanization only counts when the outer text is non-Latin
-        # (otherwise the parentheses are just a label like "(French)").
         if not _is_latin(_LEADING_JUNK_RE.sub("", outer.strip())):
             for inner in _PAREN_RE.findall(part):
                 add(inner)
@@ -127,7 +203,7 @@ class TypePingSelect(discord.ui.Select):
         view: TypePingView = self.view
         if interaction.user.id != view.user_id:
             return await interaction.response.send_message(
-                embed=warning_embed("This menu isn't for you. Run the command yourself to get your own."), ephemeral=True
+                embed=warning_embed("Not your menu."), ephemeral=True
             )
 
         g_id = str(interaction.guild_id)
@@ -151,7 +227,7 @@ class TypePingView(discord.ui.View):
         self.add_item(TypePingSelect(user_types))
 
     def make_embed(self, user_types: list) -> discord.Embed:
-        embed = discord.Embed(title="⚡ Type Pings Configuration", color=EMBED_COLOR)
+        embed = discord.Embed(title="⚡ Type Pings", color=EMBED_COLOR)
         embed.description = "\n".join(
             f"{'✅' if t in user_types else '❌'} **{t}**" for t in TYPES
         )
@@ -183,7 +259,7 @@ class RegionPingSelect(discord.ui.Select):
         view: RegionPingView = self.view
         if interaction.user.id != view.user_id:
             return await interaction.response.send_message(
-                embed=warning_embed("This menu isn't for you. Run the command yourself to get your own."), ephemeral=True
+                embed=warning_embed("Not your menu."), ephemeral=True
             )
 
         g_id = str(interaction.guild_id)
@@ -207,13 +283,13 @@ class RegionPingView(discord.ui.View):
         self.add_item(RegionPingSelect(user_regions))
 
     def make_embed(self, user_regions: list) -> discord.Embed:
-        embed = discord.Embed(title="🌍 Region & Special Pings Configuration", color=EMBED_COLOR)
+        embed = discord.Embed(title="🌍 Region Pings", color=EMBED_COLOR)
         
         region_lines = [f"{'✅' if r in user_regions else '❌'} **{r}**" for r in REGIONS]
         extra_lines = [f"{'✅' if cat in user_regions else '❌'} **{cat}**" for cat in EXTRA_RP_CATEGORIES]
 
         embed.add_field(name="Regions", value="\n".join(region_lines), inline=True)
-        embed.add_field(name="Special Categories", value="\n".join(extra_lines), inline=True)
+        embed.add_field(name="Special", value="\n".join(extra_lines), inline=True)
         return embed
 
 
@@ -307,7 +383,6 @@ class PokePings(commands.Cog):
 
         alt_index = await self._get_alt_index()
 
-        # Per input: real name first, then any alt-name resolution.
         candidates: List[List[str]] = []
         all_candidates = set()
         for original in requested:
@@ -378,13 +453,13 @@ class PokePings(commands.Cog):
         if role is None:
             current_role_id = await self.get_guild_role(g_id, role_key)
             if current_role_id:
-                embed = info_embed(f"Current **{category_name}** role: <@&{current_role_id}>")
+                embed = info_embed(f"**{category_name}** role: <@&{current_role_id}>")
             else:
-                embed = warning_embed(f"No role configured for **{category_name}**.")
+                embed = warning_embed(f"No **{category_name}** role set.")
             await ctx.reply(embed=embed, mention_author=False)
         else:
             await self.set_guild_role(g_id, role_key, str(role.id))
-            await ctx.reply(embed=success_embed(f"Set **{category_name}** ping role to {role.mention}"), mention_author=False)
+            await ctx.reply(embed=success_embed(f"**{category_name}** role set to {role.mention}"), mention_author=False)
 
     # --- Shiny Hunt Command ---
 
@@ -395,21 +470,33 @@ class PokePings(commands.Cog):
         *,
         pokemon: str = commands.parameter(
             default=None,
-            description="The Pokémon to hunt. Leave empty to view your current target.",
+            description="Pokémon, or 'reset'.",
         ),
     ):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
+        p = ctx.clean_prefix
 
         if not pokemon:
             current_sh = await self.get_ping_data(g_id, "sh", u_id)
+            desc_lines = []
             if current_sh:
-                await ctx.reply(
-                    embed=make_embed(description=f"✨ Your current Shiny Hunt target is **{current_sh}**."),
-                    mention_author=False,
-                )
-            else:
-                await send_usage(ctx, note="You don't have a Shiny Hunt target set.")
+                desc_lines.append(f"✨ Current target: **{current_sh}**\n")
+            desc_lines.extend([
+                f"• `{p}sh <pokemon>` — Set target",
+                f"• `{p}sh reset` — Clear"
+            ])
+            embed = discord.Embed(
+                title="✨ Shiny Hunt",
+                description="\n".join(desc_lines),
+                color=EMBED_COLOR
+            )
+            await ctx.reply(embed=embed, mention_author=False)
+            return
+
+        if pokemon.strip().lower() == "reset":
+            await self.clear_ping_category(g_id, "sh", u_id)
+            await ctx.reply(embed=make_embed(description="🧹 Cleared."), mention_author=False)
             return
 
         matched_names, _ = await self.parse_pokemon_list(pokemon)
@@ -420,29 +507,43 @@ class PokePings(commands.Cog):
         matched_name = matched_names[0]
         await self.set_ping_data(g_id, "sh", u_id, matched_name)
 
-        description = f"✨ Set your Shiny Hunt target to **{matched_name}** in this server!"
+        description = f"✨ Target set to **{matched_name}**."
         typed = pokemon.split(",")[0].strip()
         if typed.lower() != matched_name.lower():
-            description += f"\n-# Recognized `{typed[:50]}` as an alt name of {matched_name}."
+            description += f"\n-# `{typed[:50]}` = {matched_name}"
         await ctx.reply(embed=make_embed(description=description), mention_author=False)
 
     # --- Collection List Commands ---
 
     @commands.group(name="cl", invoke_without_command=True, description="Manage your collection list pings.")
     async def cl_group(self, ctx: commands.Context):
-        passed = getattr(ctx, "subcommand_passed", None)
-        await send_usage(ctx, note=f"Unknown subcommand `{passed}`." if passed else None)
+        if ctx.invoked_subcommand is None:
+            passed = getattr(ctx, "subcommand_passed", None)
+            if passed:
+                await send_usage(ctx, note=f"Unknown subcommand `{passed}`.")
+            else:
+                p = ctx.clean_prefix
+                embed = discord.Embed(
+                    title="📦 Collection List",
+                    description=(
+                        f"• `{p}cl a <pokemon>` — Add\n"
+                        f"• `{p}cl r <pokemon>` — Remove\n"
+                        f"• `{p}cl list` — View"
+                    ),
+                    color=EMBED_COLOR
+                )
+                await ctx.reply(embed=embed, mention_author=False)
 
     @cl_group.command(name="add", aliases=["a"], description="Add Pokémon to your collection list.")
     async def cl_add(
         self,
         ctx: commands.Context,
         *,
-        pokemon: str = commands.parameter(description="Pokémon name(s), separated by commas."),
+        pokemon: str = commands.parameter(description="Pokémon name(s), comma separated."),
     ):
         matched_names, invalid_names = await self.parse_pokemon_list(pokemon)
         if not matched_names:
-            await ctx.reply(embed=error_embed("None of the specified Pokémon exist."), mention_author=False)
+            await ctx.reply(embed=error_embed("No such Pokémon."), mention_author=False)
             return
 
         g_id = str(ctx.guild.id)
@@ -477,11 +578,11 @@ class PokePings(commands.Cog):
         self,
         ctx: commands.Context,
         *,
-        pokemon: str = commands.parameter(description="Pokémon name(s), separated by commas."),
+        pokemon: str = commands.parameter(description="Pokémon name(s), comma separated."),
     ):
         raw_targets = {p.strip().lower() for p in pokemon.split(",") if p.strip()}
         if not raw_targets:
-            return await send_usage(ctx, note="Please specify at least one Pokémon name.")
+            return await send_usage(ctx, note="Give a Pokémon name.")
 
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
@@ -523,7 +624,7 @@ class PokePings(commands.Cog):
         u_id = str(ctx.author.id)
 
         await self.set_ping_data(g_id, "cl", u_id, [])
-        await ctx.reply(embed=make_embed(description="🧹 Cleared your collection list!"), mention_author=False)
+        await ctx.reply(embed=make_embed(description="🧹 Cleared."), mention_author=False)
 
     @cl_group.command(name="list", aliases=["l"], description="Show your collection list.")
     async def cl_list(self, ctx: commands.Context):
@@ -532,10 +633,34 @@ class PokePings(commands.Cog):
 
         user_list = await self.get_ping_data(g_id, "cl", u_id, default=[])
 
-        embed = discord.Embed(title=f"📦 {ctx.author.display_name}'s Collection List", color=EMBED_COLOR)
-        embed.description = "\n".join(f"• {name}" for name in user_list) if user_list else "*Your collection list is empty.*"
+        if not user_list:
+            embed = discord.Embed(
+                title=f"📦 {ctx.author.display_name}'s Collection List",
+                description="*Empty.*",
+                color=EMBED_COLOR
+            )
+            await ctx.reply(embed=embed, mention_author=False)
+            return
 
-        await ctx.reply(embed=embed, mention_author=False)
+        page_size = 20
+        chunks = [user_list[i:i + page_size] for i in range(0, len(user_list), page_size)]
+        pages = []
+        total_pages = len(chunks)
+
+        for i, chunk in enumerate(chunks):
+            embed = discord.Embed(
+                title=f"📦 {ctx.author.display_name}'s Collection List",
+                description="\n".join(f"• {name}" for name in chunk),
+                color=EMBED_COLOR
+            )
+            embed.set_footer(text=f"Page {i + 1}/{total_pages}")
+            pages.append(embed)
+
+        if total_pages == 1:
+            await ctx.reply(embed=pages[0], mention_author=False)
+        else:
+            view = create_paginator_view(pages, ctx.author.id)
+            await ctx.reply(embed=pages[0], view=view, mention_author=False)
 
     # --- Reserves Commands ---
 
@@ -543,37 +668,128 @@ class PokePings(commands.Cog):
         name="reserves",
         aliases=["reserve", "res", "re"],
         invoke_without_command=True,
-        description="Show this server's reserves list.",
+        description="Show your reserves or view all server reserves.",
     )
-    async def reserves(self, ctx: commands.Context):
+    async def reserves(self, ctx: commands.Context, *, scope: Optional[str] = None):
+        if ctx.invoked_subcommand is not None:
+            return
+
+        if scope:
+            s = scope.strip().lower()
+            if s == "all":
+                await ctx.invoke(self.re_all)
+                return
+            elif s in ("list", "l"):
+                await ctx.invoke(self.re_list)
+                return
+
+        p = ctx.clean_prefix
+        embed = discord.Embed(
+            title="📋 Reserves",
+            description=(
+                f"• `{p}res a <member> <pokemon>` — Add (admin)\n"
+                f"• `{p}res r <member> <pokemon>` — Remove (admin)\n"
+                f"• `{p}res all` — All (admin)\n"
+                f"• `{p}res list` — Yours"
+            ),
+            color=EMBED_COLOR
+        )
+        await ctx.reply(embed=embed, mention_author=False)
+
+    @reserves.command(name="list", aliases=["l"], description="Show your reserves.")
+    async def re_list(self, ctx: commands.Context):
+        g_id = str(ctx.guild.id)
+        u_id = str(ctx.author.id)
+        user_list = await self.get_ping_data(g_id, "re", u_id, default=[])
+
+        if not user_list:
+            embed = discord.Embed(
+                title=f"📋 {ctx.author.display_name}'s Reserves",
+                description="*No reserves.*",
+                color=EMBED_COLOR
+            )
+            await ctx.reply(embed=embed, mention_author=False)
+            return
+
+        page_size = 20
+        chunks = [user_list[i:i + page_size] for i in range(0, len(user_list), page_size)]
+        pages = []
+        total_pages = len(chunks)
+
+        for i, chunk in enumerate(chunks):
+            embed = discord.Embed(
+                title=f"📋 {ctx.author.display_name}'s Reserves",
+                description="\n".join(f"• {name}" for name in chunk),
+                color=EMBED_COLOR
+            )
+            embed.set_footer(text=f"Page {i + 1}/{total_pages}")
+            pages.append(embed)
+
+        if total_pages == 1:
+            await ctx.reply(embed=pages[0], mention_author=False)
+        else:
+            view = create_paginator_view(pages, ctx.author.id)
+            await ctx.reply(embed=pages[0], view=view, mention_author=False)
+
+    @reserves.command(name="all", description="View all user reserves in this server (admin only).")
+    async def re_all(self, ctx: commands.Context):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(
+                embed=warning_embed("Admins only."),
+                mention_author=False
+            )
+            return
+
         g_id = str(ctx.guild.id)
         doc = await self._get_guild_doc(g_id)
         re_data = doc.get("re", {})
 
-        embed = discord.Embed(title=f"📋 {ctx.guild.name} Reserves List", color=EMBED_COLOR)
         lines = []
-
         for uid, plist in re_data.items():
             if plist:
-                user = ctx.guild.get_member(int(uid))
-                user_str = user.mention if user else f"User ID {uid}"
-                lines.append(f"• {user_str}: {', '.join(plist)}")
+                lines.append(f"• <@{uid}>: {', '.join(plist)}")
 
-        embed.description = "\n".join(lines) if lines else "*No active reserves in this server.*"
-        await ctx.reply(embed=embed, mention_author=False)
+        if not lines:
+            embed = discord.Embed(
+                title=f"📋 {ctx.guild.name} Reserves List",
+                description="*No reserves.*",
+                color=EMBED_COLOR
+            )
+            await ctx.reply(embed=embed, mention_author=False)
+            return
+
+        page_size = 20
+        chunks = [lines[i:i + page_size] for i in range(0, len(lines), page_size)]
+        pages = []
+        total_pages = len(chunks)
+
+        for i, chunk in enumerate(chunks):
+            embed = discord.Embed(
+                title=f"📋 {ctx.guild.name} Reserves List",
+                description="\n".join(chunk),
+                color=EMBED_COLOR
+            )
+            embed.set_footer(text=f"Page {i + 1}/{total_pages}")
+            pages.append(embed)
+
+        if total_pages == 1:
+            await ctx.reply(embed=pages[0], mention_author=False)
+        else:
+            view = create_paginator_view(pages, ctx.author.id)
+            await ctx.reply(embed=pages[0], view=view, mention_author=False)
 
     @reserves.command(name="add", aliases=["a"], description="Reserve Pokémon for a member (admin only).")
     @commands.has_permissions(administrator=True)
     async def re_add(
         self,
         ctx: commands.Context,
-        member: discord.Member = commands.parameter(description="The member to reserve for (mention or ID)."),
+        member: discord.Member = commands.parameter(description="Member (mention or ID)."),
         *,
-        pokemon: str = commands.parameter(description="Pokémon name(s), separated by commas."),
+        pokemon: str = commands.parameter(description="Pokémon name(s), comma separated."),
     ):
         matched_names, invalid_names = await self.parse_pokemon_list(pokemon)
         if not matched_names:
-            await ctx.reply(embed=error_embed("None of the specified Pokémon exist."), mention_author=False)
+            await ctx.reply(embed=error_embed("No such Pokémon."), mention_author=False)
             return
 
         g_id = str(ctx.guild.id)
@@ -608,9 +824,9 @@ class PokePings(commands.Cog):
     async def re_remove(
         self,
         ctx: commands.Context,
-        member: discord.Member = commands.parameter(description="The member to remove reserves from (mention or ID)."),
+        member: discord.Member = commands.parameter(description="Member (mention or ID)."),
         *,
-        pokemon: str = commands.parameter(description="Pokémon name(s), separated by commas."),
+        pokemon: str = commands.parameter(description="Pokémon name(s), comma separated."),
     ):
         g_id = str(ctx.guild.id)
         u_id = str(member.id)
@@ -623,7 +839,7 @@ class PokePings(commands.Cog):
 
         raw_targets = {p.strip().lower() for p in pokemon.split(",") if p.strip()}
         if not raw_targets:
-            return await send_usage(ctx, note="Please specify at least one Pokémon name.")
+            return await send_usage(ctx, note="Give a Pokémon name.")
 
         targets = await self._map_targets(raw_targets, user_list)
         removed, not_found = [], []
@@ -657,7 +873,7 @@ class PokePings(commands.Cog):
         ctx: commands.Context,
         member: discord.Member = commands.parameter(
             default=None,
-            description="Member to clear. Leave empty to clear everyone's reserves.",
+            description="Member. Empty = everyone.",
         ),
     ):
         g_id = str(ctx.guild.id)
@@ -665,10 +881,10 @@ class PokePings(commands.Cog):
         if member:
             u_id = str(member.id)
             await self.set_ping_data(g_id, "re", u_id, [])
-            await ctx.reply(embed=make_embed(description=f"🧹 Cleared all reserves for {member.mention}!"), mention_author=False)
+            await ctx.reply(embed=make_embed(description=f"🧹 Cleared {member.mention}'s reserves."), mention_author=False)
         else:
             await self.clear_ping_category(g_id, "re")
-            await ctx.reply(embed=make_embed(description="🧹 Cleared **ALL** reserves for this server!"), mention_author=False)
+            await ctx.reply(embed=make_embed(description="🧹 Cleared all reserves."), mention_author=False)
 
     # --- Type & Region Commands ---
 
@@ -679,7 +895,7 @@ class PokePings(commands.Cog):
         *,
         target: str = commands.parameter(
             default=None,
-            description="Type(s) to toggle, separated by spaces or commas. Leave empty to open the menu.",
+            description="Type(s) to toggle. Empty = menu.",
         ),
     ):
         g_id = str(ctx.guild.id)
@@ -705,7 +921,7 @@ class PokePings(commands.Cog):
                 invalid_targets.append(t_in)
 
         if not valid_targets:
-            await send_usage(ctx, note=f"Invalid type(s). Valid types are: {', '.join(TYPES)}")
+            await send_usage(ctx, note=f"Invalid. Valid: {', '.join(TYPES)}")
             return
 
         user_types = await self.get_ping_data(g_id, "tp", u_id, default=[])
@@ -738,7 +954,7 @@ class PokePings(commands.Cog):
         *,
         target: str = commands.parameter(
             default=None,
-            description="Region(s) or Gmax/Paradox/Eevos to toggle, separated by spaces or commas. Leave empty to open the menu.",
+            description="Region(s) or Gmax/Paradox/Eevos. Empty = menu.",
         ),
     ):
         g_id = str(ctx.guild.id)
@@ -765,7 +981,7 @@ class PokePings(commands.Cog):
                 invalid_targets.append(r_in)
 
         if not valid_targets:
-            await send_usage(ctx, note=f"Invalid region/category. Valid options are: {', '.join(all_items)}")
+            await send_usage(ctx, note=f"Invalid. Valid: {', '.join(all_items)}")
             return
 
         user_regions = await self.get_ping_data(g_id, "rp", u_id, default=[])
