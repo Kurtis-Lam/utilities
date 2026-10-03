@@ -241,21 +241,21 @@ class Catches(commands.Cog):
 
     @commands.hybrid_command(
         name="catcheslink",
-        description="Link two guilds together permanently so their catch data merges.",
+        description="Link two servers so their catches merge.",
     )
     @commands.has_permissions(administrator=True)
     async def catches_link(
         self,
         ctx,
-        guild_id_1: str = commands.parameter(description="ID of the first server to link."),
-        guild_id_2: str = commands.parameter(description="ID of the second server to link."),
+        guild_id_1: str = commands.parameter(description="First server ID."),
+        guild_id_2: str = commands.parameter(description="Second server ID."),
     ):
         if not (guild_id_1.isdigit() and guild_id_2.isdigit()):
             return await send_usage(ctx, note="Guild IDs must be numbers.")
 
         if guild_id_1 == guild_id_2:
             return await self._send_and_clean(
-                ctx, error_embed("You cannot link a guild to itself!")
+                ctx, error_embed("Can't link a server to itself.")
             )
 
         group1 = await self.get_group_id(guild_id_1)
@@ -263,7 +263,7 @@ class Catches(commands.Cog):
 
         if group1 == group2:
             return await self._send_and_clean(
-                ctx, info_embed("These guilds are already linked!")
+                ctx, info_embed("Already linked.")
             )
 
         target_group = group1
@@ -316,11 +316,11 @@ class Catches(commands.Cog):
 
         await self._send_and_clean(
             ctx,
-            success_embed(f"Linked Guild `{guild_id_1}` & `{guild_id_2}`! All catch records merged."),
+            success_embed(f"Linked `{guild_id_1}` & `{guild_id_2}`. Catches merged."),
         )
 
     @commands.hybrid_command(
-        name="catches", description="View your personalized Pokétwo catch profile card."
+        name="catches", description="View your catch stats."
     )
     async def view_catches(
         self,
@@ -330,12 +330,12 @@ class Catches(commands.Cog):
         ),
     ):
         if not ctx.guild:
-            return await ctx.send(embed=error_embed("This command can only be used in a server!"))
+            return await ctx.send(embed=error_embed("Server only."))
 
         tf_config = self.parse_timeframe(timeframe)
         if not tf_config:
             return await send_usage(
-                ctx, note="Invalid timeframe! Use `d`/`daily`, `w`/`weekly`, `m`/`monthly`, or `all`."
+                ctx, note="Use `d`, `w`, `m` or `all`."
             )
 
         daily_k, weekly_k, monthly_k = get_hkt_period_keys()
@@ -381,7 +381,7 @@ class Catches(commands.Cog):
             f"🗓️ **Monthly:** `{counts['monthly']:,}`\n"
             f"👑 **All-Time:** `{counts['alltime']:,}`"
         )
-        embed.add_field(name="📊 Period Breakdown", value=overview_text, inline=True)
+        embed.add_field(name="📊 Periods", value=overview_text, inline=True)
 
         reset_unix = get_next_reset_unix(active_tf_key)
         if reset_unix:
@@ -392,7 +392,7 @@ class Catches(commands.Cog):
             )
 
         embed.set_footer(
-            text=f"Server ID: {ctx.guild.id} • Pokétwo Tracker",
+            text=f"Server ID: {ctx.guild.id}",
             icon_url=ctx.guild.icon.url if ctx.guild.icon else None,
         )
         await ctx.send(embed=embed)
@@ -400,7 +400,7 @@ class Catches(commands.Cog):
     @commands.hybrid_command(
         name="catchleaderboard",
         aliases=["clb"],
-        description="View the server's top Pokétwo catch leaders.",
+        description="Server catch leaderboard.",
     )
     async def catch_leaderboard(
         self,
@@ -410,12 +410,12 @@ class Catches(commands.Cog):
         ),
     ):
         if not ctx.guild:
-            return await ctx.send(embed=error_embed("This command can only be used in a server!"))
+            return await ctx.send(embed=error_embed("Server only."))
 
         tf_config = self.parse_timeframe(timeframe)
         if not tf_config:
             return await send_usage(
-                ctx, note="Invalid timeframe! Use `d`/`daily`, `w`/`weekly`, `m`/`monthly`, or `all`."
+                ctx, note="Use `d`, `w`, `m` or `all`."
             )
 
         daily_k, weekly_k, monthly_k = get_hkt_period_keys()
@@ -470,11 +470,11 @@ class Catches(commands.Cog):
         )
 
         reset_unix = get_next_reset_unix(active_key)
-        reset_str = f"⏱️ Period resets <t:{reset_unix}:R>\n\n" if reset_unix else ""
+        reset_str = f"⏱️ Resets <t:{reset_unix}:R>\n\n" if reset_unix else ""
 
         if not top_catches:
             embed.description = (
-                f"{reset_str}*No catch data available for this timeframe yet.*"
+                f"{reset_str}*No data yet.*"
             )
         else:
 
@@ -505,7 +505,7 @@ class Catches(commands.Cog):
             embed.description = reset_str + "\n".join(lines)
 
         embed.add_field(
-            name="━━━━ Your Position ━━━━",
+            name="Your Position",
             value=f"👤 **Rank:** `{user_rank_str}` ; 🎯 **Catches:** `{author_count:,}`",
             inline=False,
         )
