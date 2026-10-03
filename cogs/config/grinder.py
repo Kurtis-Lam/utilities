@@ -77,7 +77,7 @@ def parse_indices_and_duration(raw_str: str):
     return indices, duration
 
 
-# --- HELPER: FORMAT ID WITH NAME ---
+# --- HELPER: FORMAT ID WITH NAME (CHANNELS & GUILDS) ---
 def format_id_with_name(id_str: str, guild: Optional[discord.Guild] = None) -> str:
     if not id_str or not id_str.isdigit():
         return id_str
@@ -90,14 +90,17 @@ def format_id_with_name(id_str: str, guild: Optional[discord.Guild] = None) -> s
         if channel:
             return f"{id_str} [{channel.name}]"
         
-        # Check if the ID matches the current guild itself
+        # Check if ID matches current guild itself
         if guild.id == target_id:
             return f"{id_str} [{guild.name}]"
 
-        # Check in bot's cached guilds if guild.me exists / via client cache
+        # Check in bot's cached guilds via guild._state
         if guild._state and hasattr(guild._state, "_get_guild"):
             g = guild._state._get_guild(target_id)
             if g:
+                g_chan = g.get_channel(target_id)
+                if g_chan:
+                    return f"{id_str} [{g_chan.name}]"
                 return f"{id_str} [{g.name}]"
 
     return id_str
@@ -110,6 +113,7 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
 
     mode_lower = mode.lower()
 
+    # 1) Key-Value style targets ("chid=123, pokes=abc")
     if "=" in target or ":" in target:
         subparts = [p.strip() for p in re.split(r'[,;]', target) if p.strip()]
         if all("=" in p or ":" in p for p in subparts):
@@ -119,41 +123,69 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
                 k, v = p.split(sep, 1)
                 key_clean = k.strip()
                 val_clean = v.strip()
-                if "id" in key_clean.lower() or "chid" in key_clean.lower() or "channel" in key_clean.lower() or "guild" in key_clean.lower():
-                    val_clean = ", ".join([format_id_with_name(item.strip(), guild) for item in val_clean.split(",") if item.strip()])
-                aspects.append((key_clean.capitalize(), val_clean))
+                formatted_tokens = []
+                for token in val_clean.replace(',', ' ').split():
+                    formatted_tokens.append(format_id_with_name(token, guild))
+                aspects.append((key_clean.capitalize(), ", ".join(formatted_tokens) if formatted_tokens else val_clean))
             return aspects
 
+    # 2) autocatch, dotcatch, commaedit
     if mode_lower in ["autocatch", "dotcatch", "commaedit"]:
         parts = [p.strip() for p in target.split(',') if p.strip()]
-        chids = []
-
-        for p in parts:
-            if p.isdigit():
-                chids.append(format_id_with_name(p, guild))
-
         aspects = []
-        if chids:
-            aspects.append(("Target ID", ", ".join(chids)))
+        for i, p in enumerate(parts):
+            tokens = p.split()
+            fmt_tokens = [format_id_with_name(tok, guild) for tok in tokens]
+            val = ", ".join(fmt_tokens)
+            if i == 0:
+                aspects.append(("Chid", val))
+            elif i == 1:
+                aspects.append(("Pokemons", val))
+            elif i == 2:
+                aspects.append(("Datafile", val))
+            else:
+                aspects.append((f"Arg{i+1}", val))
         return aspects
 
+    # 3) periodicmsg
     elif mode_lower == "periodicmsg":
         parts = [p.strip() for p in re.split(r'[,;]', target) if p.strip()]
         labels = ["Chid", "Message", "Time1", "Time2"]
         aspects = []
         for i, part in enumerate(parts):
             lbl = labels[i] if i < len(labels) else f"Arg{i+1}"
-            if lbl.lower() in ["chid", "channel"]:
-                part = format_id_with_name(part, guild)
-            aspects.append((lbl, part))
+            if i == 0 or lbl.lower() in ["chid", "channel"]:
+                tokens = part.split()
+                fmt_tokens = [format_id_with_name(tok, guild) for tok in tokens]
+                val = ", ".join(fmt_tokens)
+            else:
+                val = part
+            aspects.append((lbl, val))
         return aspects
 
-    else:
-        parts = [p.strip() for p in target.split() if p.strip()]
+    # 4) spam
+    elif mode_lower == "spam":
+        parts = [p.strip() for p in re.split(r'[,;]', target) if p.strip()]
+        if not parts:
+            parts = [p.strip() for p in target.split() if p.strip()]
         aspects = []
         for i, part in enumerate(parts):
-            val = format_id_with_name(part, guild) if part.isdigit() else part
-            aspects.append((f"Arg{i+1}", val))
+            lbl = "Chid" if i == 0 else f"Arg{i+1}"
+            tokens = part.split()
+            fmt_tokens = [format_id_with_name(tok, guild) for tok in tokens]
+            aspects.append((lbl, ", ".join(fmt_tokens)))
+        return aspects
+
+    # 5) Custom / Other modes
+    else:
+        parts = [p.strip() for p in re.split(r'[,;]', target) if p.strip()]
+        if not parts:
+            parts = [p.strip() for p in target.split() if p.strip()]
+        aspects = []
+        for i, part in enumerate(parts):
+            tokens = part.split()
+            fmt_tokens = [format_id_with_name(tok, guild) for tok in tokens]
+            aspects.append((f"Arg{i+1}", ", ".join(fmt_tokens)))
         return aspects
 
 
@@ -169,7 +201,7 @@ def get_config_details(cfg: dict) -> dict:
     details = {
         "accIndex": acc_idx,
         "token": cfg.get("token", ""),
-        "chid": aspects.get("target id", aspects.get("chid", "")),
+        "chid": aspects.get("chid", aspects.get("target id", "")),
         "pokemons": aspects.get("pokemons", ""),
         "datafile": aspects.get("datafile", ""),
         "message": aspects.get("message", ""),
@@ -190,7 +222,7 @@ def build_target_string_for_mode(mode: str, fields: dict) -> tuple[str, bool]:
     mode_lower = mode.lower()
 
     if mode_lower in ["autocatch", "dotcatch", "commaedit"]:
-        target_ids = str(fields.get("target id", fields.get("chid", "")) or "").strip()
+        target_ids = str(fields.get("chid", fields.get("target id", "")) or "").strip()
         pokes = str(fields.get("pokemons", "") or "").strip()
         datafile = str(fields.get("datafile", "") or "").strip()
 
@@ -411,7 +443,7 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
             target_str = cfg.get('target', '')
             aspects = parse_target_aspects(mode, target_str, guild)
             for label, val in aspects:
-                if label.lower() in ["target id", "chid", "channel"] and val:
+                if val:
                     line += f"\n  {label}: `{val}`"
 
             lines.append(line)
@@ -462,7 +494,7 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
             target_str = cfg.get('target', '')
             aspects = parse_target_aspects(cfg_mode, target_str, guild)
             for label, val in aspects:
-                if label.lower() in ["target id", "chid", "channel"] and val:
+                if val:
                     line += f"\n  {label}: `{val}`"
 
             lines.append(line)
