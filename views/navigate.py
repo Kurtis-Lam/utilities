@@ -1,4 +1,3 @@
-from typing import List, Optional
 import discord
 
 try:
@@ -16,8 +15,8 @@ class PaginatorView(discord.ui.View):
 
     def __init__(
         self,
-        pages: List[discord.Embed],
-        user_id: Optional[int] = None,
+        pages: list[discord.Embed],
+        user_id: int | None = None,
         timeout: float = 180.0,
         show_first_last: bool = False,
     ):
@@ -25,7 +24,7 @@ class PaginatorView(discord.ui.View):
         self.pages = pages
         self.user_id = user_id
         self.current_page = 0
-        self.message: Optional[discord.Message] = None
+        self.message: discord.Message | None = None
 
         if show_first_last and len(pages) > 2:
             self.first_button = discord.ui.Button(
