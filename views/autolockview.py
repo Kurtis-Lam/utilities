@@ -50,14 +50,14 @@ ROLE_COMMAND_HINTS = {
 }
 
 CATEGORY_DESCRIPTIONS = {
-    "re": "Triggers on Reserves (`.re`) notifications. Highest unlock priority (res > sh > cl > others).",
-    "tp": "Triggers on Type Ping (`.tp`) notifications.",
-    "rp": "Triggers on Regional Ping (`.rp`) notifications.",
-    "sh": "Triggers on Shiny Hunt (`.sh`) notifications.",
-    "cl": "Triggers on Collection (`.cl`) notifications.",
+    "re": "Reserves (`.re`) pings. Top unlock priority.",
+    "tp": "Type pings (`.tp`).",
+    "rp": "Regional pings (`.rp`).",
+    "sh": "Shiny hunt (`.sh`) pings.",
+    "cl": "Collection (`.cl`) pings.",
 }
 
-LEGEND = "Green = lock on  •  Grey = lock off"
+LEGEND = "Green = on  •  Grey = off"
 
 
 # --- Page builders ---------------------------------------------------------------
@@ -107,7 +107,7 @@ def _parse_whitelist_items(raw: str) -> list[str]:
 class DelayModal(discord.ui.Modal, title="Set Lock Delay"):
     delay_seconds = discord.ui.TextInput(
         label="Delay in seconds",
-        placeholder=f"A whole number from {MIN_DELAY} to {MAX_DELAY}, e.g. 15",
+        placeholder=f"{MIN_DELAY}-{MAX_DELAY}, e.g. 15",
         required=True,
         max_length=5,
     )
@@ -123,16 +123,13 @@ class DelayModal(discord.ui.Modal, title="Set Lock Delay"):
         raw = str(self.delay_seconds.value).strip()
         if not raw.isdigit():
             return await interaction.response.send_message(
-                embed=error_embed("Please enter a whole number of seconds."), ephemeral=True
+                embed=error_embed("Enter whole seconds."), ephemeral=True
             )
 
         delay = int(raw)
         if not (MIN_DELAY <= delay <= MAX_DELAY):
             return await interaction.response.send_message(
-                embed=error_embed(
-                    f"Delay must be between `{MIN_DELAY}` and `{MAX_DELAY}` seconds.\n"
-                    "To lock instantly, press **Turn Delay Off** instead."
-                ),
+                embed=error_embed(f"Delay must be {MIN_DELAY}-{MAX_DELAY}s."),
                 ephemeral=True,
             )
 
@@ -140,14 +137,14 @@ class DelayModal(discord.ui.Modal, title="Set Lock Delay"):
         cfg = await self.cog.get_category_config(self.guild_id, self.category)
 
         await self.parent_view.reload(interaction)
-        note = "" if cfg.get("delay_enabled", True) else "\nThe delay is currently **off**, so this lock still fires instantly."
+        note = "" if cfg.get("delay_enabled", True) else " (delay is off)"
         await interaction.followup.send(embed=success_embed(f"Lock delay set to `{delay}s`.{note}"), ephemeral=True)
 
 
 class WhitelistModal(discord.ui.Modal):
     target_input = discord.ui.TextInput(
         label="Channel / Category / Index / *",
-        placeholder="Channel mention, ID, list number, or * for all (comma separated)",
+        placeholder="Mention, ID, number or *, comma separated",
         required=True,
     )
 
@@ -164,7 +161,7 @@ class WhitelistModal(discord.ui.Modal):
 
         if not _parse_whitelist_items(raw_val):
             return await interaction.response.send_message(
-                embed=error_embed("Couldn't find a valid channel, category ID, list number, or `*` in that."),
+                embed=error_embed("No valid channel, ID, number or `*`."),
                 ephemeral=True,
             )
 
