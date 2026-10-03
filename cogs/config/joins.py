@@ -11,13 +11,13 @@ from .base import config_group
 @config_group.command(
     name="joins", 
     aliases=["j"], 
-    description="Configure server welcome, greet messages, and autoroles"
+    description="Welcome, greet pings and autoroles."
 )
 @commands.has_permissions(manage_guild=True)
 async def joinsconfig(ctx: commands.Context):
     cog = ctx.bot.get_cog("Joins")
     if not cog:
-        return await ctx.send(embed=error_embed("The Joins module is currently unavailable."))
+        return await ctx.send(embed=error_embed("Joins module unavailable."))
 
     config = await cog.get_guild_config(ctx.guild.id)
     embed = get_welcome_embed(config)
