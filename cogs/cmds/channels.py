@@ -8,6 +8,7 @@ from discord.ext import commands
 # Import ConfirmView from views/common.py
 from views.common import ConfirmView
 from views.embeds import handle_common_error, send_usage
+from views.prompts import ask, is_skip, one_line
 
 
 class Channels(commands.Cog):
@@ -25,7 +26,7 @@ class Channels(commands.Cog):
             description=prompt,
             color=discord.Color.gold()
         )
-        msg = await ctx.send(embed=embed, view=view)
+        msg = await ctx.reply(embed=embed, view=view, mention_author=False)
         await view.wait()
         
         if view.value is True:
@@ -51,45 +52,79 @@ class Channels(commands.Cog):
 
     @commands.hybrid_command(aliases=["cch"], name="createchannel", description="Creates a new text channel.", with_app_command=True)
     @app_commands.describe(
-        name="The name of the new channel.",
+        name="The name of the new channel. Leave blank and I'll ask you step by step.",
         category="The category to create the channel in. Defaults to the current category.",
         preaction="Automatically lock or hide the channel upon creation."
     )
     @commands.has_permissions(manage_channels=True)
     async def createchannel(
-        self, 
-        ctx, 
-        name: str = commands.parameter(description="The name of the new channel."), 
+        self,
+        ctx,
+        name: typing.Optional[str] = commands.parameter(default=None, description="The name of the new channel (leave blank to be asked)."),
         category: typing.Optional[discord.CategoryChannel] = commands.parameter(default=None, description="The category to create the channel in. Defaults to current category."),
         preaction: typing.Optional[typing.Literal["prelock", "prehide", "both"]] = commands.parameter(default=None, description="Apply prelock, prehide, or both upon creation.")
     ):
         prelock = False
         prehide = False
 
-        # If no category was provided, default to the current channel's category
-        if category is None and getattr(ctx.channel, "category", None) is not None:
-            category = ctx.channel.category
-
         if ctx.interaction is None:
             content = ctx.message.content.lower()
-            
+
             # Check and parse flags safely from the raw message content for prefix commands
             if "--prelock" in content:
                 prelock = True
             if "--prehide" in content:
                 prehide = True
-                
+
             # Remove flags from the parsed name in case they were captured in quotes or text
-            name = re.sub(r'(?i)--prelock', '', name).strip()
+            name = re.sub(r'(?i)--prelock', '', name or "").strip()
             name = re.sub(r'(?i)--prehide', '', name).strip()
-            
-            if not name:
-                return await send_usage(ctx, note="Please provide a name for the channel.")
         else:
+            name = (name or "").strip()
             if preaction in ("prelock", "both"):
                 prelock = True
             if preaction in ("prehide", "both"):
                 prehide = True
+
+        # No name given -> ask the questions one by one (30 seconds each)
+        if not name:
+            reply = await ask(ctx, "What do you want the **channel name** to be?")
+            if reply is None:
+                return
+            name = reply.content.strip()
+            if not name:
+                return await ctx.reply(embed=one_line("❌ The channel name can't be empty. Cancelled."), mention_author=False)
+
+            reply = await ask(
+                ctx,
+                "Which **category** should it be created in? Mention / ID / name it, "
+                "or type `skip` to use this channel's category."
+            )
+            if reply is None:
+                return
+            if not is_skip(reply.content):
+                try:
+                    category = await commands.CategoryChannelConverter().convert(ctx, reply.content.strip())
+                except commands.BadArgument:
+                    return await ctx.reply(embed=one_line("❌ Couldn't find that category. Cancelled."), mention_author=False)
+
+            if not (prelock or prehide):
+                reply = await ask(ctx, "Which **preaction** do you want? `prelock`, `prehide`, `both`, or `none`.")
+                if reply is None:
+                    return
+                choice = reply.content.strip().lower()
+                if choice in ("prelock", "lock"):
+                    prelock = True
+                elif choice in ("prehide", "hide"):
+                    prehide = True
+                elif choice == "both":
+                    prelock = prehide = True
+                elif not is_skip(choice):
+                    return await ctx.reply(embed=one_line("❌ Invalid preaction. Cancelled."), mention_author=False)
+
+        # If no category was provided, default to the current channel's category
+        if category is None and getattr(ctx.channel, "category", None) is not None:
+            category = ctx.channel.category
 
         overwrites = {}
 
@@ -97,14 +132,14 @@ class Channels(commands.Cog):
             # If a category is provided or inferred, clone its overwrites so the channel still syncs
             if category:
                 overwrites = {target: overwrite for target, overwrite in category.overwrites.items()}
-                
+
             default_overwrite = overwrites.get(ctx.guild.default_role, discord.PermissionOverwrite())
-            
+
             if prelock:
                 default_overwrite.send_messages = False
             if prehide:
                 default_overwrite.view_channel = False
-                
+
             overwrites[ctx.guild.default_role] = default_overwrite
 
             # Ensure the bot keeps channel permissions
@@ -112,18 +147,18 @@ class Channels(commands.Cog):
                 overwrites[ctx.guild.me] = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
 
             new_channel = await ctx.guild.create_text_channel(
-                name=name, 
-                category=category, 
-                overwrites=overwrites, 
+                name=name,
+                category=category,
+                overwrites=overwrites,
                 reason=f"Created by {ctx.author}"
             )
         else:
             new_channel = await ctx.guild.create_text_channel(
-                name=name, 
-                category=category, 
+                name=name,
+                category=category,
                 reason=f"Created by {ctx.author}"
             )
-        
+
         # Format the success message
         status_flags = []
         if prelock: status_flags.append("🔒 Locked")
@@ -135,7 +170,7 @@ class Channels(commands.Cog):
             description=f"Successfully created channel {new_channel.mention}{status_text}.",
             color=discord.Color.green()
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(aliases=["dch"], name="deletechannel", description="Deletes a text channel.", with_app_command=True)
     @app_commands.describe(
@@ -159,31 +194,53 @@ class Channels(commands.Cog):
                 description=f"Successfully deleted `{target.name}`.",
                 color=discord.Color.red()
             )
-            await ctx.send(embed=embed)
+            await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(aliases=["rch"], name="renamechannel", description="Renames a text channel.", with_app_command=True)
     @app_commands.describe(
-        new_name="The new name for the channel.",
+        new_name="The new name for the channel. Leave blank and I'll ask you step by step.",
         channel="The channel to rename. Defaults to the current channel."
     )
     @commands.has_permissions(manage_channels=True)
     async def renamechannel(
         self,
         ctx,
-        new_name: str,
+        new_name: typing.Optional[str] = None,
         channel: typing.Optional[discord.TextChannel] = None
     ):
         target_channel = channel or ctx.channel
+
+        # No name given -> ask the questions one by one (30 seconds each)
+        if not new_name:
+            reply = await ask(
+                ctx,
+                "Which **channel** do you want to rename? Mention / ID it, or type `skip` for this channel."
+            )
+            if reply is None:
+                return
+            if not is_skip(reply.content):
+                try:
+                    target_channel = await commands.TextChannelConverter().convert(ctx, reply.content.strip())
+                except commands.BadArgument:
+                    return await ctx.reply(embed=one_line("❌ Couldn't find that channel. Cancelled."), mention_author=False)
+
+            reply = await ask(ctx, f"What do you want the **new name** for {target_channel.mention} to be?")
+            if reply is None:
+                return
+            new_name = reply.content.strip()
+            if not new_name:
+                return await ctx.reply(embed=one_line("❌ The new name can't be empty. Cancelled."), mention_author=False)
+
         old_name = target_channel.name
-        
+
         await target_channel.edit(name=new_name, reason=f"Renamed by {ctx.author}")
-        
+
         embed = discord.Embed(
             title="✏️ Channel Renamed",
             description=f"Successfully renamed {target_channel.mention} from `{old_name}` to `{new_name}`.",
             color=discord.Color.green()
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(aliases=["lch"], name="lockchannel", description="Locks a text channel for a user or role.", with_app_command=True)
     @app_commands.describe(
@@ -202,11 +259,10 @@ class Channels(commands.Cog):
         await target_channel.set_permissions(role_or_member, send_messages=False)
         
         embed = discord.Embed(
-            title="🔒 Channel Locked",
-            description=f"{target_channel.mention} has been locked for {role_or_member.mention}.",
+            description=f"🔒 {target_channel.mention} has been locked for {role_or_member.mention}.",
             color=discord.Color.dark_grey()
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(aliases=["uch"], name="unlockchannel", description="Unlocks a text channel for a user or role.", with_app_command=True)
     @app_commands.describe(
@@ -225,11 +281,10 @@ class Channels(commands.Cog):
         await target_channel.set_permissions(role_or_member, send_messages=True)
         
         embed = discord.Embed(
-            title="🔓 Channel Unlocked",
-            description=f"{target_channel.mention} has been unlocked for {role_or_member.mention}.",
+            description=f"🔓 {target_channel.mention} has been unlocked for {role_or_member.mention}.",
             color=discord.Color.green()
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(aliases=["hch"], name="hidechannel", description="Hides a text channel from a user or role.", with_app_command=True)
     @app_commands.describe(
@@ -248,11 +303,10 @@ class Channels(commands.Cog):
         await target_channel.set_permissions(role_or_member, view_channel=False)
         
         embed = discord.Embed(
-            title="🙈 Channel Hidden",
-            description=f"{target_channel.mention} is now hidden from {role_or_member.mention}.",
+            description=f"🙈 {target_channel.mention} is now hidden from {role_or_member.mention}.",
             color=discord.Color.dark_grey()
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(aliases=["uhch"], name="unhidechannel", description="Unhides a text channel for a user or role.", with_app_command=True)
     @app_commands.describe(
@@ -271,11 +325,10 @@ class Channels(commands.Cog):
         await target_channel.set_permissions(role_or_member, view_channel=True)
         
         embed = discord.Embed(
-            title="👁️ Channel Unhidden",
-            description=f"{target_channel.mention} is now visible to {role_or_member.mention}.",
+            description=f"👁️ {target_channel.mention} is now visible to {role_or_member.mention}.",
             color=discord.Color.green()
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="nuke", description="Nukes a text channel by cloning and replacing it.", with_app_command=True)
     @app_commands.describe(
@@ -304,32 +357,6 @@ class Channels(commands.Cog):
             color=discord.Color.red()
         )
         await new_channel.send(embed=embed)
-
-    @commands.hybrid_command(name="sac", aliases=["syncallchannels"], description="Sync all channel permissions with their categories.", with_app_command=True)
-    @commands.has_permissions(administrator=True)
-    async def sac(self, ctx):
-        synced_count = 0
-        skipped_count = 0
-
-        await ctx.defer()
-
-        for channel in ctx.guild.channels:
-            if channel.category is not None:
-                try:
-                    await channel.edit(sync_permissions=True)
-                    synced_count += 1
-                except discord.HTTPException:
-                    skipped_count += 1
-            else:
-                skipped_count += 1
-
-        embed = discord.Embed(
-            title="🔄 Channels Synced",
-            description=f"✅ Synced **{synced_count}** channel(s) with their categories.\n⏭️ Skipped **{skipped_count}** channel(s).",
-            color=discord.Color.green()
-        )
-        await ctx.send(embed=embed)
-
 
 async def setup(bot):
     await bot.add_cog(Channels(bot))
