@@ -19,7 +19,7 @@ async def get_poketwo_target(guild: discord.Guild):
 @config_group.command(
     name="spawns",
     aliases=["s"],
-    description="Display and edit server autolock configurations for rares, regionals, and users."
+    description="Edit rare, regional and user autolocks."
 )
 @commands.has_permissions(administrator=True)
 async def spawnsconfig(ctx: commands.Context):
@@ -28,7 +28,7 @@ async def spawnsconfig(ctx: commands.Context):
     
     # Optional safety check just in case the cog failed to load
     if cog is None:
-        return await ctx.send(embed=error_embed("Internal error: `SpawnsConfig` cog is not loaded."))
+        return await ctx.send(embed=error_embed("SpawnsConfig is not loaded."))
 
     # Use the retrieved cog instead of ctx.cog
     embed = themed(await cog.build_config_embed(ctx.guild))
@@ -58,7 +58,7 @@ class UnlockView(discord.ui.View):
         await interaction.response.edit_message(view=self)
         await interaction.followup.send(
             embed=make_embed(
-                description=f"🔓 {interaction.channel.mention} was unlocked by {interaction.user.mention}."
+                description=f"🔓 Unlocked by {interaction.user.mention}."
             )
         )
 
@@ -102,7 +102,7 @@ class SpawnsConfig(commands.Cog):
 
         def format_mentions(var_list, is_role=True):
             if not var_list:
-                return "None configured"
+                return "None"
 
             mentions = []
             for item in var_list:
@@ -131,7 +131,7 @@ class SpawnsConfig(commands.Cog):
             return "\n".join(mentions)
 
         embed = discord.Embed(
-            title=f"⚙️ Spawns Configuration — {guild.name}", color=discord.Color.blue()
+            title=f"⚙️ Spawns — {guild.name}", color=discord.Color.blue()
         )
         embed.add_field(
             name="Rare Roles",
@@ -208,7 +208,7 @@ class SpawnsConfig(commands.Cog):
 
         self.pending_locks.add(message.channel.id)
         status_msg = await message.channel.send(
-            embed=make_embed(description="⏳ **Auto-Lock Triggered:** Locking in 15 seconds…")
+            embed=make_embed(description="⏳ Locking in 15s…")
         )
 
         def poketwo_check(m: discord.Message) -> bool:
@@ -235,7 +235,7 @@ class SpawnsConfig(commands.Cog):
 
             lock_embed = discord.Embed(
                 title="🔒 Channel Locked",
-                description="Use `.u` or the button to unlock!",
+                description="Use `.u` or the button.",
                 color=discord.Color.red(),
             )
             lock_msg = await message.channel.send(embed=lock_embed, view=UnlockView(cog=self))
