@@ -12,6 +12,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
+from views.aiviews import AIConfigView
 from views.embeds import (
     BRAND_COLOR,
     err_embed,
@@ -22,6 +23,7 @@ from views.embeds import (
     send_usage,
     warn_embed,
 )
+from views.navigate import PaginatorView
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -98,6 +100,10 @@ else:
 # MongoDB location of the per-server AI channel whitelist (same DB as dex.py).
 AI_DB_NAME = "utilities"
 AI_CHANNELS_COLLECTION = "aichannels"
+
+# Memory: messages kept per (channel, user), and characters per page of `.ai memory`.
+MAX_MEMORY_MESSAGES = 10
+MEMORY_PAGE_CHAR_LIMIT = 1500
 
 BUSY_REACTION = "⏳"
 BUSY_DELETE_AFTER_SECONDS = 5
@@ -176,6 +182,104 @@ def extract_inline_thinking(content: str) -> tuple[str, str]:
     found = [m.group(2).strip() for m in _THINK_TAG_RE.finditer(content) if m.group(2).strip()]
     cleaned = _THINK_TAG_RE.sub("", content).strip()
     return "\n\n".join(found), cleaned
+
+
+# ---------------------------------------------------------------------------
+# LaTeX clean-up
+# ---------------------------------------------------------------------------
+# Discord can't render LaTeX, so models that answer with $$\frac{a}{b}$$ and
+# friends produce unreadable text. The system prompt tells the model not to do
+# that, and strip_latex() is the safety net: it finds math segments and turns
+# them into readable plain text with Unicode symbols.
+
+_LATEX_SYMBOLS = {
+    "times": "×", "cdot": "·", "div": "÷", "approx": "≈", "pm": "±", "mp": "∓",
+    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
+    "rightarrow": "→", "to": "→", "leftarrow": "←", "Rightarrow": "⇒", "leftrightarrow": "↔",
+    "infty": "∞", "degree": "°", "circ": "°", "sim": "∼", "propto": "∝", "angle": "∠",
+    "therefore": "∴", "partial": "∂", "nabla": "∇", "sum": "Σ", "prod": "∏", "int": "∫",
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "theta": "θ",
+    "lambda": "λ", "mu": "μ", "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "phi": "φ",
+    "omega": "ω", "Delta": "Δ", "Sigma": "Σ", "Omega": "Ω", "Pi": "Π", "Theta": "Θ",
+    "Phi": "Φ", "Lambda": "Λ", "ldots": "…", "dots": "…", "cdots": "…",
+    "left": "", "right": "", "big": "", "Big": "", "quad": " ", "qquad": "  ",
+}
+
+_SUPERSCRIPT = str.maketrans("0123456789+-=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ")
+_SUBSCRIPT = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+_SUPERSCRIPT_OK = set("0123456789+-=()n")
+_SUBSCRIPT_OK = set("0123456789+-=()")
+
+_LATEX_PATTERNS = [
+    re.compile(r"\$\$(.+?)\$\$", re.DOTALL),                # $$ ... $$
+    re.compile(r"\\\[(.+?)\\\]", re.DOTALL),                # \[ ... \]
+    re.compile(r"\\\((.+?)\\\)", re.DOTALL),                # \( ... \)
+    # Inline $ ... $ — only when it looks like math (contains \ ^ _ { } or =),
+    # so ordinary text like "costs $5 and $10" is left alone.
+    re.compile(r"(?<![\\$\w])\$(?![\s$])([^$\n]*?[\\^_{}=][^$\n]*?)(?<![\s$])\$(?![\w$])"),
+]
+
+
+def _latex_wrap(x: str) -> str:
+    x = x.strip()
+    return x if re.fullmatch(r"[\w.%]+", x) else f"({x})"
+
+
+def _latex_sup(m: "re.Match") -> str:
+    body = m.group(1).strip()
+    if body and set(body) <= _SUPERSCRIPT_OK:
+        return body.translate(_SUPERSCRIPT)
+    return f"^({body})" if len(body) > 1 else f"^{body}"
+
+
+def _latex_sub(m: "re.Match") -> str:
+    body = m.group(1).strip()
+    if body and set(body) <= _SUBSCRIPT_OK:
+        return body.translate(_SUBSCRIPT)
+    return f"_{body}"
+
+
+def _latex_to_text(expr: str) -> str:
+    s = expr.strip()
+    s = s.replace("\\\\", " ")
+    s = s.replace("\\left.", "").replace("\\right.", "")
+    s = re.sub(r"\\[,;:! ]", " ", s)
+    for esc in ("%", "$", "&", "#", "_"):
+        s = s.replace("\\" + esc, esc)
+
+    # Commands that take {arguments}. Innermost-first, repeated until stable.
+    for _ in range(12):
+        prev = s
+        s = re.sub(r"\\[dt]?frac\{([^{}]*)\}\{([^{}]*)\}",
+                   lambda m: f"{_latex_wrap(m.group(1))}/{_latex_wrap(m.group(2))}", s)
+        s = re.sub(r"\\sqrt\{([^{}]*)\}", lambda m: f"√{_latex_wrap(m.group(1))}", s)
+        s = re.sub(r"\\(?:text|textrm|textit|mathrm|mathit|operatorname|mbox|boxed|overline|underline|bar|hat|vec)\{([^{}]*)\}",
+                   r"\1", s)
+        s = re.sub(r"\\(?:mathbf|textbf|boldsymbol)\{([^{}]*)\}", r"**\1**", s)
+        if s == prev:
+            break
+
+    s = re.sub(r"\^\{([^{}]*)\}", _latex_sup, s)
+    s = re.sub(r"\^(-?[0-9n])", lambda m: _latex_sup(re.match(r"(.*)", m.group(1))), s)
+    s = re.sub(r"_\{([^{}]*)\}", _latex_sub, s)
+
+    # Named symbols (\times, \approx, ...). Unknown commands keep their name (\sin -> sin).
+    s = re.sub(r"\\([A-Za-z]+)", lambda m: _LATEX_SYMBOLS.get(m.group(1), m.group(1)), s)
+
+    s = s.replace("{", "").replace("}", "")
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s.strip()
+
+
+def strip_latex(text: str) -> str:
+    """Replaces LaTeX math segments in `text` with readable plain text."""
+    if not text or ("\\" not in text and "$" not in text):
+        return text
+    for pattern in _LATEX_PATTERNS:
+        text = pattern.sub(
+            lambda m: _latex_to_text(next(g for g in m.groups() if g is not None)), text
+        )
+    return text
 
 
 # Embed descriptions can hold 4096 chars; stay a little under it.
@@ -266,7 +370,7 @@ class AIChat(commands.Cog):
         # Memory is keyed by (channel_id, user_id): every user gets their own
         # memory in every channel, and resetting only touches one such slot.
         self.history: dict[tuple[int, int], list] = defaultdict(list)
-        self.max_history = 10
+        self.max_history = MAX_MEMORY_MESSAGES
 
         # guild_id -> set of whitelisted channel ids (mirror of MongoDB).
         self.ai_channels: dict[int, set[int]] = {}
@@ -316,6 +420,60 @@ class AIChat(commands.Cog):
     def _is_ai_channel(self, channel) -> bool:
         guild = getattr(channel, "guild", None)
         return bool(guild) and channel.id in self.ai_channels.get(guild.id, ())
+
+    # -- AI channel whitelist helpers (used by commands and by AIConfigView) --------
+
+    async def add_ai_channels(self, guild_id: int, ids: list[int]) -> tuple[list[int], list[int]]:
+        """Whitelists channels. Returns (newly_added, already_enabled)."""
+        existing = set(await self._fetch_guild_channels(guild_id))
+        to_add = [i for i in ids if i not in existing]
+        already = [i for i in ids if i in existing]
+        if to_add:
+            await self.channels_collection.update_one(
+                {"_id": guild_id},
+                {"$addToSet": {"channels": {"$each": to_add}}},
+                upsert=True,
+            )
+            self.ai_channels.setdefault(guild_id, set()).update(to_add)
+        return to_add, already
+
+    async def remove_ai_channels(self, guild_id: int, ids: list[int]) -> tuple[list[int], list[int]]:
+        """Un-whitelists channels. Returns (removed, wasnt_enabled)."""
+        existing = set(await self._fetch_guild_channels(guild_id))
+        to_remove = [i for i in ids if i in existing]
+        missing = [i for i in ids if i not in existing]
+        if to_remove:
+            await self.channels_collection.update_one(
+                {"_id": guild_id},
+                {"$pull": {"channels": {"$in": to_remove}}},
+            )
+            self.ai_channels.setdefault(guild_id, set()).difference_update(to_remove)
+        return to_remove, missing
+
+    async def clear_ai_channels(self, guild_id: int) -> int:
+        """Removes every AI channel for a server. Returns how many were removed."""
+        existing = await self._fetch_guild_channels(guild_id)
+        if existing:
+            await self.channels_collection.update_one(
+                {"_id": guild_id}, {"$set": {"channels": []}}, upsert=True
+            )
+        self.ai_channels[guild_id] = set()
+        return len(existing)
+
+    async def build_config_embed(self, guild: discord.Guild) -> discord.Embed:
+        try:
+            channel_ids = await self._fetch_guild_channels(guild.id)
+        except Exception as e:
+            print(f"AI Cog: failed to fetch AI channels for guild {guild.id}: {e}")
+            # Fall back to the in-memory copy so the command still works.
+            channel_ids = sorted(self.ai_channels.get(guild.id, set()))
+
+        if channel_ids:
+            listing = "\n".join(f"• <#{cid}>" for cid in channel_ids)
+            description = f"Enabled in **{len(channel_ids)}** channel(s):\n{listing}"
+        else:
+            description = "Not enabled in any channel yet."
+        return make_embed(title="🤖 AI Configuration", description=description)
 
     async def cog_unload(self):
         if self.session and not self.session.closed:
@@ -880,14 +1038,14 @@ class AIChat(commands.Cog):
     async def _require_admin(self, ctx: commands.Context) -> bool:
         """Sends an error and returns False unless this is a server and the author is an administrator."""
         if ctx.guild is None:
-            await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"))
+            await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"), mention_author=False)
             return False
         if not ctx.author.guild_permissions.administrator:
             await ctx.reply(embed=err_embed(
                 "Missing Permissions",
                 "Only **server administrators** can add or remove AI channels.",
                 emoji="🚫",
-            ))
+            ), mention_author=False)
             return False
         return True
 
@@ -907,7 +1065,8 @@ class AIChat(commands.Cog):
         embed.add_field(
             name="⚙️ Admin",
             value=(
-                f"`{p}ai config`\n"
+                f"`{p}ai config` (buttons: add / remove / clear)\n"
+                f"`{p}ai enable` / `{p}ai disable` (this channel)\n"
                 f"`{p}ai add|a <#channel> [...]`\n"
                 f"`{p}ai remove|r <#channel> [...]`"
             ),
@@ -920,27 +1079,64 @@ class AIChat(commands.Cog):
         )
         await ctx.reply(embed=embed, mention_author=False)
 
-    @ai_group.command(name="config", description="See which channels the AI chatbot is enabled in.")
+    @ai_group.command(
+        name="config",
+        description="See which channels the AI chatbot is enabled in (administrators get Add / Remove / Clear buttons).",
+    )
     async def ai_config(self, ctx: commands.Context):
         if ctx.guild is None:
-            return await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"))
+            return await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"), mention_author=False)
 
-        try:
-            channel_ids = await self._fetch_guild_channels(ctx.guild.id)
-        except Exception as e:
-            print(f"AI Cog: failed to fetch AI channels for guild {ctx.guild.id}: {e}")
-            # Fall back to the in-memory copy so the command still works.
-            channel_ids = sorted(self.ai_channels.get(ctx.guild.id, set()))
-
-        p = ctx.clean_prefix
-        if channel_ids:
-            listing = "\n".join(f"• <#{cid}>" for cid in channel_ids)
-            description = f"Enabled in **{len(channel_ids)}** channel(s):\n{listing}"
+        embed = await self.build_config_embed(ctx.guild)
+        if ctx.author.guild_permissions.administrator:
+            view = AIConfigView(self, ctx.author.id, ctx.guild)
+            view.message = await ctx.reply(embed=embed, view=view, mention_author=False)
         else:
-            description = "Not enabled in any channel yet."
+            await ctx.reply(embed=embed, mention_author=False)
 
-        embed = make_embed(title="🤖 AI Configuration", description=description)
-        await ctx.reply(embed=embed, mention_author=False)
+    @ai_group.command(name="enable", description="Enable the AI chatbot in the current channel (administrators only).")
+    async def ai_enable(self, ctx: commands.Context):
+        if not await self._require_admin(ctx):
+            return
+        try:
+            added, already = await self.add_ai_channels(ctx.guild.id, [ctx.channel.id])
+        except Exception as e:
+            print(f"AI Cog: failed to enable AI in channel {ctx.channel.id}: {e}")
+            return await ctx.reply(
+                embed=discord.Embed(description="❌ Couldn't save that right now. Please try again.", color=discord.Color.red()),
+                mention_author=False,
+            )
+        if already:
+            return await ctx.reply(
+                embed=discord.Embed(description="❌ AI is already enabled in this channel.", color=discord.Color.red()),
+                mention_author=False,
+            )
+        await ctx.reply(
+            embed=discord.Embed(description=f"✅ AI enabled in {ctx.channel.mention}.", color=BRAND_COLOR),
+            mention_author=False,
+        )
+
+    @ai_group.command(name="disable", description="Disable the AI chatbot in the current channel (administrators only).")
+    async def ai_disable(self, ctx: commands.Context):
+        if not await self._require_admin(ctx):
+            return
+        try:
+            removed, missing = await self.remove_ai_channels(ctx.guild.id, [ctx.channel.id])
+        except Exception as e:
+            print(f"AI Cog: failed to disable AI in channel {ctx.channel.id}: {e}")
+            return await ctx.reply(
+                embed=discord.Embed(description="❌ Couldn't save that right now. Please try again.", color=discord.Color.red()),
+                mention_author=False,
+            )
+        if missing:
+            return await ctx.reply(
+                embed=discord.Embed(description="❌ AI is already disabled in this channel.", color=discord.Color.red()),
+                mention_author=False,
+            )
+        await ctx.reply(
+            embed=discord.Embed(description=f"✅ AI disabled in {ctx.channel.mention}.", color=BRAND_COLOR),
+            mention_author=False,
+        )
 
     @ai_group.command(
         name="add",
@@ -971,7 +1167,7 @@ class AIChat(commands.Cog):
         except Exception as e:
             print(f"AI Cog: failed to add AI channels for guild {ctx.guild.id}: {e}")
             return await ctx.reply(embed=err_embed(
-                "Database Error", "Couldn't save the AI channels right now. Please try again in a moment."))
+                "Database Error", "Couldn't save the AI channels right now. Please try again in a moment."), mention_author=False)
 
         lines = []
         if to_add:
@@ -1010,7 +1206,7 @@ class AIChat(commands.Cog):
         except Exception as e:
             print(f"AI Cog: failed to remove AI channels for guild {ctx.guild.id}: {e}")
             return await ctx.reply(embed=err_embed(
-                "Database Error", "Couldn't update the AI channels right now. Please try again in a moment."))
+                "Database Error", "Couldn't update the AI channels right now. Please try again in a moment."), mention_author=False)
 
         lines = []
         if to_remove:
@@ -1024,52 +1220,80 @@ class AIChat(commands.Cog):
     @ai_group.command(name="reset", help="Clears your AI chatbot memory for this channel.")
     async def reset_memory(self, ctx: commands.Context):
         if not self._is_ai_channel(ctx.channel):
-            await ctx.send(embed=err_embed(" AI not enabled", "", emoji="🚫"))
+            await ctx.reply(embed=err_embed(" AI not enabled", "", emoji="🚫"), mention_author=False)
             return
 
         key = (ctx.channel.id, ctx.author.id)
         if self.history.get(key):
             self.history[key].clear()
-            await ctx.send(embed=ok_embed("Memory Cleared", "Your memory in this channel has been cleared!", emoji="🧹", color=BRAND_COLOR))
+            await ctx.reply(embed=discord.Embed(description="🧹 Memory Successfully Cleared!", color=BRAND_COLOR), mention_author=False)
         else:
-            await ctx.send(embed=info_embed("Memory Empty", "Your memory in this channel is already empty.", emoji="🧠"))
+            await ctx.reply(embed=info_embed("Memory Empty", "Your memory in this channel is already empty.", emoji="🧠"), mention_author=False)
+
+    @staticmethod
+    def _memory_content_to_str(content) -> str:
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif block.get("type") == "image_url":
+                    url = (block.get("image_url") or {}).get("url", "")
+                    parts.append(f"[image: {url}]")
+            return "\n".join(p for p in parts if p) or "[empty]"
+        return content or "[empty]"
+
+    def _build_memory_pages(self, history: list) -> list[discord.Embed]:
+        """Packs the stored messages into embed pages of at most MEMORY_PAGE_CHAR_LIMIT characters."""
+        blocks = []
+        for i, msg in enumerate(history, start=1):
+            role = msg.get("role", "unknown")
+            blocks.append(f"**[{i}] {role}:** {self._memory_content_to_str(msg.get('content'))}")
+
+        page_texts: list[str] = []
+        current = ""
+        for block in blocks:
+            for chunk in split_message(block, MEMORY_PAGE_CHAR_LIMIT):
+                if current and len(current) + 2 + len(chunk) > MEMORY_PAGE_CHAR_LIMIT:
+                    page_texts.append(current)
+                    current = chunk
+                else:
+                    current = f"{current}\n\n{chunk}" if current else chunk
+        if current:
+            page_texts.append(current)
+
+        total = len(page_texts)
+        pages = []
+        for n, text in enumerate(page_texts, start=1):
+            embed = discord.Embed(
+                title=f"🧠 Your Memory (this channel) — {len(history)} message(s) stored",
+                description=text,
+                color=BRAND_COLOR,
+            )
+            embed.set_footer(text=f"Page {n} out of {total}")
+            pages.append(embed)
+        return pages
 
     @ai_group.command(name="memory", help="Displays your AI chatbot memory for this channel.")
     async def show_memory(self, ctx: commands.Context):
         if not self._is_ai_channel(ctx.channel):
-            await ctx.send(embed=err_embed(" AI not enabled", "", emoji="🚫"))
+            await ctx.reply(embed=err_embed(" AI not enabled", "", emoji="🚫"), mention_author=False)
             return
 
         history = self.history.get((ctx.channel.id, ctx.author.id))
         if not history:
-            await ctx.send(embed=info_embed("Memory Empty", "Your memory in this channel is currently empty.", emoji="🧠"))
+            await ctx.reply(embed=info_embed("Memory Empty", "Your memory in this channel is currently empty.", emoji="🧠"), mention_author=False)
             return
 
-        def _content_to_str(content) -> str:
-            if isinstance(content, list):
-                parts = []
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "text":
-                        parts.append(block.get("text", ""))
-                    elif block.get("type") == "image_url":
-                        url = (block.get("image_url") or {}).get("url", "")
-                        parts.append(f"[image: {url}]")
-                return "\n".join(p for p in parts if p) or "[empty]"
-            return content or "[empty]"
+        pages = self._build_memory_pages(history)
+        if len(pages) == 1:
+            await ctx.reply(embed=pages[0], mention_author=False)
+            return
 
-        lines = []
-        for i, msg in enumerate(history, start=1):
-            role = msg.get("role", "unknown")
-            lines.append(f"**[{i}] {role}:** {_content_to_str(msg.get('content'))}")
-
-        text = "\n\n".join(lines)
-        for idx, chunk in enumerate(split_message(text, EMBED_DESCRIPTION_LIMIT)):
-            embed = discord.Embed(description=chunk, color=BRAND_COLOR)
-            if idx == 0:
-                embed.title = f"🧠 Your Memory (this channel) — {len(history)} message(s) stored"
-            await ctx.send(embed=embed)
+        view = PaginatorView(pages, user_id=ctx.author.id)
+        view.message = await ctx.reply(embed=pages[0], view=view, mention_author=False)
 
     @ai_group.command(name="info", help="Owner only: displays model status, and daily usage grouped by OpenRouter account.")
     @is_bot_owner()
@@ -1190,7 +1414,7 @@ class AIChat(commands.Cog):
             if close_session:
                 await session.close()
 
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     # -- main listener -------------------------------------------------------
 
@@ -1279,6 +1503,10 @@ class AIChat(commands.Cog):
                 "direct questions, answer immediately with no preliminary reasoning at all. Only "
                 "think step-by-step first for genuinely complex, ambiguous, or multi-part requests "
                 "(e.g. multi-file code changes) where it actually changes the quality of the answer.\n\n"
+                "FORMATTING: Discord cannot render LaTeX. NEVER use LaTeX or math markup of any kind "
+                "(no dollar-sign math blocks, no backslash-parenthesis or backslash-bracket delimiters, "
+                "no backslash commands such as frac, text or times). Write math in plain text using "
+                "Unicode symbols (×, ÷, ≈, ±, √, ², ³) and 'a/b' for fractions. Use only normal Discord markdown.\n\n"
                 f"{capabilities_info}"
             )
 
@@ -1415,8 +1643,10 @@ class AIChat(commands.Cog):
                     except Exception as e:
                         print(f"Failed to retrieve summary: {e}")
 
+                reply_text = strip_latex(reply_text)
                 if reply_text.strip():
                     self.history[memory_key].append({"role": "assistant", "content": reply_text})
+                    self.history[memory_key] = self.history[memory_key][-self.max_history:]
                     await status.finish(success=True)
                     await self._send_result(message, reply_text)
                 else:
