@@ -18,7 +18,7 @@ import typing
 import discord
 from discord.ext import commands
 
-from views.common import BaseView
+from views.common import BaseView, one_line_embed
 
 BRAND_COLOR = discord.Color(0x0414C7)
 SUCCESS_COLOR = discord.Color.green()
@@ -37,7 +37,8 @@ def ok_embed(title, description=None, *, emoji="✅", color=SUCCESS_COLOR):
 
 
 def err_embed(title="Error", description=None, *, emoji="❌", color=ERROR_COLOR):
-    return make_embed(title, description, color=color, emoji=emoji)
+    """One-line error: if a description is given it becomes the title (the name is dropped)."""
+    return one_line_embed(description or title, emoji, color)
 
 
 def warn_embed(title, description=None, *, emoji="⚠️", color=WARN_COLOR):
@@ -335,20 +336,20 @@ async def handle_common_error(ctx, error) -> bool:
         await send_usage(ctx, note=str(error) or "Invalid argument provided.")
     elif isinstance(error, commands.MissingPermissions):
         perms = ", ".join(f"`{p.replace('_', ' ').title()}`" for p in error.missing_permissions)
-        await ctx.send(embed=err_embed("Missing Permissions", perms))
+        await ctx.send(embed=err_embed(f"Missing permissions: {perms}"))
     elif isinstance(error, commands.BotMissingPermissions):
         perms = ", ".join(f"`{p.replace('_', ' ').title()}`" for p in error.missing_permissions)
-        await ctx.send(embed=err_embed("Bot Missing Permissions", perms))
+        await ctx.send(embed=err_embed(f"I need: {perms}"))
     elif isinstance(error, commands.NotOwner):
-        await ctx.send(embed=err_embed("Owner Only", emoji="🚫"))
+        await ctx.send(embed=err_embed("Owner only.", emoji="🚫"))
     elif isinstance(error, commands.NoPrivateMessage):
-        await ctx.send(embed=err_embed("Server Only", emoji="🚫"))
+        await ctx.send(embed=err_embed("Server only.", emoji="🚫"))
     elif isinstance(error, commands.CommandOnCooldown):
         await ctx.send(embed=warn_embed("Slow Down", f"Retry in **{error.retry_after:.1f}s**.", emoji="⏳"))
     elif isinstance(error, commands.CheckFailure):
-        await ctx.send(embed=err_embed("Check Failed", emoji="🚫"))
+        await ctx.send(embed=err_embed("You can't use this here.", emoji="🚫"))
     elif isinstance(error, commands.CommandInvokeError) and isinstance(error.original, discord.Forbidden):
-        await ctx.send(embed=err_embed("Forbidden", "Check my permissions and role position."))
+        await ctx.send(embed=err_embed("Check my permissions and role position."))
     else:
         return False
     return True
@@ -361,4 +362,4 @@ async def handle_command_error(ctx, error) -> None:
         return
     original = getattr(error, "original", error)
     traceback.print_exception(type(original), original, original.__traceback__)
-    await ctx.send(embed=err_embed("Internal Error", f"`{original}`", emoji="⚠️"))
+    await ctx.send(embed=err_embed(f"Internal error: {original}", emoji="⚠️"))
