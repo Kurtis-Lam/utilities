@@ -31,16 +31,16 @@ def describe_entry(guild: discord.Guild | None, entry: dict) -> str:
     """Short, readable summary of an autolock entry."""
     lines = [f"**Target:** {mention_target(guild, entry.get('target'))}"]
     for label, key in (
-        ("Restricted to categories", "restrict_categories"),
-        ("Restricted to channels", "restrict_channels"),
-        ("Excluded categories", "exclude_categories"),
-        ("Excluded channels", "exclude_channels"),
+        ("Only categories", "restrict_categories"),
+        ("Only channels", "restrict_channels"),
+        ("Skip categories", "exclude_categories"),
+        ("Skip channels", "exclude_channels"),
     ):
         ids = entry.get(key) or []
         if ids:
             lines.append(f"**{label}:** " + ", ".join(f"<#{i}>" for i in ids))
     if len(lines) == 1:
-        lines.append("*No channel restrictions or exclusions.*")
+        lines.append("*No restrictions.*")
     return "\n".join(lines)
 
 
@@ -54,7 +54,7 @@ class ConfirmReplaceView(BaseView):
         self.entry = entry
         self.main_message = main_message
 
-    @discord.ui.button(label="Replace", style=discord.ButtonStyle.danger, emoji="⚠️")
+    @discord.ui.button(label="Replace", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild_id)
         await self.cog.collection.update_one(
@@ -71,17 +71,17 @@ class ConfirmReplaceView(BaseView):
                 pass
 
         self.superseded = True
-        embed = success_embed(f"Replaced the **{self.config_type}** configuration.")
+        embed = success_embed(f"Replaced **{self.config_type}**.")
         embed.description += "\n\n" + describe_entry(interaction.guild, self.entry)
         await interaction.response.edit_message(content=None, embed=themed(embed), view=None)
         self.stop()
 
-    @discord.ui.button(label="Keep Existing", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.superseded = True
         await interaction.response.edit_message(
             content=None,
-            embed=themed(warning_embed("Cancelled. Your existing configuration was not changed.")),
+            embed=themed(warning_embed("Cancelled.")),
             view=None,
         )
         self.stop()
@@ -97,21 +97,21 @@ class AddConfigModal(discord.ui.Modal):
 
         self.target_input = discord.ui.TextInput(
             label="Target (role or user)",
-            placeholder="@Role, @User or ID" + ("" if config_type == "user" else " — optional"),
+            placeholder="@Role, @User or ID" + ("" if config_type == "user" else " (optional)"),
             required=(config_type == "user"),
         )
         self.add_item(self.target_input)
 
         self.restrict_input = discord.ui.TextInput(
-            label="Only these channels / categories",
-            placeholder="Optional. IDs or mentions, separated by commas",
+            label="Only in (IDs)",
+            placeholder="Optional, comma separated",
             required=False,
         )
         self.add_item(self.restrict_input)
 
         self.exclude_input = discord.ui.TextInput(
-            label="Skip these channels / categories",
-            placeholder="Optional. IDs or mentions, separated by commas",
+            label="Skip (IDs)",
+            placeholder="Optional, comma separated",
             required=False,
         )
         self.add_item(self.exclude_input)
@@ -122,7 +122,7 @@ class AddConfigModal(discord.ui.Modal):
 
         if self.config_type == "user" and not target_ids:
             return await interaction.response.send_message(
-                embed=error_embed("That doesn't look like a valid user or role. Use a mention or an ID."),
+                embed=error_embed("Invalid user or role."),
                 ephemeral=True,
             )
 
@@ -152,12 +152,8 @@ class AddConfigModal(discord.ui.Modal):
                 main_message=interaction.message,
                 author_id=interaction.user.id,
             )
-            embed = warning_embed(
-                f"A **{self.config_type}** configuration already exists. "
-                "Only one can be active, so adding this will replace it.",
-                title="Replace existing configuration?",
-            )
-            embed.add_field(name="New configuration", value=describe_entry(guild, entry), inline=False)
+            embed = warning_embed(f"A **{self.config_type}** config exists. Replace it?")
+            embed.add_field(name="New", value=describe_entry(guild, entry), inline=False)
             return await interaction.response.send_message(embed=themed(embed), view=view, ephemeral=True)
 
         if self.config_type in ("rare", "regional"):
@@ -176,7 +172,7 @@ class AddConfigModal(discord.ui.Modal):
         embed = themed(await self.cog.build_config_embed(interaction.guild))
         await interaction.response.edit_message(embed=embed)
 
-        confirm = success_embed(f"Added a **{self.config_type}** autolock entry.")
+        confirm = success_embed(f"Added **{self.config_type}** entry.")
         confirm.description += "\n\n" + describe_entry(guild, entry)
         await interaction.followup.send(embed=themed(confirm), ephemeral=True)
 
@@ -186,8 +182,8 @@ class RemoveConfigModal(discord.ui.Modal, title="Remove Autolock Entry"):
         super().__init__()
         self.cog = cog
         self.target_input = discord.ui.TextInput(
-            label="What do you want to remove?",
-            placeholder="rare, regional, or a user / role ID",
+            label="Remove",
+            placeholder="rare, regional or an ID",
             required=True,
         )
         self.add_item(self.target_input)
@@ -198,15 +194,15 @@ class RemoveConfigModal(discord.ui.Modal, title="Remove Autolock Entry"):
 
         if val in ("rare", "ra"):
             await self.cog.collection.update_one({"_id": guild_id}, {"$set": {"rare": []}}, upsert=True)
-            msg = "Cleared the **rare** configuration."
+            msg = "Cleared **rare**."
         elif val in ("regional", "reg"):
             await self.cog.collection.update_one({"_id": guild_id}, {"$set": {"regional": []}}, upsert=True)
-            msg = "Cleared the **regional** configuration."
+            msg = "Cleared **regional**."
         else:
             ids = parse_ids(val)
             if not ids:
                 return await interaction.response.send_message(
-                    embed=error_embed("Type `rare`, `regional`, or a valid user / role ID."),
+                    embed=error_embed("Enter rare, regional or an ID."),
                     ephemeral=True,
                 )
             target_id = ids[0]
@@ -216,12 +212,12 @@ class RemoveConfigModal(discord.ui.Modal, title="Remove Autolock Entry"):
 
             if len(new_users) == len(current):
                 return await interaction.response.send_message(
-                    embed=warning_embed(f"No user autolock found for {mention_target(interaction.guild, target_id)}."),
+                    embed=warning_embed(f"No autolock for {mention_target(interaction.guild, target_id)}."),
                     ephemeral=True,
                 )
 
             await self.cog.collection.update_one({"_id": guild_id}, {"$set": {"user": new_users}}, upsert=True)
-            msg = f"Removed {mention_target(interaction.guild, target_id)} from user autolocks."
+            msg = f"Removed {mention_target(interaction.guild, target_id)}."
 
         embed = themed(await self.cog.build_config_embed(interaction.guild))
         await interaction.response.edit_message(embed=embed)
