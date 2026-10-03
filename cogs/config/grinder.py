@@ -77,33 +77,135 @@ def parse_indices_and_duration(raw_str: str):
     return indices, duration
 
 
-# --- HELPER: FORMAT ID WITH NAME (CHANNELS & GUILDS) ---
-def format_id_with_name(id_str: str, guild: Optional[discord.Guild] = None) -> str:
+# --- HELPER: RESOLVE ID INFO (CHANNELS & GUILDS) ---
+_BOT: Optional[commands.Bot] = None          # set in setup()
+_ID_CACHE: dict[int, tuple[str, str]] = {}   # id -> (entity_type, name), filled by prefetch_id_names()
+
+
+def resolve_id_info(id_str: str, guild: Optional[discord.Guild] = None) -> tuple[str, Optional[str], Optional[str]]:
+    """
+    Resolves whether an ID string corresponds to a Channel or a Guild.
+    Returns: (id_str, entity_type, entity_name)
+    where entity_type is "channel", "guild", or None.
+    Checks (in order): the current guild, the bot's global caches, then the
+    cache filled from names the JS side stored in Firebase (prefetch_id_names()).
+    """
     if not id_str or not id_str.isdigit():
-        return id_str
+        return id_str, None, None
 
     target_id = int(id_str)
 
+    # 1. Current guild: its channels, then the guild itself
     if guild:
-        # Check channel in current guild
         channel = guild.get_channel(target_id)
         if channel:
-            return f"{id_str} [{channel.name}]"
-        
-        # Check if ID matches current guild itself
+            return id_str, "channel", channel.name
         if guild.id == target_id:
-            return f"{id_str} [{guild.name}]"
+            return id_str, "guild", guild.name
 
-        # Check in bot's cached guilds via guild._state
-        if guild._state and hasattr(guild._state, "_get_guild"):
-            g = guild._state._get_guild(target_id)
-            if g:
-                g_chan = g.get_channel(target_id)
-                if g_chan:
-                    return f"{id_str} [{g_chan.name}]"
-                return f"{id_str} [{g.name}]"
+    # 2. Bot-wide caches (any server the bot is in)
+    bot = _BOT
+    if bot:
+        g = bot.get_guild(target_id)
+        if g:
+            return id_str, "guild", g.name
+        chan = bot.get_channel(target_id)
+        if chan and getattr(chan, "name", None):
+            return id_str, "channel", chan.name
 
-    return id_str
+    # 3. Results previously fetched from the Discord API
+    cached = _ID_CACHE.get(target_id)
+    if cached:
+        return id_str, cached[0], cached[1]
+
+    return id_str, None, None
+
+
+NAME_RECHECK_SECS = 600   # re-ask the JS side about an unresolved ID at most every 10 min
+NAME_WAIT_SECS = 8        # how long the embed waits for the JS side to answer
+
+
+def _cfg_acc_index(cfg: dict, accounts: list) -> int:
+    tok = cfg.get("token")
+    if tok and tok in accounts:
+        return accounts.index(tok) + 1
+    return int(cfg.get("accIndex", 0) or 0)
+
+
+async def prefetch_id_names(configs: list, accounts: list, guild: Optional[discord.Guild] = None) -> None:
+    """
+    Makes sure every ID used in the configs has a name available:
+      1. loads names the JS side already stored in Firebase (grinder/id_names)
+      2. for IDs still unknown, writes a request to grinder/name_requests so the
+         JS side asks the config's own (autocatch) account to look the name up
+      3. waits briefly for the JS side to write the answer back, then caches it
+    """
+    wanted: dict[str, int] = {}   # id -> accIndex of the account that uses it
+    for cfg in configs:
+        acc_idx = _cfg_acc_index(cfg, accounts)
+        for tok in re.findall(r"\d{15,22}", str(cfg.get("target", "") or "")):
+            if not resolve_id_info(tok, guild)[1]:
+                wanted.setdefault(tok, acc_idx)
+    if not wanted:
+        return
+
+    def _load_cache() -> dict:
+        return ref.child("id_names").get() or {}
+
+    def _apply(stored: dict) -> None:
+        for k, v in stored.items():
+            if isinstance(v, dict) and v.get("name") and v.get("type") in ("guild", "channel"):
+                _ID_CACHE[int(k)] = (v["type"], v["name"])
+
+    try:
+        stored = await asyncio.to_thread(_load_cache)
+        _apply(stored)
+    except Exception:
+        stored = {}
+
+    now_ms = int(time.time() * 1000)
+    to_request = {}
+    for tok, acc_idx in wanted.items():
+        if int(tok) in _ID_CACHE:
+            continue
+        entry = stored.get(tok)
+        # skip IDs the JS side recently failed to resolve
+        if isinstance(entry, dict) and now_ms - int(entry.get("checkedAt", 0) or 0) < NAME_RECHECK_SECS * 1000:
+            continue
+        to_request[tok] = acc_idx
+    if not to_request:
+        return
+
+    def _send_requests() -> None:
+        for tok, acc_idx in to_request.items():
+            ref.child("name_requests").child(tok).set({"accIndex": acc_idx, "requestedAt": now_ms})
+
+    try:
+        await asyncio.to_thread(_send_requests)
+    except Exception:
+        return
+
+    deadline = time.time() + NAME_WAIT_SECS
+    pending = set(to_request)
+    while pending and time.time() < deadline:
+        await asyncio.sleep(1)
+        try:
+            stored = await asyncio.to_thread(_load_cache)
+        except Exception:
+            break
+        _apply(stored)
+        for tok in list(pending):
+            entry = stored.get(tok)
+            if isinstance(entry, dict) and int(entry.get("checkedAt", 0) or 0) >= now_ms:
+                pending.discard(tok)
+
+
+# --- HELPER: FORMAT ID WITH NAME (CHANNELS & GUILDS) ---
+def format_id_with_name(id_str: str, guild: Optional[discord.Guild] = None) -> str:
+    raw_id, _, name = resolve_id_info(id_str, guild)
+    if name:
+        return f"{raw_id} [{name}]"
+    return raw_id
 
 
 # --- HELPER: PARSE TARGET ASPECTS FOR DISPLAY ---
@@ -112,6 +214,20 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
         return []
 
     mode_lower = mode.lower()
+
+    def format_tokens_and_detect_type(token_str: str) -> tuple[str, bool]:
+        tokens = token_str.split()
+        fmt_tokens = []
+        has_guild = False
+        for tok in tokens:
+            raw_id, entity_type, name = resolve_id_info(tok, guild)
+            if entity_type == "guild":
+                has_guild = True
+            if name:
+                fmt_tokens.append(f"{raw_id} [{name}]")
+            else:
+                fmt_tokens.append(raw_id)
+        return ", ".join(fmt_tokens), has_guild
 
     # 1) Key-Value style targets ("chid=123, pokes=abc")
     if "=" in target or ":" in target:
@@ -123,10 +239,11 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
                 k, v = p.split(sep, 1)
                 key_clean = k.strip()
                 val_clean = v.strip()
-                formatted_tokens = []
-                for token in val_clean.replace(',', ' ').split():
-                    formatted_tokens.append(format_id_with_name(token, guild))
-                aspects.append((key_clean.capitalize(), ", ".join(formatted_tokens) if formatted_tokens else val_clean))
+                val, has_guild = format_tokens_and_detect_type(val_clean)
+                label = key_clean.capitalize()
+                if label.lower() in ["chid", "channel"] and has_guild:
+                    label = "Guild ID"
+                aspects.append((label, val if val else val_clean))
             return aspects
 
     # 2) autocatch, dotcatch, commaedit
@@ -134,11 +251,10 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
         parts = [p.strip() for p in target.split(',') if p.strip()]
         aspects = []
         for i, p in enumerate(parts):
-            tokens = p.split()
-            fmt_tokens = [format_id_with_name(tok, guild) for tok in tokens]
-            val = ", ".join(fmt_tokens)
+            val, has_guild = format_tokens_and_detect_type(p)
             if i == 0:
-                aspects.append(("Chid", val))
+                label = "Guild ID" if has_guild else "Chid"
+                aspects.append((label, val))
             elif i == 1:
                 aspects.append(("Pokemons", val))
             elif i == 2:
@@ -155,9 +271,9 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
         for i, part in enumerate(parts):
             lbl = labels[i] if i < len(labels) else f"Arg{i+1}"
             if i == 0 or lbl.lower() in ["chid", "channel"]:
-                tokens = part.split()
-                fmt_tokens = [format_id_with_name(tok, guild) for tok in tokens]
-                val = ", ".join(fmt_tokens)
+                val, has_guild = format_tokens_and_detect_type(part)
+                if has_guild and lbl == "Chid":
+                    lbl = "Guild ID"
             else:
                 val = part
             aspects.append((lbl, val))
@@ -170,10 +286,9 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
             parts = [p.strip() for p in target.split() if p.strip()]
         aspects = []
         for i, part in enumerate(parts):
-            lbl = "Chid" if i == 0 else f"Arg{i+1}"
-            tokens = part.split()
-            fmt_tokens = [format_id_with_name(tok, guild) for tok in tokens]
-            aspects.append((lbl, ", ".join(fmt_tokens)))
+            val, has_guild = format_tokens_and_detect_type(part)
+            lbl = "Guild ID" if (i == 0 and has_guild) else ("Chid" if i == 0 else f"Arg{i+1}")
+            aspects.append((lbl, val))
         return aspects
 
     # 5) Custom / Other modes
@@ -183,9 +298,8 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
             parts = [p.strip() for p in target.split() if p.strip()]
         aspects = []
         for i, part in enumerate(parts):
-            tokens = part.split()
-            fmt_tokens = [format_id_with_name(tok, guild) for tok in tokens]
-            aspects.append((f"Arg{i+1}", ", ".join(fmt_tokens)))
+            val, _ = format_tokens_and_detect_type(part)
+            aspects.append((f"Arg{i+1}", val))
         return aspects
 
 
@@ -201,7 +315,7 @@ def get_config_details(cfg: dict) -> dict:
     details = {
         "accIndex": acc_idx,
         "token": cfg.get("token", ""),
-        "chid": aspects.get("chid", aspects.get("target id", "")),
+        "chid": aspects.get("chid", aspects.get("guild id", aspects.get("target id", ""))),
         "pokemons": aspects.get("pokemons", ""),
         "datafile": aspects.get("datafile", ""),
         "message": aspects.get("message", ""),
@@ -378,6 +492,41 @@ def add_chunked_field(embed: discord.Embed, title: str, lines: list[str]):
 
 
 # --- EMBED BUILDERS ---
+def build_accounts_embed(accounts: list) -> discord.Embed:
+    """Lists the saved accounts (never shows the tokens themselves)."""
+    embed = discord.Embed(title="⚙️ Grinder Accounts", color=discord.Color.blurple())
+    if not accounts:
+        embed.description = "No accounts registered yet. Use **➕ Add Account** to add one."
+        return embed
+
+    lines = []
+    for idx, tok in enumerate(accounts, 1):
+        uid = get_user_id_from_token(tok)
+        who = f"<@{uid}> (`{uid}`)" if uid else "*Unknown Member*"
+        lines.append(f"`[#{idx}]` {who}")
+
+    add_chunked_field(embed, f"👥 Accounts ({len(accounts)})", lines)
+    return embed
+
+
+def build_logs_embed(guild: discord.Guild, logs: dict) -> discord.Embed:
+    """Shows which channel each log type is sent to in this server."""
+    name = guild.name if guild else "Server"
+    embed = discord.Embed(title=f"📜 Grinder Logs — {name}", color=discord.Color.dark_teal())
+    logs = logs or {}
+
+    entries = [
+        ("🔔 Alerts", "alerts", "Captcha flags and warnings"),
+        ("🎯 Autocatch", "autocatch", "Catch results"),
+        ("🔀 Switch", "switch", "Account switch notices"),
+    ]
+    for title, key, desc in entries:
+        cid = logs.get(key)
+        value = f"<#{cid}> (`{cid}`)" if cid else "*Not set*"
+        embed.add_field(name=title, value=f"{value}\n-# {desc}", inline=False)
+    return embed
+
+
 async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts: list):
     embed = discord.Embed(title=f"📋 Mode Configurations — {guild.name}", color=discord.Color.gold())
     if not configs:
@@ -395,6 +544,7 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
             other_configs.append((idx, cfg))
 
     current_time = time.time()
+    await prefetch_id_names(configs, accounts, guild)
 
     for mode in VALID_MODES:
         cfgs = mode_groups[mode]
@@ -1172,4 +1322,6 @@ class GrinderCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    global _BOT
+    _BOT = bot
     await bot.add_cog(GrinderCog(bot))
