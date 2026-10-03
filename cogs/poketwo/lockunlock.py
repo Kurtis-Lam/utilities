@@ -23,7 +23,7 @@ from cogs.poketwo.lockcommon import (
     unlock_denied_embed,
     unlocked_embed,
 )
-from views.common import EMBED_COLOR, error_embed
+from views.common import EMBED_COLOR, container_from_embed, error_embed
 from views.embeds import handle_command_error
 
 UNLOCK_BATCH_SIZE = 5
@@ -46,34 +46,74 @@ def _progress_embed(done: int, total: int, started: float, started_unix: int) ->
     return embed
 
 
-async def _disable_lock_message(channel, message_id: int | None, bot):
-    """Helper to fetch and disable the unlock button on a stored lock message."""
-    if not message_id:
-        return
-    try:
-        msg = await channel.fetch_message(message_id)
-        view = UnlockView(bot)
-        for child in view.children:
-            child.disabled = True
-        await msg.edit(view=view)
-    except discord.HTTPException:
-        pass
+UNLOCK_CUSTOM_ID = "lockunlock:unlock_btn"
+NO_PINGS = discord.AllowedMentions.none()
 
 
-class UnlockView(discord.ui.View):
-    """View containing the Unlock button attached to lock messages."""
+def _message_texts(message: discord.Message | None) -> tuple[list[str], discord.Color | int | None]:
+    """Read back the text blocks (and accent color) of a Components V2 lock message,
+    so the button can be retired without keeping the original embed around."""
+    texts: list[str] = []
+    accent = None
 
-    def __init__(self, bot):
+    def walk(components):
+        nonlocal accent
+        for comp in components or []:
+            if accent is None:
+                accent = getattr(comp, "accent_colour", None) or getattr(comp, "accent_color", None)
+            content = getattr(comp, "content", None)
+            if isinstance(content, str) and content:
+                texts.append(content)
+            walk(getattr(comp, "children", None))
+
+    walk(getattr(message, "components", None))
+    return texts, accent
+
+
+class UnlockLayout(discord.ui.LayoutView):
+    """The lock message: the embed-style container with the Unlock button *inside* it.
+
+    Used by .lock and by AutoLock, so both look and behave the same.
+    Pass ``embed`` to build a fresh message, or ``texts`` (+ ``accent``) to rebuild
+    an existing one. ``unlocked=True`` renders the greyed-out "Unlocked" button.
+    """
+
+    def __init__(self, bot, embed: discord.Embed | None = None, *, texts=None, accent=None, unlocked: bool = False):
         super().__init__(timeout=None)
         self.bot = bot
 
-    @discord.ui.button(
-        label="Unlock",
-        style=discord.ButtonStyle.green,
-        emoji="🔓",
-        custom_id="lockunlock:unlock_btn",
-    )
-    async def unlock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.unlock_button = discord.ui.Button(
+            label="Unlocked" if unlocked else "Unlock",
+            style=discord.ButtonStyle.secondary if unlocked else discord.ButtonStyle.green,
+            emoji=None if unlocked else "🔓",
+            custom_id=UNLOCK_CUSTOM_ID,
+            disabled=unlocked,
+        )
+        self.unlock_button.callback = self._on_unlock
+        row = discord.ui.ActionRow(self.unlock_button)
+
+        if embed is not None:
+            container = container_from_embed(embed, row)
+        else:
+            container = discord.ui.Container(accent_colour=accent or EMBED_COLOR)
+            for text in texts or ["\u200b"]:
+                container.add_item(discord.ui.TextDisplay(text))
+            container.add_item(discord.ui.Separator())
+            container.add_item(row)
+        self.add_item(container)
+
+    async def _retire(self, interaction: discord.Interaction) -> None:
+        """Grey out the button on the message that was clicked (acknowledges the interaction)."""
+        texts, accent = _message_texts(interaction.message)
+        view = UnlockLayout(self.bot, texts=texts, accent=accent, unlocked=True)
+        try:
+            await interaction.response.edit_message(view=view)
+        except discord.HTTPException:
+            # e.g. an old pre-V2 lock message that can't be converted; still acknowledge.
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+
+    async def _on_unlock(self, interaction: discord.Interaction):
         guild = interaction.guild
         channel = interaction.channel
         user = interaction.user
@@ -94,12 +134,8 @@ class UnlockView(discord.ui.View):
         if not is_locked_overwrite(channel.overwrites_for(poketwo)):
             if lock_doc:
                 await locks_collection.delete_one({"_id": channel.id})
-            button.disabled = True
-            try:
-                await interaction.message.edit(view=self)
-            except discord.HTTPException:
-                pass
-            return await interaction.response.send_message(embed=already_unlocked_embed(channel), ephemeral=True)
+            await self._retire(interaction)
+            return await interaction.followup.send(embed=already_unlocked_embed(channel), ephemeral=True)
 
         if lock_doc and not can_unlock(lock_doc, user):
             return await interaction.response.send_message(embed=unlock_denied_embed(channel, lock_doc), ephemeral=True)
@@ -113,25 +149,28 @@ class UnlockView(discord.ui.View):
         if lock_doc:
             await locks_collection.delete_one({"_id": channel.id})
 
-        button.disabled = True
-        try:
-            await interaction.response.edit_message(view=self)
-            await interaction.followup.send(
-                embed=unlocked_embed(
-                    channel,
-                    unlocked_by=user,
-                    locked_at=to_unix((lock_doc or {}).get("locked_at")),
-                )
+        await self._retire(interaction)
+        await interaction.followup.send(
+            embed=unlocked_embed(
+                channel,
+                unlocked_by=user,
+                locked_at=to_unix((lock_doc or {}).get("locked_at")),
             )
-        except discord.HTTPException:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    embed=unlocked_embed(
-                        channel,
-                        unlocked_by=user,
-                        locked_at=to_unix((lock_doc or {}).get("locked_at")),
-                    )
-                )
+        )
+
+
+async def _disable_lock_message(channel, message_id: int | None, bot):
+    """Fetch a stored lock message and grey out its Unlock button."""
+    if not message_id:
+        return
+    try:
+        msg = await channel.fetch_message(message_id)
+        texts, accent = _message_texts(msg)
+        if not texts:
+            return
+        await msg.edit(view=UnlockLayout(bot, texts=texts, accent=accent, unlocked=True))
+    except discord.HTTPException:
+        pass
 
 
 class LockUnlock(commands.Cog):
@@ -197,8 +236,8 @@ class LockUnlock(commands.Cog):
 
         if is_locked_overwrite(ctx.channel.overwrites_for(poketwo)):
             return await ctx.reply(
-                embed=already_locked_embed(ctx.channel, existing),
-                view=UnlockView(self.bot),
+                view=UnlockLayout(self.bot, already_locked_embed(ctx.channel, existing)),
+                allowed_mentions=NO_PINGS,
             )
 
         now = now_unix()
@@ -209,8 +248,11 @@ class LockUnlock(commands.Cog):
             return await ctx.reply(embed=error_embed(f"Couldn't lock: {e}"))
 
         msg = await ctx.reply(
-            embed=locked_embed(ctx.channel, locked_by=ctx.author, allowed_users=None, when=now),
-            view=UnlockView(self.bot),
+            view=UnlockLayout(
+                self.bot,
+                locked_embed(ctx.channel, locked_by=ctx.author, allowed_users=None, when=now),
+            ),
+            allowed_mentions=NO_PINGS,
         )
 
         await self.locks_collection.update_one(
@@ -347,5 +389,5 @@ class LockUnlock(commands.Cog):
 
 
 async def setup(bot):
-    bot.add_view(UnlockView(bot))
+    bot.add_view(UnlockLayout(bot))
     await bot.add_cog(LockUnlock(bot))
