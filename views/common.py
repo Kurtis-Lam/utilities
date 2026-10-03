@@ -4,7 +4,8 @@ Everything visual lives here so the whole bot stays consistent:
 
 * ``EMBED_COLOR``   – the one brand color (#0414c7) used by every embed.
 * ``themed()``      – force that color onto an embed built elsewhere (cogs, config modules).
-* ``*_embed()``     – small ready-made embeds for success / error / warning / info replies.
+* ``*_embed()``     – small ready-made embeds for success / error / warning / info replies
+  (errors are one line: the message is the title).
 * ``BaseView``      – owner-only check + auto-disable on timeout + safe page swapping.
 * ``ConfirmView``   – red Confirm / grey Cancel prompt, no emojis (same API as before).
 """
@@ -40,12 +41,28 @@ def themed(embed: discord.Embed | None) -> discord.Embed | None:
     return embed
 
 
+_MENTION = re.compile(r"<(?:@[!&]?|#)\d+>")
+
+
+def one_line_embed(text: str, emoji: str = "", color: discord.Color = EMBED_COLOR) -> discord.Embed:
+    """Embed that is a single line: the message is the *title*.
+
+    Discord titles can't render mentions, bold or code, so markdown is stripped.
+    Text with mentions or line breaks falls back to a one-line description
+    (which does render them)."""
+    prefix = f"{emoji} " if emoji else ""
+    if _MENTION.search(text) or "\n" in text:
+        return discord.Embed(description=f"{prefix}{text}", color=color)
+    plain = text.replace("**", "").replace("`", "")
+    return discord.Embed(title=f"{prefix}{plain}"[:256], color=color)
+
+
 def success_embed(text: str) -> discord.Embed:
     return make_embed(description=f"✅ {text}")
 
 
 def error_embed(text: str) -> discord.Embed:
-    return make_embed(description=f"❌ {text}")
+    return one_line_embed(text, "❌")
 
 
 def warning_embed(text: str, title: str | None = None) -> discord.Embed:
@@ -97,7 +114,7 @@ class BaseView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.author_id is not None and interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                embed=warning_embed("This menu belongs to someone else. Run the command yourself to get your own."),
+                embed=warning_embed("Not your menu."),
                 ephemeral=True,
             )
             return False
