@@ -293,8 +293,6 @@ class DynamicConfigEditModal(ui.Modal):
 
         if mode in ["autocatch", "dotcatch", "commaedit"]:
             add("chid", "Channel ID(s)", self.details.get("chid"))
-            add("pokemons", "Pokemon (comma separated)", self.details.get("pokemons"))
-            add("datafile", "Data File", self.details.get("datafile"))
 
         elif mode == "periodicmsg":
             add("chid", "Channel ID", self.details.get("chid"))
@@ -324,6 +322,11 @@ class DynamicConfigEditModal(ui.Modal):
                     updated_fields["accIndex"] = self.details.get("accIndex", 1)
                 else:
                     updated_fields[key] = self.details.get(key, "")
+
+        # Preserve existing pokemons and datafile values for autocatch/dotcatch/commaedit modes
+        if self.mode in ["autocatch", "dotcatch", "commaedit"]:
+            updated_fields["pokemons"] = self.details.get("pokemons", "")
+            updated_fields["datafile"] = self.details.get("datafile", "")
 
         new_target, new_xnon = config.build_target_string_for_mode(self.mode, updated_fields)
 
