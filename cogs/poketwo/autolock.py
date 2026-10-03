@@ -68,7 +68,7 @@ def can_unlock(lock_doc: dict | None, member: discord.Member) -> bool:
 def unlock_denied_message(lock_doc: dict) -> str:
     allowed = lock_doc.get("allowed_users") or []
     mentions = ", ".join(f"<@{uid}>" for uid in allowed)
-    return f"⚠️ Only {mentions} (or a server admin) can unlock this channel."
+    return f"⚠️ Only {mentions} or an admin can unlock."
 
 
 class AutoLockUnlockView(discord.ui.View):
@@ -87,7 +87,7 @@ class AutoLockUnlockView(discord.ui.View):
             except Exception as e:
                 print(f"AutoLock: failed to read lock state: {e}")
                 return await interaction.response.send_message(
-                    embed=error_embed("Couldn't verify the lock state right now. Try again in a moment."),
+                    embed=error_embed("Couldn't verify the lock. Try again."),
                     ephemeral=True,
                 )
 
@@ -230,8 +230,8 @@ class AutoLock(commands.Cog):
             if delay > 0:
                 status_msg = await channel.send(
                     embed=discord.Embed(
-                        title="⏳ Auto-Lock Triggered",
-                        description=f"`{label}` matched this spawn. Locking <t:{now_unix() + delay}:R>.",
+                        title="⏳ Auto-Lock",
+                        description=f"`{label}` matched. Locking <t:{now_unix() + delay}:R>.",
                         color=WARN_COLOR,
                     )
                 )
