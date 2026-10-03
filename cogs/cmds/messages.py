@@ -72,6 +72,150 @@ class Messages(commands.Cog):
         if not await handle_common_error(ctx, error):
             raise error
 
+    async def _resolve_channel(self, ctx, channel_str: str) -> typing.Optional[discord.TextChannel]:
+        """Resolves a channel from a mention (<#ID>), raw ID, or channel name."""
+        if not channel_str:
+            return None
+        cleaned = channel_str.strip("<#> ")
+        if cleaned.isdigit():
+            ch = ctx.guild.get_channel(int(cleaned))
+            if ch and isinstance(ch, discord.TextChannel):
+                return ch
+            try:
+                ch = await self.bot.fetch_channel(int(cleaned))
+                if isinstance(ch, discord.TextChannel):
+                    return ch
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+        ch = discord.utils.get(ctx.guild.text_channels, name=channel_str.lstrip("#"))
+        if ch:
+            return ch
+
+        try:
+            return await commands.TextChannelConverter().convert(ctx, channel_str)
+        except commands.BadArgument:
+            return None
+
+    async def _fetch_target_message(self, ctx, msg_ref: str) -> typing.Optional[discord.Message]:
+        """Fetches a message by link or message ID across channels."""
+        if not msg_ref:
+            return None
+        try:
+            if "/" in msg_ref:
+                parts = msg_ref.split("/")
+                msg_id = int(parts[-1])
+                ch_id = int(parts[-2])
+                ch = ctx.guild.get_channel(ch_id)
+                if not ch:
+                    try:
+                        ch = await self.bot.fetch_channel(ch_id)
+                    except (discord.NotFound, discord.HTTPException):
+                        ch = None
+                if ch:
+                    return await ch.fetch_message(msg_id)
+                return await ctx.channel.fetch_message(msg_id)
+            else:
+                msg_id = int(msg_ref)
+                try:
+                    return await ctx.channel.fetch_message(msg_id)
+                except (discord.NotFound, discord.HTTPException):
+                    for ch in ctx.guild.text_channels:
+                        if ch.id != ctx.channel.id:
+                            try:
+                                return await ch.fetch_message(msg_id)
+                            except (discord.NotFound, discord.HTTPException):
+                                continue
+                    return None
+        except (ValueError, discord.NotFound, discord.HTTPException):
+            return None
+
+    async def _forward_message(self, target_msg: discord.Message, target_channel: discord.TextChannel) -> bool:
+        """Forwards native message or falls back to sending message contents, attachments, and embeds."""
+        if hasattr(target_msg, "forward"):
+            try:
+                await target_msg.forward(target_channel)
+                return True
+            except (discord.HTTPException, discord.Forbidden, AttributeError):
+                pass
+
+        try:
+            files = []
+            for attachment in target_msg.attachments:
+                try:
+                    files.append(await attachment.to_file())
+                except (discord.HTTPException, discord.NotFound):
+                    pass
+
+            embeds = target_msg.embeds.copy() if target_msg.embeds else []
+            content = target_msg.content or None
+
+            if not content and not embeds and not files:
+                return False
+
+            await target_channel.send(content=content, embeds=embeds, files=files)
+            return True
+        except discord.HTTPException:
+            return False
+
+    @commands.hybrid_command(name="forward", description="Forwards a message to a channel (reply to a message or provide message ID and channel).")
+    @app_commands.describe(
+        target_or_msg="Target channel (if replying) OR message ID/link to forward.",
+        channel_ref="Target channel (if message ID/link was provided as the first argument)."
+    )
+    @commands.has_permissions(manage_messages=True)
+    @commands.bot_has_permissions(manage_messages=True)
+    async def forward(
+        self,
+        ctx,
+        target_or_msg: typing.Optional[str] = commands.parameter(default=None, description="Target channel or message ID/link."),
+        channel_ref: typing.Optional[str] = commands.parameter(default=None, description="Target channel (if message ID was provided first).")
+    ):
+        target_msg = None
+        target_channel = None
+
+        has_reply = bool(ctx.message and ctx.message.reference and ctx.message.reference.message_id)
+
+        if target_or_msg and channel_ref:
+            # Usage: .forward {message_id} {channel}
+            target_msg = await self._fetch_target_message(ctx, target_or_msg)
+            if not target_msg:
+                return await ctx.send(embed=err_embed("Message Not Found", "Could not find a valid message with that ID or link."))
+
+            target_channel = await self._resolve_channel(ctx, channel_ref)
+            if not target_channel:
+                return await ctx.send(embed=err_embed("Channel Not Found", "Could not resolve the specified target channel."))
+
+        elif target_or_msg:
+            if has_reply:
+                # Usage: Replying to message with .forward {channel}
+                target_channel = await self._resolve_channel(ctx, target_or_msg)
+                if not target_channel:
+                    return await ctx.send(embed=err_embed("Channel Not Found", "Could not resolve the specified target channel."))
+
+                try:
+                    ref = ctx.message.reference
+                    ref_ch = ctx.guild.get_channel(ref.channel_id) or ctx.channel
+                    target_msg = await ref_ch.fetch_message(ref.message_id)
+                except (discord.NotFound, discord.HTTPException):
+                    return await ctx.send(embed=err_embed("Message Not Found", "Could not find the referenced message."))
+            else:
+                return await send_usage(ctx, note="Please reply to a message with a target channel, or provide both a message ID and a target channel.")
+        else:
+            return await send_usage(ctx, note="Reply to a message with a target channel, or provide both a message ID and a target channel.")
+
+        if not target_msg or not target_channel:
+            return await send_usage(ctx, note="Invalid parameters provided.")
+
+        if not target_channel.permissions_for(ctx.guild.me).send_messages:
+            return await ctx.send(embed=err_embed("Permission Error", f"I do not have permission to send messages in {target_channel.mention}."))
+
+        success = await self._forward_message(target_msg, target_channel)
+        if success:
+            await ctx.send(embed=ok_embed("Message Forwarded", f"Successfully forwarded message to {target_channel.mention}.", emoji="↗️"))
+        else:
+            await ctx.send(embed=err_embed("Forward Failed", f"Failed to forward the message to {target_channel.mention}."))
+
     @commands.hybrid_command(name="purge", description="Bulk deletes messages, optionally restricted to a specific user. Use '*' for all messages.")
     @app_commands.describe(
         amt="Number of messages to clear, or '*' for all messages.",
