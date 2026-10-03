@@ -7,7 +7,7 @@ from discord.ext import commands
 
 # Imports from views directory
 from views.categoriesview import CategorySelectView
-from views.common import ConfirmView
+from views.common import confirm
 from views.embeds import handle_common_error, send_usage
 from views.prompts import ask, is_skip, one_line
 
@@ -22,41 +22,13 @@ class Categories(commands.Cog):
             raise error
 
     async def confirm_action(self, ctx, prompt: str) -> bool:
-        view = ConfirmView(ctx.author)
-        embed = discord.Embed(
+        return await confirm(
+            ctx,
+            prompt,
             title="⚠️ Confirm",
-            description=prompt,
-            color=discord.Color.gold(),
+            cancel_text="❌ Cancelled",
+            timeout_text="⏱️ Timeout\nYou took too long to reply. Action cancelled.",
         )
-        msg = await ctx.reply(embed=embed, view=view, mention_author=False)
-        await view.wait()
-
-        if view.value is True:
-            try:
-                await msg.edit(view=None)
-            except discord.HTTPException:
-                pass
-            return True
-        elif view.value is False:
-            cancel_embed = discord.Embed(
-                title="❌ Cancelled", color=discord.Color.red()
-            )
-            try:
-                await msg.edit(embed=cancel_embed, view=None)
-            except discord.HTTPException:
-                pass
-            return False
-        else:
-            timeout_embed = discord.Embed(
-                title="⏱️ Timeout",
-                description="You took too long to reply. Action cancelled.",
-                color=discord.Color.red(),
-            )
-            try:
-                await msg.edit(embed=timeout_embed, view=None)
-            except discord.HTTPException:
-                pass
-            return False
 
     async def _resolve_member_or_role(self, ctx, text: str):
         for converter in (commands.MemberConverter(), commands.RoleConverter()):
