@@ -18,7 +18,7 @@ class AFKButton(discord.ui.Button):
         view: AFKView = self.view
         if interaction.user.id != view.user_id:
             return await interaction.response.send_message(
-                embed=warning_embed("This button isn't for you. Run `.afk` yourself to get your own."), ephemeral=True
+                embed=warning_embed("Not your button."), ephemeral=True
             )
 
         new_afk_status = not self.is_afk
@@ -62,7 +62,7 @@ class PingToggleButton(discord.ui.Button):
         view: SetAFKView = self.view
         if interaction.user.id != view.user_id:
             return await interaction.response.send_message(
-                embed=warning_embed("This menu isn't for you. Run `.setafk` yourself to get your own."), ephemeral=True
+                embed=warning_embed("Not your menu."), ephemeral=True
             )
 
         self.is_active = not self.is_active
@@ -130,7 +130,7 @@ class AFK(commands.Cog):
     def make_embed(self, is_afk: bool) -> discord.Embed:
         embed = discord.Embed(
             title="🌙 AFK Status",
-            description="You are currently **AFK**.\nYou will not be pinged for SH/CL/TP/RP. Instead, you will appear as `userid (AFK)`." if is_afk else "You are currently **Active**.\nYou will receive standard pings.",
+            description="You're **AFK**. No SH/CL/TP/RP pings." if is_afk else "You're **Active**.",
             color=EMBED_COLOR
         )
         return embed
@@ -145,9 +145,7 @@ class AFK(commands.Cog):
         embed = discord.Embed(
             title="⚙️ AFK Ping Exceptions",
             description=(
-                "Toggle buttons below to configure ping exemptions while AFK.\n"
-                "**Green** = Still receive ping when AFK.\n"
-                "**Red** = Ignore ping when AFK (Default).\n\n"
+                "Green = still pinged while AFK. Red = ignored.\n\n"
                 + "\n".join(statuses)
             ),
             color=EMBED_COLOR
@@ -166,7 +164,7 @@ class AFK(commands.Cog):
     @commands.hybrid_command(name="setafk", description="Configure ping exceptions while AFK.")
     async def setafk(self, ctx: commands.Context):
         if not ctx.guild:
-            return await ctx.send(embed=error_embed("This command can only be used in a server."))
+            return await ctx.send(embed=error_embed("Server only."))
 
         doc_id = f"{ctx.guild.id}_{ctx.author.id}"
         doc = await self.afk_settings.find_one({"_id": doc_id})
