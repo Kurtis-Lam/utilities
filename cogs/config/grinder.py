@@ -8,7 +8,7 @@ from discord.ext import commands
 import firebase_admin
 from firebase_admin import credentials, db
 
-from views.common import ConfirmView, error_embed, make_embed, success_embed, themed
+from views.common import ConfirmLayout, error_embed, first_text, make_embed, success_embed
 from views.embeds import handle_command_error, send_usage
 from views.grinderview import AccountsView, ConfigView, GrinderLogsView
 from .base import config_group
@@ -589,41 +589,47 @@ def build_logs_embed(guild: discord.Guild, logs: dict):
 
 # --- HELPER TO REFRESH CONFIG EMBEDS LIVE ---
 async def refresh_config_embed(interaction: discord.Interaction, override_page: str = None):
-    if interaction.message and interaction.guild and interaction.message.embeds:
-        guild_id = str(interaction.guild_id)
-        current_title = interaction.message.embeds[0].title or ""
+    message = interaction.message
+    if not (message and interaction.guild):
+        return
 
-        page = override_page
-        if not page:
-            if "AutoCatch" in current_title:
-                page = "autocatch"
-            elif "Excludes" in current_title:
-                page = "excludes"
-            elif "Detector Bots" in current_title:
-                page = "detector_bots"
-            elif "Mode Configurations" in current_title:
-                page = "modes"
+    current_title = first_text(message)
+    if not (override_page or current_title):
+        return
 
-        if page == "autocatch":
-            autocatch_data = await get_autocatch_status()
-            g_data = await get_global_data()
-            accounts = g_data.get("accounts", [])
-            embed = await build_autocatch_configs_embed(interaction.guild, autocatch_data, accounts)
-            await interaction.message.edit(embed=themed(embed))
-        elif page == "excludes":
-            excludes = await get_guild_excludes(guild_id)
-            embed = await build_excludes_configs_embed(interaction.guild, excludes)
-            await interaction.message.edit(embed=themed(embed))
-        elif page == "detector_bots":
-            bots = await get_guild_detector_bots(guild_id)
-            embed = await build_detector_bots_embed(interaction.guild, bots)
-            await interaction.message.edit(embed=themed(embed))
-        elif page == "modes":
-            configs = await get_guild_configs(guild_id)
-            g_data = await get_global_data()
-            accounts = g_data.get("accounts", [])
-            embed = await build_mode_configs_embed(interaction.guild, configs, accounts)
-            await interaction.message.edit(embed=themed(embed))
+    guild_id = str(interaction.guild_id)
+
+    page = override_page
+    if not page:
+        if "AutoCatch" in current_title:
+            page = "autocatch"
+        elif "Excludes" in current_title:
+            page = "excludes"
+        elif "Detector Bots" in current_title:
+            page = "detector_bots"
+        elif "Mode Configurations" in current_title:
+            page = "modes"
+
+    embed = None
+    if page == "autocatch":
+        autocatch_data = await get_autocatch_status()
+        g_data = await get_global_data()
+        accounts = g_data.get("accounts", [])
+        embed = await build_autocatch_configs_embed(interaction.guild, autocatch_data, accounts)
+    elif page == "excludes":
+        excludes = await get_guild_excludes(guild_id)
+        embed = await build_excludes_configs_embed(interaction.guild, excludes)
+    elif page == "detector_bots":
+        bots = await get_guild_detector_bots(guild_id)
+        embed = await build_detector_bots_embed(interaction.guild, bots)
+    elif page == "modes":
+        configs = await get_guild_configs(guild_id)
+        g_data = await get_global_data()
+        accounts = g_data.get("accounts", [])
+        embed = await build_mode_configs_embed(interaction.guild, configs, accounts)
+
+    if embed is not None:
+        await message.edit(view=ConfigView(page=page, embed=embed))
 
 
 # --- CONFIG GROUP SUBCOMMANDS ---
@@ -641,7 +647,7 @@ async def grindconfig(ctx: commands.Context):
     accounts = g_data.get("accounts", [])
 
     embed = await build_mode_configs_embed(ctx.guild, configs, accounts)
-    await ctx.send(embed=themed(embed), view=ConfigView(page="modes"))
+    await ctx.send(view=ConfigView(page="modes", embed=embed))
 
 
 @config_group.command(name="grinderaccounts", aliases=["grindaccounts", "accounts"])
@@ -652,7 +658,7 @@ async def grindaccounts_cmd(ctx: commands.Context):
     accs = data.get("accounts", [])
 
     embed = build_accounts_embed(accs)
-    await ctx.send(embed=themed(embed), view=AccountsView())
+    await ctx.send(view=AccountsView(embed=embed))
 
 
 @config_group.command(name="grinderlogs", aliases=["logs"])
@@ -667,7 +673,7 @@ async def grinderlogs_cmd(ctx: commands.Context):
     logs = await get_guild_logs(guild_id)
 
     embed = build_logs_embed(ctx.guild, logs)
-    await ctx.send(embed=themed(embed), view=GrinderLogsView())
+    await ctx.send(view=GrinderLogsView(embed=embed))
 
 
 async def _config_command_error(ctx: commands.Context, error: Exception):
@@ -843,9 +849,13 @@ class GrinderCog(commands.Cog):
             if duration:
                 embed.add_field(name="⏱️ Duration", value=f"**{duration}** (resumes <t:{int(pause_until / 1000)}:R>)", inline=False)
 
-            confirm_view = ConfirmView(author=ctx.author)
-            confirm_msg = await ctx.send(embed=embed, view=confirm_view)
-
+            confirm_view = ConfirmLayout(
+                ctx.author,
+                embed=embed,
+                cancel_text="❌ Cancelled.",
+                timeout_text="⏰ Timed out.",
+            )
+            await confirm_view.send(ctx, reply=False)
             await confirm_view.wait()
 
             if confirm_view.value is True:
@@ -856,11 +866,7 @@ class GrinderCog(commands.Cog):
                 await save_guild_configs(guild_id, configs)
 
                 dur_str = f" for **{duration}** (resumes <t:{int(pause_until / 1000)}:R>)" if duration else " indefinitely"
-                await confirm_msg.edit(embed=make_embed(description=f"⏸️ Paused **{len(target_indices)}** configuration(s){dur_str}."), view=None)
-            elif confirm_view.value is False:
-                await confirm_msg.edit(embed=error_embed("Cancelled."), view=None)
-            else:
-                await confirm_msg.edit(embed=make_embed(description="⏰ Timed out."), view=None)
+                await confirm_view.show(make_embed(description=f"⏸️ Paused **{len(target_indices)}** configuration(s){dur_str}."))
             return
 
         idx = target_indices[0]
@@ -966,9 +972,13 @@ class GrinderCog(commands.Cog):
                 color=discord.Color.green()
             )
 
-            confirm_view = ConfirmView(author=ctx.author)
-            confirm_msg = await ctx.send(embed=embed, view=confirm_view)
-
+            confirm_view = ConfirmLayout(
+                ctx.author,
+                embed=embed,
+                cancel_text="❌ Cancelled.",
+                timeout_text="⏰ Timed out.",
+            )
+            await confirm_view.send(ctx, reply=False)
             await confirm_view.wait()
 
             if confirm_view.value is True:
@@ -978,11 +988,7 @@ class GrinderCog(commands.Cog):
 
                 await save_guild_configs(guild_id, configs)
 
-                await confirm_msg.edit(embed=make_embed(description=f"▶️ Resumed **{len(target_indices)}** configuration(s)."), view=None)
-            elif confirm_view.value is False:
-                await confirm_msg.edit(embed=error_embed("Cancelled."), view=None)
-            else:
-                await confirm_msg.edit(embed=make_embed(description="⏰ Timed out."), view=None)
+                await confirm_view.show(make_embed(description=f"▶️ Resumed **{len(target_indices)}** configuration(s)."))
             return
 
         idx = target_indices[0]
