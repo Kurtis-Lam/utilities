@@ -4,7 +4,7 @@ import re
 import discord
 
 from views.common import (
-    BaseView,
+    EmbedLayout,
     error_embed,
     success_embed,
     themed,
@@ -63,16 +63,15 @@ LEGEND = "Green = on  •  Grey = off"
 # --- Page builders ---------------------------------------------------------------
 
 async def _build_category_page(cog, guild: discord.Guild, guild_id: int, author_id: int, category: str):
-    """(embed, view) for a category's config page, always built from a fresh
-    read of the config so the on/off button colors match reality."""
+    """The category's config page as a view (container + buttons), always built
+    from a fresh read of the config so the on/off button colors match reality."""
     cfg = await cog.get_category_config(guild_id, category)
-    embed = themed(await cog.build_category_embed(guild, category))
-    view = CategoryConfigView(cog, guild_id=guild_id, author_id=author_id, category=category, cfg=cfg)
-    return embed, view
+    embed = await cog.build_category_embed(guild, category)
+    return CategoryConfigView(cog, guild_id=guild_id, author_id=author_id, category=category, cfg=cfg, embed=embed)
 
 
 async def build_main_page(cog, guild: discord.Guild, guild_id: int, author_id: int):
-    """(embed, view) for the `.c a` landing page."""
+    """The `.c a` landing page as a view (container + buttons)."""
     results = await asyncio.gather(
         *(cog.get_category_config(guild_id, cat) for cat in CATEGORY_ORDER),
         return_exceptions=True,
@@ -82,11 +81,10 @@ async def build_main_page(cog, guild: discord.Guild, guild_id: int, author_id: i
         for cat, cfg in zip(CATEGORY_ORDER, results)
         if isinstance(cfg, dict)
     }
-    embed = themed(await cog.build_main_embed(guild))
+    embed = await cog.build_main_embed(guild)
     if states and not embed.footer.text:
         embed.set_footer(text=LEGEND)
-    view = AutoLockMainView(cog, guild_id=guild_id, author_id=author_id, states=states or None)
-    return embed, view
+    return AutoLockMainView(cog, guild_id=guild_id, author_id=author_id, states=states or None, embed=embed)
 
 
 def _parse_whitelist_items(raw: str) -> list[str]:
@@ -180,60 +178,62 @@ class WhitelistModal(discord.ui.Modal):
 
 # --- Views -----------------------------------------------------------------------
 
-class CategoryConfigView(BaseView):
-    def __init__(self, cog, guild_id: int, author_id: int, category: str, cfg: dict):
-        super().__init__(author_id=author_id, timeout=180)
+class CategoryConfigView(EmbedLayout):
+    def __init__(self, cog, guild_id: int, author_id: int, category: str, cfg: dict, embed: discord.Embed | None = None):
+        super().__init__(embed, author_id=author_id, timeout=180)
         self.cog = cog
         self.guild_id = guild_id
         self.category = category
 
-        # Row 0: schedule + whitelist
-        self.add_item(self._make_button("Set Delay", discord.ButtonStyle.blurple, self._set_delay, row=0, emoji="⏱️"))
-        self.add_item(self._make_button("Add Whitelist", discord.ButtonStyle.green, self._add_whitelist, row=0, emoji="➕"))
-        self.add_item(self._make_button("Remove Whitelist", discord.ButtonStyle.red, self._remove_whitelist, row=0, emoji="➖"))
+        self.schedule_row = [
+            self._make_button("Set Delay", discord.ButtonStyle.blurple, self._set_delay, emoji="⏱️"),
+            self._make_button("Add Whitelist", discord.ButtonStyle.green, self._add_whitelist, emoji="➕"),
+            self._make_button("Remove Whitelist", discord.ButtonStyle.red, self._remove_whitelist, emoji="➖"),
+        ]
 
-        # Row 1: on/off switches
         is_enabled = cfg.get("enabled", False)
-        self.add_item(self._make_button(
-            "Turn Lock Off" if is_enabled else "Turn Lock On",
-            discord.ButtonStyle.red if is_enabled else discord.ButtonStyle.green,
-            self._toggle_lock,
-            row=1,
-            emoji="🔒" if is_enabled else "🔓",
-        ))
+        self.switch_row = [
+            self._make_button(
+                "Turn Lock Off" if is_enabled else "Turn Lock On",
+                discord.ButtonStyle.red if is_enabled else discord.ButtonStyle.green,
+                self._toggle_lock,
+                emoji="🔒" if is_enabled else "🔓",
+            )
+        ]
 
         delay_on = cfg.get("delay_enabled", True)
-        self.add_item(self._make_button(
+        self.switch_row.append(self._make_button(
             "Turn Delay Off" if delay_on else "Turn Delay On",
             discord.ButtonStyle.red if delay_on else discord.ButtonStyle.green,
             self._toggle_delay,
-            row=1,
             emoji="⏲️",
         ))
 
         if category in RESTRICT_CATEGORIES:
             restrict_on = cfg.get("restrict_unlockers", True)
-            self.add_item(self._make_button(
+            self.switch_row.append(self._make_button(
                 "Turn Restrict Off" if restrict_on else "Turn Restrict On",
                 discord.ButtonStyle.red if restrict_on else discord.ButtonStyle.green,
                 self._toggle_restrict,
-                row=1,
                 emoji="🛡️",
             ))
 
-        # Row 2: navigation
-        self.add_item(self._make_button("Back", discord.ButtonStyle.gray, self._back, row=2, emoji="◀️"))
+        self.nav_row = [self._make_button("Back", discord.ButtonStyle.gray, self._back, emoji="◀️")]
+        self.render()
 
-    def _make_button(self, label, style, callback, row=0, emoji=None):
-        button = discord.ui.Button(label=label, style=style, row=row, emoji=emoji)
+    def rows(self):
+        return [self.schedule_row, self.switch_row, self.nav_row]
+
+    def _make_button(self, label, style, callback, emoji=None):
+        button = discord.ui.Button(label=label, style=style, emoji=emoji)
         button.callback = callback
         return button
 
     async def reload(self, interaction: discord.Interaction):
-        embed, view = await _build_category_page(
+        view = await _build_category_page(
             self.cog, interaction.guild, self.guild_id, self.author_id, self.category
         )
-        await self.swap(interaction, embed=embed, view=view)
+        await self.swap(interaction, view=view)
 
     async def _set_delay(self, interaction: discord.Interaction):
         await interaction.response.send_modal(DelayModal(self.cog, self.guild_id, self.category, self))
@@ -261,31 +261,38 @@ class CategoryConfigView(BaseView):
         await self.reload(interaction)
 
     async def _back(self, interaction: discord.Interaction):
-        embed, view = await build_main_page(self.cog, interaction.guild, self.guild_id, self.author_id)
-        await self.swap(interaction, embed=embed, view=view)
+        view = await build_main_page(self.cog, interaction.guild, self.guild_id, self.author_id)
+        await self.swap(interaction, view=view)
 
 
-class AutoLockMainView(BaseView):
-    def __init__(self, cog, guild_id: int, author_id: int, states: dict | None = None):
-        super().__init__(author_id=author_id, timeout=180)
+class AutoLockMainView(EmbedLayout):
+    def __init__(self, cog, guild_id: int, author_id: int, states: dict | None = None, embed: discord.Embed | None = None):
+        super().__init__(embed, author_id=author_id, timeout=180)
         self.cog = cog
         self.guild_id = guild_id
+        self.button_rows: list[list[discord.ui.Button]] = []
 
-        for row_index, row in enumerate(ROW_LAYOUT):
+        for row in ROW_LAYOUT:
+            buttons = []
             for cat in row:
                 if states is None:
                     style = discord.ButtonStyle.blurple
                 else:
                     style = discord.ButtonStyle.green if states.get(cat) else discord.ButtonStyle.gray
-                button = discord.ui.Button(label=CATEGORY_LABELS[cat], style=style, row=row_index)
+                button = discord.ui.Button(label=CATEGORY_LABELS[cat], style=style)
                 button.callback = self._make_callback(cat)
-                self.add_item(button)
+                buttons.append(button)
+            self.button_rows.append(buttons)
+        self.render()
+
+    def rows(self):
+        return self.button_rows
 
     def _make_callback(self, category: str):
         async def callback(interaction: discord.Interaction):
-            embed, view = await _build_category_page(
+            view = await _build_category_page(
                 self.cog, interaction.guild, self.guild_id, self.author_id, category
             )
-            await self.swap(interaction, embed=embed, view=view)
+            await self.swap(interaction, view=view)
 
         return callback
