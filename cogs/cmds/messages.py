@@ -336,12 +336,13 @@ class Messages(commands.Cog):
             count = len(deleted)
 
         target_str = f" from {user.display_name}" if user else ""
-        # Plain send on purpose: the invoking message was just purged, so it can't be replied to.
-        await ctx.reply(
+        # Send a plain channel message because the invoking message was deleted in the purge
+        await ctx.send(
             embed=ok_embed("Messages Purged", f"Purged **{count}** message(s){target_str}.", emoji="🧹"),
-            delete_after=3, mention_author=False
+            delete_after=3
         )
 
+        
     @commands.hybrid_command(name="pin", description="Pins a message (reply to a message or provide a message ID/link).")
     @app_commands.describe(
         message_ref="The message ID or link to pin (leave blank if replying to a message)."
