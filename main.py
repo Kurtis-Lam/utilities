@@ -60,9 +60,8 @@ class Utilities(commands.Bot):
             "cmds": ["ai", "categories", "channels", "members", "messages", "ping", "roles", "utilities"],
             "config": ["base"],
             "poketwo": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer"],
-            "poketwo-utils": ["dex", "extract", "fled", "hintsolver"],
-            #"poketwo-management": ["autolocktoggle", "autolockset"]
-            "poketwo-management": ["set", "settings", "toggle"]
+            "poketwo-management": ["set", "settings", "toggle"],
+            "poketwo-utils": ["dex", "extract", "fled", "hintsolver"]
         }
 
     async def get_prefix_with_space(self, bot, message):
@@ -73,14 +72,17 @@ class Utilities(commands.Bot):
         connector = aiohttp.TCPConnector(limit=5, enable_cleanup_closed=True)
         self.session = aiohttp.ClientSession(connector=connector)
 
+        print("\n📦 Loading cogs...")
         for category, cogs in self.cogs_dict.items():
-            category_path = f'cogs.{category}'
-            for cog in cogs:
+            print(f"📂 [{category}]")
+            for i, cog in enumerate(cogs):
+                branch = "└──" if i == len(cogs) - 1 else "├──"
                 try:
-                    await self.load_extension(f'{category_path}.{cog.lower()}')
-                    print(f'✅ {cog.upper()} cog loaded.')
+                    await self.load_extension(f'cogs.{category}.{cog.lower()}')
+                    print(f"  {branch} ✅ {cog}")
                 except Exception as e:
-                    print(f'❌ Failed to load {cog.upper()} cog: {e}')
+                    print(f"  {branch} ❌ {cog} (Error: {e})")
+            print()  # Add empty line spacing between categories
         
         # Free memory immediately after loading extensions
         gc.collect()
