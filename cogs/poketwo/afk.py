@@ -4,69 +4,32 @@ from discord.ext import commands
 from views.common import EMBED_COLOR, error_embed, warning_embed
 from views.embeds import handle_command_error
 
+# Requires discord.py >= 2.6 (Components V2: LayoutView, Container, Section, ...)
 
-class AFKButton(discord.ui.Button):
-    def __init__(self, is_afk: bool):
-        super().__init__(
-            label="Remove AFK" if is_afk else "Set AFK",
-            style=discord.ButtonStyle.red if is_afk else discord.ButtonStyle.green,
-            custom_id="toggle_afk"
-        )
-        self.is_afk = is_afk
-
-    async def callback(self, interaction: discord.Interaction):
-        view: AFKView = self.view
-        if interaction.user.id != view.user_id:
-            return await interaction.response.send_message(
-                embed=warning_embed("Not your button."), ephemeral=True
-            )
-
-        new_afk_status = not self.is_afk
-
-        if new_afk_status:
-            await view.cog.afk_collection.update_one(
-                {"_id": interaction.user.id},
-                {"$set": {"afk": True}},
-                upsert=True
-            )
-        else:
-            await view.cog.afk_collection.delete_one({"_id": interaction.user.id})
-
-        embed = view.cog.make_embed(new_afk_status)
-        self.is_afk = new_afk_status
-        self.label = "Remove AFK" if new_afk_status else "Set AFK"
-        self.style = discord.ButtonStyle.red if new_afk_status else discord.ButtonStyle.green
-
-        await interaction.response.edit_message(embed=embed, view=view)
-
-
-class AFKView(discord.ui.View):
-    def __init__(self, cog, user_id: int, is_afk: bool):
-        super().__init__(timeout=180)
-        self.cog = cog
-        self.user_id = user_id
-        self.add_item(AFKButton(is_afk))
+CATEGORIES = [
+    ("sh", "Shiny Hunt"),
+    ("cl", "Collection"),
+    ("tp", "Type Ping"),
+    ("rp", "Region Ping"),
+]
 
 
 class PingToggleButton(discord.ui.Button):
-    def __init__(self, ping_key: str, label: str, is_active: bool):
+    """On/Off button shown to the right of each category."""
+
+    def __init__(self, afk_view: "AFKView", ping_key: str):
+        is_active = afk_view.settings.get(ping_key, False)
         super().__init__(
-            label=label,
+            label="On" if is_active else "Off",
             style=discord.ButtonStyle.green if is_active else discord.ButtonStyle.red,
-            custom_id=f"toggle_ping_{ping_key.lower()}"
         )
+        self.afk_view = afk_view
         self.ping_key = ping_key
-        self.is_active = is_active
 
     async def callback(self, interaction: discord.Interaction):
-        view: SetAFKView = self.view
-        if interaction.user.id != view.user_id:
-            return await interaction.response.send_message(
-                embed=warning_embed("Not your menu."), ephemeral=True
-            )
-
-        self.is_active = not self.is_active
-        self.style = discord.ButtonStyle.green if self.is_active else discord.ButtonStyle.red
+        view = self.afk_view
+        new_value = not view.settings.get(self.ping_key, False)
+        view.settings[self.ping_key] = new_value
 
         doc_id = f"{interaction.guild_id}_{interaction.user.id}"
         await view.cog.afk_settings.update_one(
@@ -75,32 +38,124 @@ class PingToggleButton(discord.ui.Button):
                 "$set": {
                     "guild_id": interaction.guild_id,
                     "user_id": interaction.user.id,
-                    f"allowed_pings.{self.ping_key}": self.is_active
+                    f"allowed_pings.{self.ping_key}": new_value,
                 }
             },
-            upsert=True
+            upsert=True,
         )
 
-        embed = view.cog.make_settings_embed(view)
-        await interaction.response.edit_message(embed=embed, view=view)
+        view.render()
+        await interaction.response.edit_message(view=view)
 
 
-class SetAFKView(discord.ui.View):
-    def __init__(self, cog, user_id: int, current_settings: dict):
+class AFKToggleButton(discord.ui.Button):
+    def __init__(self, afk_view: "AFKView"):
+        is_afk = afk_view.is_afk
+        super().__init__(
+            label="Remove AFK" if is_afk else "Set AFK",
+            style=discord.ButtonStyle.red if is_afk else discord.ButtonStyle.green,
+        )
+        self.afk_view = afk_view
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.afk_view
+        view.is_afk = not view.is_afk
+
+        if view.is_afk:
+            await view.cog.afk_collection.update_one(
+                {"_id": interaction.user.id},
+                {"$set": {"afk": True}},
+                upsert=True,
+            )
+        else:
+            await view.cog.afk_collection.delete_one({"_id": interaction.user.id})
+
+        view.render()
+        await interaction.response.edit_message(view=view)
+
+
+class TurnAllButton(discord.ui.Button):
+    def __init__(self, afk_view: "AFKView", turn_on: bool):
+        super().__init__(
+            label="Turn All On" if turn_on else "Turn All Off",
+            style=discord.ButtonStyle.grey,
+        )
+        self.afk_view = afk_view
+        self.turn_on = turn_on
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.afk_view
+        for key, _ in CATEGORIES:
+            view.settings[key] = self.turn_on
+
+        doc_id = f"{interaction.guild_id}_{interaction.user.id}"
+        await view.cog.afk_settings.update_one(
+            {"_id": doc_id},
+            {
+                "$set": {
+                    "guild_id": interaction.guild_id,
+                    "user_id": interaction.user.id,
+                    "allowed_pings": view.settings,
+                }
+            },
+            upsert=True,
+        )
+
+        view.render()
+        await interaction.response.edit_message(view=view)
+
+
+class AFKView(discord.ui.LayoutView):
+    def __init__(self, cog, user_id: int, is_afk: bool, settings: dict):
         super().__init__(timeout=180)
         self.cog = cog
         self.user_id = user_id
+        self.is_afk = is_afk
+        self.settings = dict(settings)
+        self.render()
 
-        buttons = [
-            ("sh", "Sh"),
-            ("cl", "Cl"),
-            ("rp", "Rp"),
-            ("tp", "Tp")
-        ]
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                embed=warning_embed("Not your menu."), ephemeral=True
+            )
+            return False
+        return True
 
-        for key, label in buttons:
-            is_active = current_settings.get(key, False)
-            self.add_item(PingToggleButton(ping_key=key, label=label, is_active=is_active))
+    def render(self):
+        """Rebuild the whole container from the current state."""
+        self.clear_items()
+
+        status = "🌙 **AFK Status:** `AFK`" if self.is_afk else "☀️ **AFK Status:** `Active`"
+
+        container = discord.ui.Container(accent_colour=EMBED_COLOR)
+        container.add_item(discord.ui.TextDisplay(f"## ⚙️ AFK & Ping Settings\n{status}"))
+        container.add_item(discord.ui.Separator())
+
+        # One section per category: text on the left, button on the right
+        for key, display_name in CATEGORIES:
+            is_on = self.settings.get(key, False)
+            icon = "✅" if is_on else "❌"
+            subtext = "Receiving pings" if is_on else "Ignored"
+            container.add_item(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"**{display_name}** {icon}\n{subtext}"),
+                    accessory=PingToggleButton(self, key),
+                )
+            )
+
+        container.add_item(discord.ui.Separator())
+
+        # Global actions, also inside the container
+        container.add_item(
+            discord.ui.ActionRow(
+                AFKToggleButton(self),
+                TurnAllButton(self, turn_on=True),
+                TurnAllButton(self, turn_on=False),
+            )
+        )
+
+        self.add_item(container)
 
 
 class AFK(commands.Cog):
@@ -110,7 +165,6 @@ class AFK(commands.Cog):
     async def cog_command_error(self, ctx: commands.Context, error: Exception):
         await handle_command_error(ctx, error)
 
-    # Retrieves database and collection dynamically via main.py's bot.mongo_client
     @property
     def mongo_client(self):
         return self.bot.mongo_client
@@ -127,88 +181,21 @@ class AFK(commands.Cog):
     def afk_settings(self):
         return self.db["afk_settings"]
 
-    def make_embed(self, is_afk: bool) -> discord.Embed:
-        embed = discord.Embed(
-            title="🌙 AFK Status",
-            description="You're **AFK**. No SH/CL/TP/RP pings." if is_afk else "You're **Active**.",
-            color=EMBED_COLOR
-        )
-        return embed
-
-    def make_settings_embed(self, view: SetAFKView) -> discord.Embed:
-        statuses = []
-        for child in view.children:
-            if isinstance(child, PingToggleButton):
-                status_str = "🟢 Active" if child.is_active else "🔴 Ignored"
-                statuses.append(f"**{child.label}**: {status_str}")
-
-        embed = discord.Embed(
-            title="⚙️ AFK Ping Exceptions",
-            description=(
-                "Green = still pinged while AFK. Red = ignored.\n\n"
-                + "\n".join(statuses)
-            ),
-            color=EMBED_COLOR
-        )
-        return embed
-
-    @commands.hybrid_command(name="afk", description="Toggle your AFK status to avoid pings.")
+    @commands.hybrid_command(name="afk", aliases=["setafk"], description="Toggle AFK status and configure ping settings.")
     async def afk(self, ctx: commands.Context):
-        doc = await self.afk_collection.find_one({"_id": ctx.author.id})
-        is_afk = bool(doc and doc.get("afk"))
-
-        view = AFKView(self, ctx.author.id, is_afk)
-        embed = self.make_embed(is_afk)
-        await ctx.send(embed=embed, view=view)
-
-    @commands.hybrid_command(name="setafk", description="Configure ping exceptions while AFK.")
-    async def setafk(self, ctx: commands.Context):
         if not ctx.guild:
             return await ctx.send(embed=error_embed("Server only."))
 
+        doc = await self.afk_collection.find_one({"_id": ctx.author.id})
+        is_afk = bool(doc and doc.get("afk"))
+
         doc_id = f"{ctx.guild.id}_{ctx.author.id}"
-        doc = await self.afk_settings.find_one({"_id": doc_id})
-        current_settings = doc.get("allowed_pings", {}) if doc else {}
+        settings_doc = await self.afk_settings.find_one({"_id": doc_id})
+        current_settings = settings_doc.get("allowed_pings", {}) if settings_doc else {}
 
-        view = SetAFKView(self, ctx.author.id, current_settings)
-        embed = self.make_settings_embed(view)
-        await ctx.send(embed=embed, view=view)
-
-    async def format_ping_list(self, user_ids: set, guild_id: int, ping_type: str = None) -> list[str]:
-        if not user_ids:
-            return []
-
-        # Check composite guild_user keys first, fallback to user_id for global AFK
-        doc_ids = [f"{guild_id}_{uid}" for uid in user_ids]
-        afk_docs = await self.afk_collection.find({
-            "$or": [
-                {"_id": {"$in": doc_ids}},
-                {"_id": {"$in": list(user_ids)}}
-            ]
-        }).to_list(length=None)
-
-        afk_user_ids = set()
-        for doc in afk_docs:
-            if doc.get("afk"):
-                if isinstance(doc["_id"], int):
-                    afk_user_ids.add(doc["_id"])
-                else:
-                    afk_user_ids.add(doc.get("user_id", int(doc["_id"].split("_")[1])))
-
-        settings_docs = await self.afk_settings.find({"_id": {"$in": doc_ids}}).to_list(length=None)
-        settings_map = {doc["user_id"]: doc.get("allowed_pings", {}) for doc in settings_docs}
-
-        formatted = []
-        for uid in user_ids:
-            if uid in afk_user_ids:
-                user_allowed = settings_map.get(uid, {}).get(ping_type.lower(), False) if ping_type else False
-                if user_allowed:
-                    formatted.append(f"<@{uid}>")
-                else:
-                    formatted.append(f"{uid} (AFK)")
-            else:
-                formatted.append(f"<@{uid}>")
-        return formatted
+        view = AFKView(self, ctx.author.id, is_afk, current_settings)
+        # Components V2: send only the view (no content/embed)
+        await ctx.send(view=view)
 
 
 async def setup(bot: commands.Bot):

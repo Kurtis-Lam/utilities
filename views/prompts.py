@@ -51,7 +51,7 @@ async def ask(ctx, question: str, *, timeout: float = DEFAULT_TIMEOUT) -> Option
     Returns the user's reply message, or None if they timed out or cancelled.
     """
     view = PromptView(ctx.author.id, timeout=timeout)
-    content = f"{question}\n-# you have {int(timeout)} seconds"
+    content = f"{question}\n-# You have {int(timeout)} seconds\n-# Click below to abort."
     prompt = await ctx.reply(content, view=view, mention_author=False)
 
     def check(m: discord.Message) -> bool:
