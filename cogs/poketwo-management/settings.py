@@ -1,8 +1,9 @@
 import discord
 from discord.ext import commands
 
+from cogs.poketwo.lockcommon import DEFAULT_DELAY
 from views.autolockview import ALL_CATEGORIES, CATEGORY_LABELS
-from views.embeds import err_embed, handle_command_error
+from views.embeds import commands_usage_embed, err_embed, handle_command_error
 
 
 def _label(category: str) -> str:
@@ -22,9 +23,25 @@ class Settings(commands.Cog):
             await ctx.send(embed=err_embed("AutoLockConfig is not loaded.", emoji="⚠️"))
         return cog
 
-    # Server-wide settings are already covered by `.c a` (AutoLockConfig's own
-    # interactive menu), so this cog only handles the one thing that menu
-    # doesn't show at a glance: this specific channel's effective settings.
+    @staticmethod
+    def _summary_field(cfg: dict) -> str:
+        enabled = "✅ Enabled" if cfg.get("enabled", False) else "❌ Disabled"
+        delay_str = f"{cfg.get('delay', DEFAULT_DELAY)}s" if cfg.get("delay_enabled", True) else "Off"
+        restricted = "✅ Yes" if cfg.get("restrict_unlockers", False) else "❌ No"
+        return f"{enabled}\n⏱️ {delay_str}\n🔐 Restrict: {restricted}"
+
+    # --- .settings -----------------------------------------------------------
+    # Just lists the two real commands (plain usage embed, no Example button).
+    @commands.command(
+        name="settings",
+        description="Show the autolock settings commands.",
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def settings(self, ctx: commands.Context):
+        await ctx.send(embed=commands_usage_embed(ctx, "channelsettings", "serversettings"))
+
+    # --- .channelsettings ----------------------------------------------------
     @commands.command(
         name="channelsettings",
         aliases=["chsettings"],
@@ -33,7 +50,7 @@ class Settings(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def channel_settings(self, ctx: commands.Context):
-        """This channel's autolock settings."""
+        """This channel's autolock settings (server defaults + this channel's overrides)."""
         cog = await self._get_config_cog(ctx)
         if not cog:
             return
@@ -45,24 +62,37 @@ class Settings(commands.Cog):
 
         for cat in ALL_CATEGORIES:
             cfg = await cog.get_category_config_channel(ctx.guild.id, ctx.channel.id, cat)
-
-            enabled = "✅ Enabled" if cfg.get("enabled", False) else "❌ Disabled"
-
-            delay_enabled = cfg.get("delay_enabled", True)
-            delay_val = cfg.get("delay", 15)
-            delay_str = f"{delay_val}s" if delay_enabled else "Off"
-
-            restricted = "✅ Yes" if cfg.get("restrict_unlockers", False) else "❌ No"
-
-            field_value = f"{enabled}\n⏱️ {delay_str}\n🔐 Restrict: {restricted}"
-
-            embed.add_field(
-                name=_label(cat),
-                value=field_value,
-                inline=True,
-            )
+            embed.add_field(name=_label(cat), value=self._summary_field(cfg), inline=True)
 
         embed.set_footer(text="Edit with .set / .toggle")
+        await ctx.send(embed=embed)
+
+    # --- .serversettings -----------------------------------------------------
+    @commands.command(
+        name="serversettings",
+        aliases=["svsettings", "ssettings"],
+        description="This server's autolock settings.",
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def server_settings(self, ctx: commands.Context):
+        """Server-wide autolock defaults (what applies where a channel has no override)."""
+        cog = await self._get_config_cog(ctx)
+        if not cog:
+            return
+
+        embed = discord.Embed(
+            title=f"⚙️ {ctx.guild.name}",
+            color=discord.Color.green(),
+        )
+
+        for cat in ALL_CATEGORIES:
+            cfg = await cog.get_category_config(ctx.guild.id, cat)
+            wl_count = len(cfg.get("whitelist", []))
+            value = self._summary_field(cfg) + f"\n📋 Whitelist: {wl_count}"
+            embed.add_field(name=_label(cat), value=value, inline=True)
+
+        embed.set_footer(text="Edit with .c a or .set / .toggle --global")
         await ctx.send(embed=embed)
 
 
