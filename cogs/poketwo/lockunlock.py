@@ -38,12 +38,11 @@ def _progress_embed(done: int, total: int, started: float, started_unix: int) ->
     filled = int((done / total) * 10) if total else 10
     bar = "█" * filled + "░" * (10 - filled)
     embed = discord.Embed(
-        title="🔓 Unlocking Channels…",
-        description=f"`{bar}`\n**{done}/{total}** channels unlocked",
+        title="🔓 Unlocking…",
+        description=f"`{bar}` **{done}/{total}**",
         color=WARN_COLOR,
     )
     embed.add_field(name="⏱️ Elapsed", value=f"`{format_elapsed(time.monotonic() - started)}`", inline=True)
-    embed.add_field(name="🚀 Started", value=f"<t:{started_unix}:R>", inline=True)
     return embed
 
 
@@ -109,7 +108,7 @@ class UnlockView(discord.ui.View):
         try:
             await channel.set_permissions(poketwo, overwrite=permissions)
         except discord.HTTPException as e:
-            return await interaction.response.send_message(embed=error_embed(f"I couldn't unlock this channel: `{e}`"), ephemeral=True)
+            return await interaction.response.send_message(embed=error_embed(f"Couldn't unlock: {e}"), ephemeral=True)
 
         if lock_doc:
             await locks_collection.delete_one({"_id": channel.id})
@@ -171,7 +170,7 @@ class LockUnlock(commands.Cog):
         try:
             await ctx.channel.set_permissions(poketwo, overwrite=permissions)
         except discord.HTTPException as e:
-            return await ctx.reply(embed=error_embed(f"I couldn't unlock this channel: `{e}`"))
+            return await ctx.reply(embed=error_embed(f"Couldn't unlock: {e}"))
 
         if lock_doc:
             await self.locks_collection.delete_one({"_id": ctx.channel.id})
@@ -207,7 +206,7 @@ class LockUnlock(commands.Cog):
         try:
             await ctx.channel.set_permissions(poketwo, overwrite=permissions)
         except discord.HTTPException as e:
-            return await ctx.reply(embed=error_embed(f"I couldn't lock this channel: `{e}`"))
+            return await ctx.reply(embed=error_embed(f"Couldn't lock: {e}"))
 
         msg = await ctx.reply(
             embed=locked_embed(ctx.channel, locked_by=ctx.author, allowed_users=None, when=now),
@@ -253,7 +252,7 @@ class LockUnlock(commands.Cog):
         if not locked:
             embed = discord.Embed(
                 title="🔓 Already Unlocked",
-                description="No channels are locked right now, so there was nothing to unlock.",
+                description="No locked channels.",
                 color=WARN_COLOR,
             )
             add_item_fields(embed, f"ℹ️️ Already Unlocked ({len(already_unlocked)})", [c.mention for c in already_unlocked])
@@ -291,11 +290,11 @@ class LockUnlock(commands.Cog):
         elapsed = time.monotonic() - started
         had_errors = bool(failed)
         embed = discord.Embed(
-            title="⚠️ Unlock Finished With Errors" if had_errors else "✅ Unlock Complete",
-            description=f"{ctx.author.mention} unlocked **{done}/{total}** locked channels.",
+            title="⚠️ Unlocked with errors" if had_errors else "✅ Unlocked",
+            description=f"**{done}/{total}** channels unlocked.",
             color=WARN_COLOR if had_errors else UNLOCK_COLOR,
         )
-        embed.add_field(name="⏱️ Time Elapsed", value=f"`{format_elapsed(elapsed)}`", inline=True)
+        embed.add_field(name="⏱️ Elapsed", value=f"`{format_elapsed(elapsed)}`", inline=True)
         embed.add_field(name="🕒 Finished", value=stamp(now_unix()), inline=True)
         add_item_fields(embed, f"⚠️ Couldn't Unlock ({len(failed)})", [c.mention for c in failed])
         add_item_fields(embed, f"ℹ️ Already Unlocked ({len(already_unlocked)})", [c.mention for c in already_unlocked])
@@ -323,13 +322,9 @@ class LockUnlock(commands.Cog):
             else:
                 unlocked.append(channel)
 
-        total = len(locked) + len(unlocked)
         embed = discord.Embed(
-            title="📊 Channel Lock Overview",
-            description=(
-                f"🔒 **{len(locked)}** locked  •  🔓 **{len(unlocked)}** unlocked  •  📁 **{total}** text channels\n"
-                f"🕒 Updated <t:{now_unix()}:R>"
-            ),
+            title="📊 Locks",
+            description=f"🔒 **{len(locked)}** locked  •  🔓 **{len(unlocked)}** unlocked",
             color=EMBED_COLOR,
         )
 
@@ -339,14 +334,14 @@ class LockUnlock(commands.Cog):
             locked_lines.append(f"{channel.mention} • <t:{since}:R>" if since else channel.mention)
 
         if locked:
-            add_item_fields(embed, f"🔒 Locked Channels ({len(locked)})", locked_lines, sep="\n")
+            add_item_fields(embed, f"🔒 Locked ({len(locked)})", locked_lines, sep="\n")
         else:
-            embed.add_field(name="🔒 Locked Channels (0)", value="None", inline=False)
+            embed.add_field(name="🔒 Locked (0)", value="None", inline=False)
 
         if unlocked:
-            add_item_fields(embed, f"🔓 Unlocked Channels ({len(unlocked)})", [c.mention for c in unlocked])
+            add_item_fields(embed, f"🔓 Unlocked ({len(unlocked)})", [c.mention for c in unlocked])
         else:
-            embed.add_field(name="🔓 Unlocked Channels (0)", value="None", inline=False)
+            embed.add_field(name="🔓 Unlocked (0)", value="None", inline=False)
 
         await ctx.reply(embed=embed)
 
