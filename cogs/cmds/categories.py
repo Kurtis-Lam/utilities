@@ -9,6 +9,7 @@ from discord.ext import commands
 from views.categoriesview import CategorySelectView
 from views.common import ConfirmView
 from views.embeds import handle_common_error, send_usage
+from views.prompts import ask, is_skip, one_line
 
 
 class Categories(commands.Cog):
@@ -27,7 +28,7 @@ class Categories(commands.Cog):
             description=prompt,
             color=discord.Color.gold(),
         )
-        msg = await ctx.send(embed=embed, view=view)
+        msg = await ctx.reply(embed=embed, view=view, mention_author=False)
         await view.wait()
 
         if view.value is True:
@@ -57,13 +58,21 @@ class Categories(commands.Cog):
                 pass
             return False
 
+    async def _resolve_member_or_role(self, ctx, text: str):
+        for converter in (commands.MemberConverter(), commands.RoleConverter()):
+            try:
+                return await converter.convert(ctx, text)
+            except commands.BadArgument:
+                continue
+        return None
+
     async def prompt_category_selection(self, ctx, categories):
         view = CategorySelectView(ctx.author, categories)
         embed = discord.Embed(
             title="🔍 Pick a category",
             color=discord.Color.gold(),
         )
-        msg = await ctx.send(embed=embed, view=view)
+        msg = await ctx.reply(embed=embed, view=view, mention_author=False)
         await view.wait()
 
         try:
@@ -119,9 +128,9 @@ class Categories(commands.Cog):
         with_app_command=True,
     )
     @app_commands.describe(
-        name="The name of the category to create.",
+        name="The name of the category to create. Leave blank and I'll ask you step by step.",
         user=(
-            "Optional member to restrict this category's visibility to."
+            "Optional member or role to restrict this category's visibility to."
         ),
         preaction="Automatically lock or hide the category upon creation.",
     )
@@ -129,13 +138,14 @@ class Categories(commands.Cog):
     async def createcategory(
         self,
         ctx,
-        name: str = commands.parameter(
-            description="The name of the category to create."
+        name: typing.Optional[str] = commands.parameter(
+            default=None,
+            description="The name of the category to create (leave blank to be asked).",
         ),
-        user: typing.Optional[discord.Member] = commands.parameter(
+        user: typing.Optional[typing.Union[discord.Member, discord.Role]] = commands.parameter(
             default=None,
             description=(
-                "Optional member to restrict this category's visibility to."
+                "Optional member or role to restrict this category's visibility to."
             ),
         ),
         preaction: typing.Optional[typing.Literal["prelock", "prehide", "both"]] = commands.parameter(
@@ -161,22 +171,65 @@ class Categories(commands.Cog):
                 prehide = True
                 args_str = re.sub(r"(?i)--prehide", "", args_str)
 
-            # Extract user mention if present
+            # Extract user / role mention if present
             if ctx.message.mentions:
                 user = ctx.message.mentions[-1]
                 args_str = re.sub(rf"<@!?{user.id}>", "", args_str)
+            elif ctx.message.role_mentions:
+                user = ctx.message.role_mentions[-1]
+                args_str = re.sub(rf"<@&{user.id}>", "", args_str)
 
             name = args_str.replace("-", " ").strip()
-            if not name:
-                return await send_usage(
-                    ctx, note="Please provide a name for the category."
-                )
         else:
-            name = name.replace("-", " ")
+            name = (name or "").replace("-", " ").strip()
             if preaction in ("prelock", "both"):
                 prelock = True
             if preaction in ("prehide", "both"):
                 prehide = True
+
+        # No name given -> ask the questions one by one (30 seconds each)
+        if not name:
+            reply = await ask(ctx, "What do you want the **category name** to be?")
+            if reply is None:
+                return
+            name = reply.content.strip().replace("-", " ")
+            if not name:
+                return await ctx.reply(
+                    embed=one_line("❌ The category name can't be empty. Cancelled."), mention_author=False
+                )
+
+            reply = await ask(
+                ctx,
+                "Which **user or role** should this category be restricted to "
+                "(only they can see it)? Mention / ID / name them, or type `skip` for no restriction.",
+            )
+            if reply is None:
+                return
+            if not is_skip(reply.content):
+                user = await self._resolve_member_or_role(ctx, reply.content.strip())
+                if user is None:
+                    return await ctx.reply(
+                        embed=one_line("❌ Couldn't find that user or role. Cancelled."), mention_author=False
+                    )
+
+            if not (prelock or prehide):
+                reply = await ask(
+                    ctx,
+                    "Which **preaction** do you want? `prelock`, `prehide`, `both`, or `none`.",
+                )
+                if reply is None:
+                    return
+                choice = reply.content.strip().lower()
+                if choice in ("prelock", "lock"):
+                    prelock = True
+                elif choice in ("prehide", "hide"):
+                    prehide = True
+                elif choice == "both":
+                    prelock = prehide = True
+                elif not is_skip(choice):
+                    return await ctx.reply(
+                        embed=one_line("❌ Invalid preaction. Cancelled."), mention_author=False
+                    )
 
         overwrites = {}
 
@@ -236,7 +289,7 @@ class Categories(commands.Cog):
             ),
             color=discord.Color.green(),
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(
         aliases=["dcat"],
@@ -267,7 +320,7 @@ class Categories(commands.Cog):
                 description="Could not find a category to delete.",
                 color=discord.Color.red(),
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed, mention_author=False)
 
         confirmed = await self.confirm_action(
             ctx,
@@ -289,7 +342,7 @@ class Categories(commands.Cog):
                 ),
                 color=discord.Color.red(),
             )
-            await ctx.send(embed=embed)
+            await ctx.reply(embed=embed, mention_author=False)
         except discord.NotFound:
             pass
 
@@ -300,7 +353,7 @@ class Categories(commands.Cog):
         description="Renames a category.",
     )
     @app_commands.describe(
-        name="The new name for the category.",
+        name="The new name for the category. Leave blank and I'll ask you step by step.",
         category=(
             "The category to rename. Defaults to the current channel's category."
         ),
@@ -309,8 +362,9 @@ class Categories(commands.Cog):
     async def renamecategory(
         self,
         ctx,
-        name: str = commands.parameter(
-            description="The new name for the category."
+        name: typing.Optional[str] = commands.parameter(
+            default=None,
+            description="The new name for the category (leave blank to be asked).",
         ),
         category: typing.Optional[str] = commands.parameter(
             default=None,
@@ -320,14 +374,43 @@ class Categories(commands.Cog):
             ),
         ),
     ):
-        target_category = await self.get_target_category(ctx, category)
+        # No name given -> ask the questions one by one (30 seconds each)
+        if not name:
+            reply = await ask(
+                ctx,
+                "Which **category** do you want to rename? Mention / ID / name it, "
+                "or type `skip` for this channel's category.",
+            )
+            if reply is None:
+                return
+            category = None if is_skip(reply.content) else reply.content.strip()
+
+            target_category = await self.get_target_category(ctx, category)
+            if not target_category:
+                return await ctx.reply(
+                    embed=one_line("❌ Couldn't find that category. Cancelled."), mention_author=False
+                )
+
+            reply = await ask(
+                ctx,
+                f"What do you want the **new name** for **{target_category.name}** to be?",
+            )
+            if reply is None:
+                return
+            name = reply.content.strip()
+            if not name:
+                return await ctx.reply(
+                    embed=one_line("❌ The new name can't be empty. Cancelled."), mention_author=False
+                )
+        else:
+            target_category = await self.get_target_category(ctx, category)
         if not target_category:
             embed = discord.Embed(
                 title="❌ Error",
                 description="Could not find a category to rename.",
                 color=discord.Color.red(),
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed, mention_author=False)
 
         new_name = name.replace("-", " ")
         old_name = target_category.name
@@ -341,7 +424,7 @@ class Categories(commands.Cog):
             ),
             color=discord.Color.green(),
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(
         aliases=["lcat"],
@@ -375,11 +458,10 @@ class Categories(commands.Cog):
         target_category = await self.get_target_category(ctx, category)
         if not target_category:
             embed = discord.Embed(
-                title="❌ Error",
-                description="Could not find a category to lock.",
+                description="❌ Could not find a category to lock.",
                 color=discord.Color.red(),
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed, mention_author=False)
 
         role_or_member = target or ctx.guild.default_role
         await target_category.set_permissions(
@@ -390,14 +472,13 @@ class Categories(commands.Cog):
             await channel.edit(sync_permissions=True)
 
         embed = discord.Embed(
-            title="🔒 Category Locked",
             description=(
-                f"Category **{target_category.name}** has been locked and"
-                f" synced for {role_or_member.mention}."
+                f"🔒 Category **{target_category.name}** has been locked for"
+                f" {role_or_member.mention}."
             ),
             color=discord.Color.dark_grey(),
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(
         aliases=["ucat"],
@@ -431,11 +512,10 @@ class Categories(commands.Cog):
         target_category = await self.get_target_category(ctx, category)
         if not target_category:
             embed = discord.Embed(
-                title="❌ Error",
-                description="Could not find a category to unlock.",
+                description="❌ Could not find a category to unlock.",
                 color=discord.Color.red(),
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed, mention_author=False)
 
         role_or_member = target or ctx.guild.default_role
         await target_category.set_permissions(
@@ -446,14 +526,13 @@ class Categories(commands.Cog):
             await channel.edit(sync_permissions=True)
 
         embed = discord.Embed(
-            title="🔓 Category Unlocked",
             description=(
-                f"Category **{target_category.name}** has been unlocked and"
-                f" synced for {role_or_member.mention}."
+                f"🔓 Category **{target_category.name}** has been unlocked for"
+                f" {role_or_member.mention}."
             ),
             color=discord.Color.green(),
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(
         aliases=["hcat"],
@@ -487,11 +566,10 @@ class Categories(commands.Cog):
         target_category = await self.get_target_category(ctx, category)
         if not target_category:
             embed = discord.Embed(
-                title="❌ Error",
-                description="Could not find a category to hide.",
+                description="❌ Could not find a category to hide.",
                 color=discord.Color.red(),
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed, mention_author=False)
 
         role_or_member = target or ctx.guild.default_role
         await target_category.set_permissions(
@@ -502,14 +580,13 @@ class Categories(commands.Cog):
             await channel.edit(sync_permissions=True)
 
         embed = discord.Embed(
-            title="🙈 Category Hidden",
             description=(
-                f"Category **{target_category.name}** is now hidden and synced"
-                f" from {role_or_member.mention}."
+                f"🙈 Category **{target_category.name}** is now hidden from"
+                f" {role_or_member.mention}."
             ),
             color=discord.Color.dark_grey(),
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(
         aliases=["uhcat"],
@@ -543,11 +620,10 @@ class Categories(commands.Cog):
         target_category = await self.get_target_category(ctx, category)
         if not target_category:
             embed = discord.Embed(
-                title="❌ Error",
-                description="Could not find a category to unhide.",
+                description="❌ Could not find a category to unhide.",
                 color=discord.Color.red(),
             )
-            return await ctx.send(embed=embed)
+            return await ctx.reply(embed=embed, mention_author=False)
 
         role_or_member = target or ctx.guild.default_role
         await target_category.set_permissions(
@@ -558,14 +634,13 @@ class Categories(commands.Cog):
             await channel.edit(sync_permissions=True)
 
         embed = discord.Embed(
-            title="👁️ Category Unhidden",
             description=(
-                f"Category **{target_category.name}** is now visible and"
-                f" synced for {role_or_member.mention}."
+                f"👁️ Category **{target_category.name}** is now visible to"
+                f" {role_or_member.mention}."
             ),
             color=discord.Color.green(),
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
 
 async def setup(bot):
