@@ -93,7 +93,7 @@ class Channels(commands.Cog):
                 return
             name = reply.content.strip()
             if not name:
-                return await ctx.reply(embed=one_line("❌ The channel name can't be empty. Cancelled."), mention_author=False)
+                return await ctx.reply(one_line("❌ The channel name can't be empty. Cancelled."), mention_author=False)
 
             reply = await ask(
                 ctx,
@@ -106,7 +106,7 @@ class Channels(commands.Cog):
                 try:
                     category = await commands.CategoryChannelConverter().convert(ctx, reply.content.strip())
                 except commands.BadArgument:
-                    return await ctx.reply(embed=one_line("❌ Couldn't find that category. Cancelled."), mention_author=False)
+                    return await ctx.reply(one_line("❌ Couldn't find that category. Cancelled."), mention_author=False)
 
             if not (prelock or prehide):
                 reply = await ask(ctx, "Which **preaction** do you want? `prelock`, `prehide`, `both`, or `none`.")
@@ -120,7 +120,7 @@ class Channels(commands.Cog):
                 elif choice == "both":
                     prelock = prehide = True
                 elif not is_skip(choice):
-                    return await ctx.reply(embed=one_line("❌ Invalid preaction. Cancelled."), mention_author=False)
+                    return await ctx.reply(one_line("❌ Invalid preaction. Cancelled."), mention_author=False)
 
         # If no category was provided, default to the current channel's category
         if category is None and getattr(ctx.channel, "category", None) is not None:
@@ -222,14 +222,14 @@ class Channels(commands.Cog):
                 try:
                     target_channel = await commands.TextChannelConverter().convert(ctx, reply.content.strip())
                 except commands.BadArgument:
-                    return await ctx.reply(embed=one_line("❌ Couldn't find that channel. Cancelled."), mention_author=False)
+                    return await ctx.reply(one_line("❌ Couldn't find that channel. Cancelled."), mention_author=False)
 
             reply = await ask(ctx, f"What do you want the **new name** for {target_channel.mention} to be?")
             if reply is None:
                 return
             new_name = reply.content.strip()
             if not new_name:
-                return await ctx.reply(embed=one_line("❌ The new name can't be empty. Cancelled."), mention_author=False)
+                return await ctx.reply(one_line("❌ The new name can't be empty. Cancelled."), mention_author=False)
 
         old_name = target_channel.name
 
@@ -357,6 +357,7 @@ class Channels(commands.Cog):
             color=discord.Color.red()
         )
         await new_channel.send(embed=embed)
+
 
 async def setup(bot):
     await bot.add_cog(Channels(bot))
