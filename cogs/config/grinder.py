@@ -415,13 +415,13 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
             if paused and pause_until:
                 pause_until_sec = int(pause_until / 1000) if pause_until > 1e11 else int(pause_until)
                 if current_time < pause_until_sec:
-                    line += f" | ⏸️ **Lock OFF** (<t:{pause_until_sec}:R>)"
+                    line += f" | ⏸️ **Paused** (<t:{pause_until_sec}:R>)"
                 else:
-                    line += " | ⏸️ **Lock OFF** (Expired)"
+                    line += " | ⏸️ **Paused** (Expired)"
             elif paused:
-                line += " | ⏸️ **Lock OFF**"
+                line += " | ⏸️ **Paused**"
             else:
-                line += " | 🟢 **Lock ON**"
+                line += " | 🟢 **Active**"
 
             target_str = cfg.get('target', '')
             aspects = parse_target_aspects(mode, target_str, guild)
@@ -466,13 +466,13 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
             if paused and pause_until:
                 pause_until_sec = int(pause_until / 1000) if pause_until > 1e11 else int(pause_until)
                 if current_time < pause_until_sec:
-                    line += f" | ⏸️ **Lock OFF** (<t:{pause_until_sec}:R>)"
+                    line += f" | ⏸️ **Paused** (<t:{pause_until_sec}:R>)"
                 else:
-                    line += " | ⏸️ **Lock OFF** (Expired)"
+                    line += " | ⏸️ **Paused** (Expired)"
             elif paused:
-                line += " | ⏸️ **Lock OFF**"
+                line += " | ⏸️ **Paused**"
             else:
-                line += " | 🟢 **Lock ON**"
+                line += " | 🟢 **Active**"
 
             target_str = cfg.get('target', '')
             aspects = parse_target_aspects(cfg_mode, target_str, guild)

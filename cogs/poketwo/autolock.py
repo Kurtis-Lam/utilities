@@ -5,39 +5,16 @@ import discord
 from discord.ext import commands
 
 from cogs.poketwo.lockcommon import (
+    DEFAULT_DELAY,
+    POKETWO_ID,
+    SHORT_NAMES,
+    UNLOCK_PRIORITY,
     WARN_COLOR,
-    already_unlocked_embed,
-    is_locked_overwrite,
+    get_poketwo_target,
     locked_embed,
     now_unix,
-    to_unix,
-    unlock_denied_embed,
-    unlocked_embed,
 )
-from views.common import error_embed
-
-POKETWO_ID = 716390085896962058
-DEFAULT_DELAY = 10
-
-# Who may unlock when several restricted locks fire at once. Earlier tier wins;
-# categories inside the same tuple are equal (their user sets are merged).
-# Role-based locks (rare/regional/gmax/paradox/eevos) ping a role, not users,
-# so they never restrict anything.
-UNLOCK_PRIORITY = (("re",), ("sh",), ("cl",), ("tp", "rp"))
-
-# Short labels for the status/lock messages
-SHORT_NAMES = {"re": "res"}
-
-
-async def get_poketwo_target(guild: discord.Guild):
-    """Retrieve Poketwo Member object via cache or fetch. None if it isn't in the guild."""
-    member = guild.get_member(POKETWO_ID)
-    if member:
-        return member
-    try:
-        return await guild.fetch_member(POKETWO_ID)
-    except discord.HTTPException:
-        return None
+from cogs.poketwo.lockunlock import NO_PINGS, UnlockLayout
 
 
 def _channel_in_whitelist(channel, whitelist: list) -> bool:
@@ -53,84 +30,6 @@ def _channel_in_whitelist(channel, whitelist: list) -> bool:
     if category_id and str(category_id) in entries:
         return True
     return False
-
-
-def can_unlock(lock_doc: dict | None, member: discord.Member) -> bool:
-    """Same rule lockunlock.py uses: no doc / no restriction -> anyone; else listed users or admins."""
-    if not lock_doc:
-        return True
-    allowed = lock_doc.get("allowed_users")
-    if allowed is None:
-        return True
-    return member.id in allowed or member.guild_permissions.administrator
-
-
-def unlock_denied_message(lock_doc: dict) -> str:
-    allowed = lock_doc.get("allowed_users") or []
-    mentions = ", ".join(f"<@{uid}>" for uid in allowed)
-    return f"⚠️ Only {mentions} or an admin can unlock."
-
-
-class AutoLockUnlockView(discord.ui.View):
-    def __init__(self, cog=None):
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    @discord.ui.button(label="Unlock", style=discord.ButtonStyle.green, emoji="🔓")
-    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
-        locks = self.cog.locks_collection if self.cog else None
-
-        lock_doc = None
-        if locks is not None:
-            try:
-                lock_doc = await locks.find_one({"_id": interaction.channel.id})
-            except Exception as e:
-                print(f"AutoLock: failed to read lock state: {e}")
-                return await interaction.response.send_message(
-                    embed=error_embed("Couldn't verify the lock. Try again."),
-                    ephemeral=True,
-                )
-
-        target = await get_poketwo_target(interaction.guild)
-        if target is None:
-            return await interaction.response.send_message(
-                embed=error_embed("Pokétwo isn't in this server."), ephemeral=True
-            )
-
-        # Someone already unlocked it (e.g. with .unlock): retire the button and say so
-        if not is_locked_overwrite(interaction.channel.overwrites_for(target)):
-            if locks is not None and lock_doc:
-                await locks.delete_one({"_id": interaction.channel.id})
-            button.disabled = True
-            button.label = "Unlocked"
-            button.style = discord.ButtonStyle.secondary
-            await interaction.response.edit_message(view=self)
-            return await interaction.followup.send(
-                embed=already_unlocked_embed(interaction.channel), ephemeral=True
-            )
-
-        if not can_unlock(lock_doc, interaction.user):
-            return await interaction.response.send_message(
-                embed=unlock_denied_embed(interaction.channel, lock_doc), ephemeral=True
-            )
-
-        await interaction.channel.set_permissions(target, view_channel=True, send_messages=True)
-
-        if locks is not None and lock_doc:
-            await locks.delete_one({"_id": interaction.channel.id})
-
-        button.disabled = True
-        button.label = "Unlocked"
-        button.style = discord.ButtonStyle.secondary
-
-        await interaction.response.edit_message(view=self)
-        await interaction.followup.send(
-            embed=unlocked_embed(
-                interaction.channel,
-                unlocked_by=interaction.user,
-                locked_at=to_unix((lock_doc or {}).get("locked_at")),
-            )
-        )
 
 
 class AutoLock(commands.Cog):
@@ -309,7 +208,19 @@ class AutoLock(commands.Cog):
             restricted_by=restrict_cats,
             when=now_unix(),
         )
-        await channel.send(embed=lock_embed, view=AutoLockUnlockView(cog=self))
+        # The Unlock button lives inside the lock embed (shared with .lock). It is
+        # persistent (registered by the LockUnlock cog), so it survives restarts.
+        try:
+            msg = await channel.send(
+                view=UnlockLayout(self.bot, lock_embed),
+                allowed_mentions=NO_PINGS,
+            )
+            # Remember the message so .unlock can grey the button out later.
+            await self.locks_collection.update_one({"_id": channel.id}, {"$set": {"message_id": msg.id}})
+        except discord.HTTPException as e:
+            print(f"AutoLock: failed to send lock message in #{channel.id}: {e}")
+        except Exception as e:
+            print(f"AutoLock: failed to store lock message id: {e}")
 
 
 async def setup(bot: commands.Bot):
