@@ -10,7 +10,7 @@ from firebase_admin import credentials, db
 
 from views.common import ConfirmLayout, error_embed, first_text, make_embed, success_embed
 from views.embeds import handle_command_error, send_usage
-from views.grinderview import AccountsView, ConfigView, GrinderLogsView
+from views.grinderview import ConfigView
 from .base import config_group
 
 # --- CONSTANTS ---
@@ -346,21 +346,6 @@ def add_chunked_field(embed: discord.Embed, title: str, lines: list[str]):
 
 
 # --- EMBED BUILDERS ---
-def build_accounts_embed(accounts: list):
-    embed = discord.Embed(title="⚙️ Grinder Accounts (Global)", color=discord.Color.blue())
-    if not accounts:
-        embed.description = "No accounts."
-    else:
-        desc = ""
-        for idx, token in enumerate(accounts, 1):
-            masked_token = token[:10] + "..." if len(token) > 10 else token
-            uid = get_user_id_from_token(token)
-            member_mention = f"<@{uid}>" if uid else "*Unknown Member*"
-            desc += f"**#{idx}**: {member_mention} — `{masked_token}`\n"
-        embed.description = desc
-    return embed
-
-
 async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts: list):
     embed = discord.Embed(title=f"📋 Mode Configurations — {guild.name}", color=discord.Color.gold())
     if not configs:
@@ -559,27 +544,6 @@ async def build_detector_bots_embed(guild: discord.Guild, bots: list):
     return embed
 
 
-def build_logs_embed(guild: discord.Guild, logs: dict):
-    embed = discord.Embed(
-        title=f"📜 Grinder Log Channels — {guild.name}",
-        color=discord.Color.purple()
-    )
-
-    alerts_ch = logs.get("alerts")
-    autocatch_ch = logs.get("autocatch")
-    switch_ch = logs.get("switch")
-
-    alerts_str = f"<#{alerts_ch}> (`{alerts_ch}`)" if alerts_ch else "*Not set*"
-    autocatch_str = f"<#{autocatch_ch}> (`{autocatch_ch}`)" if autocatch_ch else "*Not set*"
-    switch_str = f"<#{switch_ch}> (`{switch_ch}`)" if switch_ch else "*Not set*"
-
-    embed.add_field(name="🚨 Alerts Log", value=alerts_str, inline=False)
-    embed.add_field(name="🎯 Autocatch Log", value=autocatch_str, inline=False)
-    embed.add_field(name="🔀 Switch Log", value=switch_str, inline=False)
-
-    return embed
-
-
 # --- HELPER TO REFRESH CONFIG EMBEDS LIVE ---
 async def refresh_config_embed(interaction: discord.Interaction, override_page: str = None):
     message = interaction.message
@@ -643,38 +607,11 @@ async def grindconfig(ctx: commands.Context):
     await ctx.send(view=ConfigView(page="modes", embed=embed))
 
 
-@config_group.command(name="grinderaccounts", aliases=["grindaccounts", "accounts"])
-@commands.is_owner()
-async def grindaccounts_cmd(ctx: commands.Context):
-    """Shows global grinder accounts."""
-    data = await get_global_data()
-    accs = data.get("accounts", [])
-
-    embed = build_accounts_embed(accs)
-    await ctx.send(view=AccountsView(embed=embed))
-
-
-@config_group.command(name="grinderlogs", aliases=["logs"])
-@commands.is_owner()
-async def grinderlogs_cmd(ctx: commands.Context):
-    """Shows log channels for the current server."""
-    if not ctx.guild:
-        await ctx.send(embed=error_embed("Server only."))
-        return
-
-    guild_id = str(ctx.guild.id)
-    logs = await get_guild_logs(guild_id)
-
-    embed = build_logs_embed(ctx.guild, logs)
-    await ctx.send(view=GrinderLogsView(embed=embed))
-
-
 async def _config_command_error(ctx: commands.Context, error: Exception):
     await handle_command_error(ctx, error)
 
 
-for _cmd in (grindconfig, grindaccounts_cmd, grinderlogs_cmd):
-    _cmd.error(_config_command_error)
+grindconfig.error(_config_command_error)
 
 
 # --- COG DEFINITION ---
@@ -885,7 +822,7 @@ class GrinderCog(commands.Cog):
 
         if duration:
             await ctx.send(embed=make_embed(description=(
-                f"⏸️️ Paused Config **#{idx}** (`{mode}` | {acc_str}) for **{duration}** "
+                f"⏸ Paused Config **#{idx}** (`{mode}` | {acc_str}) for **{duration}** "
                 f"(resumes <t:{int(pause_until / 1000)}:R>)."
             )))
         else:
