@@ -239,7 +239,7 @@ class Messages(commands.Cog):
             if isinstance(prefixes, str):
                 prefixes = [prefixes]
             prefixes = tuple(p for p in prefixes if p)
-            if prefixes and message.content.startswith(prefixes):
+            if prefixes and message.content and message.content.startswith(prefixes):
                 return
         except Exception:
             pass
@@ -268,6 +268,60 @@ class Messages(commands.Cog):
             )
         except Exception as e:
             print(f"Messages Cog: failed to save snipe entry: {e}")
+
+    @commands.Cog.listener()
+    async def on_bulk_message_delete(self, messages):
+        if not messages:
+            return
+
+        valid_entries = []
+        guild = None
+        channel_id = None
+
+        # Process from oldest to newest so the newest message ends up first when inserted
+        for message in reversed(messages):
+            if message.guild is None or message.author.bot:
+                continue
+
+            guild = message.guild
+            channel_id = message.channel.id
+
+            # Ignore command invocations
+            try:
+                prefixes = await self.bot.get_prefix(message)
+                if isinstance(prefixes, str):
+                    prefixes = [prefixes]
+                prefixes = tuple(p for p in prefixes if p)
+                if prefixes and message.content and message.content.startswith(prefixes):
+                    continue
+            except Exception:
+                pass
+
+            if not message.content and not message.attachments:
+                continue
+
+            valid_entries.append({
+                "author_id": message.author.id,
+                "author_name": str(message.author),
+                "content": (message.content or "")[:2000],
+                "attachments": len(message.attachments),
+                "deleted_at": int(time.time()),
+            })
+
+        if not valid_entries or not channel_id or not guild:
+            return
+
+        try:
+            await self.snipes_collection.update_one(
+                {"_id": channel_id},
+                {
+                    "$set": {"guild_id": guild.id},
+                    "$push": {"entries": {"$each": valid_entries, "$position": 0, "$slice": self.SNIPE_LIMIT}},
+                },
+                upsert=True,
+            )
+        except Exception as e:
+            print(f"Messages Cog: failed to save bulk snipe entries: {e}")
 
     @commands.hybrid_command(name="snipe", description="Shows the most recently deleted messages in this channel (up to 10).")
     async def snipe(self, ctx):
@@ -342,7 +396,6 @@ class Messages(commands.Cog):
             delete_after=3
         )
 
-        
     @commands.hybrid_command(name="pin", description="Pins a message (reply to a message or provide a message ID/link).")
     @app_commands.describe(
         message_ref="The message ID or link to pin (leave blank if replying to a message)."
@@ -578,7 +631,7 @@ class Messages(commands.Cog):
         target="Channel mention or ID to remove the sticky message from (defaults to current channel)."
     )
     @commands.has_permissions(manage_messages=True)
-    @commands.bot_has_permissions(manage_messages=True)
+    @commands.bot_has_permissions(manage_permissions=True)
     async def sticks_remove(self, ctx, target: typing.Optional[str] = None):
         target_channel = None
         target_id_str = None
