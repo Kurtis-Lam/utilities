@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 
 from views.autolockview import (
-    AutoLockMainView,
+    build_main_page,
     CATEGORY_LABELS,
     ALL_CATEGORIES,
     CATEGORY_DESCRIPTIONS,
@@ -36,12 +36,6 @@ def _label(category: str) -> str:
     return CATEGORY_LABELS.get(category, category.capitalize())
 
 
-def _delay_text(cfg: dict) -> str:
-    if cfg.get("delay_enabled", True):
-        return f"`{cfg.get('delay', DEFAULT_DELAY)}s`"
-    return "`Off`"
-
-
 @config_group.command(
     name="autolock",
     aliases=["a", "al"],
@@ -54,8 +48,8 @@ async def autolockconfig(ctx: commands.Context):
     if cog is None:
         return await ctx.send(embed=error_embed("AutoLockConfig is not loaded."))
 
-    embed = await cog.build_main_embed(ctx.guild)
-    view = AutoLockMainView(cog, guild_id=ctx.guild.id, author_id=ctx.author.id, embed=embed)
+    # build_main_page reads every category so the buttons are green (on) / grey (off).
+    view = await build_main_page(cog, ctx.guild, ctx.guild.id, ctx.author.id)
     view.message = await ctx.send(view=view)
 
 
@@ -424,38 +418,20 @@ class AutoLockConfig(commands.Cog):
         )
 
     async def build_main_embed(self, guild: discord.Guild) -> discord.Embed:
+        """Landing page: one line per lock, on or off. Details live inside each lock's page."""
         doc = await self.get_guild_config(guild.id)
 
-        embed = discord.Embed(
-            title=f"🔒 AutoLock — {guild.name}",
-            description="Pick a category.",
-            color=discord.Color.blurple(),
-        )
-
+        lines = []
         for cat in ALL_CATEGORIES:
             cfg = doc.get(cat, _default_category(cat))
             is_enabled = cfg.get("enabled", False)
-            status_icon = "✅" if is_enabled else "❌"
-            wl_count = len(cfg.get("whitelist", []))
+            lines.append(f"{'✅' if is_enabled else '❌'} **{_label(cat)}** — {'On' if is_enabled else 'Off'}")
 
-            lines = [
-                f"Delay: {_delay_text(cfg)}",
-                f"Whitelist: `{wl_count}` entr{'y' if wl_count == 1 else 'ies'}",
-            ]
-            if cat in ROLE_CATEGORIES:
-                role = await self.get_ping_role(guild, cat)
-                lines.append(f"Role: {role.mention if role else 'Not set'}")
-                lines.append("Unlock: anyone")
-            if cat in RESTRICT_CATEGORIES:
-                lines.append(f"Restrict: `{cfg.get('restrict_unlockers', True)}`")
-
-            override_count = self._count_channel_overrides(doc, cat)
-            if override_count:
-                lines.append(f"Overrides: `{override_count}`")
-
-            embed.add_field(name=f"{_label(cat)} {status_icon}", value="\n".join(lines), inline=True)
-
-        return embed
+        return discord.Embed(
+            title=f"🔒 AutoLock — {guild.name}",
+            description="Pick a lock to see its settings.\n\n" + "\n".join(lines),
+            color=discord.Color.blurple(),
+        )
 
     async def build_category_embed(self, guild: discord.Guild, category: str) -> discord.Embed:
         doc = await self.get_guild_config(guild.id)
