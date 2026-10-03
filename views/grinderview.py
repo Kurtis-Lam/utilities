@@ -358,7 +358,7 @@ def _edit_step_embed(indices: list[int], step: int, mode: str, saved: int | None
         value=f"{len(info['required'])} required · {len(info['optional'])} optional",
         inline=True,
     )
-    embed.set_footer(text="Press the button to open the form. Blank fields keep their current value.")
+    embed.set_footer(text="Press the button to inspect and edit lock parameters (delay, interval, message, channel).")
     return embed
 
 
