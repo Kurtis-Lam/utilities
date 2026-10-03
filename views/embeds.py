@@ -8,8 +8,10 @@ Shared embed helpers used by every cog in cogs/cmds/.
 - handle_common_error() turns the usual command errors into embeds, and shows a
   compact usage embed when a command is used without its required arguments.
 - Usage embeds are intentionally tiny: just one usage line (aliases written
-  inline, e.g. `.createcategory|ccat`) and an "Example" button that opens an
-  ephemeral message with examples and argument descriptions.
+  inline, e.g. `.createcategory|ccat`) and an "Example" button *inside the embed*
+  that opens an ephemeral message with examples and argument descriptions.
+- commands_usage_embed() builds a plain usage embed listing several commands
+  (no Example button), e.g. for `.settings`.
 - Missing arguments show the title "Missing arg: `name`" plus that usage line.
 """
 import traceback
@@ -18,7 +20,7 @@ import typing
 import discord
 from discord.ext import commands
 
-from views.common import BaseView, one_line_embed
+from views.common import BaseLayout, container_from_embed, one_line_embed
 
 BRAND_COLOR = discord.Color(0x0414C7)
 SUCCESS_COLOR = discord.Color.green()
@@ -107,6 +109,11 @@ USAGE_EXAMPLES = {
     "deleterole": ["{p}deleterole @role", "{p}dr @role"],
     # messages
     "purge": ["{p}purge 10", "{p}purge 25 @user", "{p}purge *"],
+    "forward": [
+        "{p}forward 123456789012345678 987654321098765432",
+        "{p}fwd 123456789012345678 #channel",
+        "Reply to a message with: {p}fwd #channel",
+    ],
     "echo": ["{p}echo Hello everyone!"],
     "stick": ["{p}stick Please read the rules!"],
     # utilities
@@ -240,22 +247,21 @@ def example_embed(ctx) -> typing.Optional[discord.Embed]:
     )
 
 
-class ExampleView(BaseView):
-    """One 'Example' button. Pressing it sends the examples as an ephemeral message
-    (anyone can press it; only the presser sees the reply)."""
+class ExampleLayout(BaseLayout):
+    """The usage embed with one 'Example' button *inside* it (Components V2 container).
+    Pressing it sends the examples as an ephemeral message (anyone can press it;
+    only the presser sees the reply)."""
 
-    def __init__(self, embed: discord.Embed):
+    def __init__(self, usage: discord.Embed, examples: discord.Embed):
         super().__init__(timeout=120)
-        self.example_embed = embed
+        self.examples = examples
 
-    @discord.ui.button(label="Example", style=discord.ButtonStyle.secondary)
-    async def example_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(embed=self.example_embed, ephemeral=True)
+        button = discord.ui.Button(label=examples.title or "Example", style=discord.ButtonStyle.secondary)
+        button.callback = self._on_press
+        self.add_item(container_from_embed(usage, discord.ui.ActionRow(button)))
 
-
-def example_view(ctx) -> typing.Optional[ExampleView]:
-    embed = example_embed(ctx)
-    return ExampleView(embed) if embed else None
+    async def _on_press(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=self.examples, ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -311,21 +317,39 @@ async def group_usage_embed(ctx, note: str = None, title: str = None) -> discord
 
 
 async def send_usage(ctx, note: str = None, title: str = None):
-    """Send the compact usage embed for ctx.command (works for groups too),
-    with an 'Example' button when examples / argument descriptions exist."""
+    """Send the compact usage embed for ctx.command (works for groups too).
+    When examples / argument descriptions exist, an 'Example' button is placed
+    inside the embed itself."""
     cmd = ctx.command
     if isinstance(cmd, commands.Group) and not cmd.clean_params:
         embed = await group_usage_embed(ctx, note=note, title=title)
     else:
         embed = usage_embed(ctx, note=note, title=title)
 
-    view = example_view(ctx)
-    if view is None:
+    examples = example_embed(ctx)
+    if examples is None:
         return await ctx.send(embed=embed)
 
-    msg = await ctx.send(embed=embed, view=view)
+    view = ExampleLayout(embed, examples)
+    msg = await ctx.send(view=view)
     view.message = msg
     return msg
+
+
+def commands_usage_embed(ctx, *names: str, title: str = "Usage") -> discord.Embed:
+    """Plain usage embed listing the usage line of each named command (no Example button).
+    Unknown names are skipped."""
+    prefix = ctx.clean_prefix
+    lines = []
+    for name in names:
+        cmd = ctx.bot.get_command(name)
+        if cmd is not None and not cmd.hidden:
+            lines.append(f"`{_usage_line(cmd, prefix)}`")
+    return discord.Embed(
+        title=title,
+        description="\n".join(lines) or "No commands available.",
+        color=BRAND_COLOR,
+    )
 
 
 async def handle_common_error(ctx, error) -> bool:
