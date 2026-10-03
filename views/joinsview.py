@@ -29,9 +29,8 @@ def get_welcome_embed(
     member: discord.abc.User | None = None,
 ) -> discord.Embed:
     embed = make_embed(
-        "👋 Welcome Message",
-        "Greets new members in a channel of your choice.\n"
-        "Pick a channel below, then edit the message or switch its format.",
+        "👋 Welcome",
+        "Greets new members in a channel.",
     )
 
     channel_id = config.get("welcome_channel")
@@ -54,15 +53,14 @@ def get_welcome_embed(
     else:
         embed.add_field(name="📝 Message", value="*Not set*", inline=False)
 
-    embed.set_footer(text=f"Page 1 of {TOTAL_PAGES} • Placeholders: {PLACEHOLDER_HELP}")
+    embed.set_footer(text=f"Page 1/{TOTAL_PAGES} • {PLACEHOLDER_HELP}")
     return embed
 
 
 def get_greet_embed(config: dict) -> discord.Embed:
     embed = make_embed(
         "👻 Greet Pings",
-        "When someone joins, the bot pings them in these channels and deletes the message right away, "
-        "so they get a notification for each channel.",
+        "Pings new members in these channels, then deletes the ping.",
     )
     channels = config.get("greet_channels", [])
     embed.add_field(
@@ -70,14 +68,14 @@ def get_greet_embed(config: dict) -> discord.Embed:
         value="\n".join(f"<#{c}>" for c in channels) if channels else "*None set*",
         inline=False,
     )
-    embed.set_footer(text=f"Page 2 of {TOTAL_PAGES} • Clear the menu selection to turn greet pings off")
+    embed.set_footer(text=f"Page 2/{TOTAL_PAGES} • Clear the selection to turn off")
     return embed
 
 
 def get_autorole_embed(config: dict) -> discord.Embed:
     embed = make_embed(
         "🛡️ Autoroles",
-        "These roles are given to every member automatically when they join.",
+        "Given to every new member.",
     )
     roles = config.get("autoroles", [])
     embed.add_field(
@@ -85,7 +83,7 @@ def get_autorole_embed(config: dict) -> discord.Embed:
         value="\n".join(f"<@&{r}>" for r in roles) if roles else "*None set*",
         inline=False,
     )
-    embed.set_footer(text=f"Page 3 of {TOTAL_PAGES} • The bot's role must be above these roles to assign them")
+    embed.set_footer(text=f"Page 3/{TOTAL_PAGES} • My role must be above these")
     return embed
 
 
@@ -137,7 +135,7 @@ class WelcomeConfigView(BaseView):
     @discord.ui.select(
         cls=ChannelSelect,
         channel_types=[discord.ChannelType.text],
-        placeholder="📍 Select the welcome channel",
+        placeholder="📍 Welcome channel",
         row=0,
     )
     async def select_welcome_channel(self, interaction: discord.Interaction, select: ChannelSelect):
@@ -182,7 +180,7 @@ class GreetConfigView(BaseView):
     @discord.ui.select(
         cls=ChannelSelect,
         channel_types=[discord.ChannelType.text],
-        placeholder="📍 Select up to 10 channels for greet pings",
+        placeholder="📍 Greet channels (max 10)",
         min_values=0,
         max_values=10,
         row=0,
@@ -217,7 +215,7 @@ class AutoroleConfigView(BaseView):
 
     @discord.ui.select(
         cls=RoleSelect,
-        placeholder="🏷️ Select up to 10 roles to assign on join",
+        placeholder="🏷️ Autoroles (max 10)",
         min_values=0,
         max_values=10,
         row=0,
