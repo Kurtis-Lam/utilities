@@ -166,19 +166,17 @@ class Dex(commands.Cog):
     @commands.command(
         name="dex",
         aliases=["pokedex"],
-        usage="<pokémon name, alt name or dex number>",
-        description="Look up a Pokémon in the Pokédex by name, alt name (any language) or dex number.",
+        usage="<name or dex number>",
+        description="Look up a Pokémon by name or dex number.",
     )
     async def dex_cmd(self, ctx: commands.Context, *, query: str = None):
         if query is None or not query.strip():
-            return await send_usage(ctx, note="Missing required argument: `query`")
+            return await send_usage(ctx, title="Missing arg: `query`")
 
         query_clean = query.strip().lower().lstrip("#")
 
         if not self.pokedex:
-            return await ctx.reply(embed=warn_embed(
-                "Pokédex Unavailable",
-                "The Pokédex hasn't been loaded yet. Please try again in a moment."))
+            return await ctx.reply(embed=warn_embed("Pokédex not loaded yet."))
 
         matched_name = None
         data = None
@@ -204,10 +202,7 @@ class Dex(commands.Cog):
                     break
 
         if not data:
-            await ctx.reply(embed=err_embed(
-                "Pokémon Not Found",
-                f"Couldn't find `{query.strip()[:100]}` in the Pokédex.\n"
-                f"-# Try the name, an alt name or the dex number, e.g. `{ctx.clean_prefix}dex pikachu` or `{ctx.clean_prefix}dex 25`."))
+            await ctx.reply(embed=err_embed(f"Couldn't find {query.strip()[:100]}."))
             return
 
         dex_num = str(data.get("pokedex_number", "???")).lstrip("#")
