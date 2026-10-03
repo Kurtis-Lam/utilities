@@ -7,7 +7,7 @@ from views.embeds import handle_command_error, send_usage
     name="config",
     aliases=["c"],
     invoke_without_command=True,
-    description="Open the configuration menus for autolock, spawns, joins and the grinder.",
+    description="Open the config menus.",
 )
 async def config_group(ctx: commands.Context):
     if ctx.invoked_subcommand is None:
