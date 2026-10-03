@@ -20,28 +20,25 @@ class PokemonExtractor(commands.Cog):
     @commands.command(
         name="extract",
         aliases=["ex"],
-        description=(
-            "Reply to a Pokétwo embed (Pokédex / pokémon list) with this command to "
-            "extract the Pokémon names, dex numbers or IDs."
-        ),
+        description="Reply to a Pokétwo embed to extract names, numbers or IDs.",
     )
     async def extract(self, ctx):
         if not ctx.message.reference:
-            await send_usage(ctx, note="Please reply to a Pokétwo message to use this command.")
+            await send_usage(ctx, note="Reply to a Pokétwo message.")
             return
 
         try:
             replied_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
         except discord.HTTPException:
             await ctx.reply(
-                embed=err_embed("Fetch Failed", "Unable to fetch the replied message."),
+                embed=err_embed("Couldn't fetch that message."),
                 mention_author=False,
             )
             return
 
         if not replied_message.embeds:
             await ctx.reply(
-                embed=err_embed("No Embed Found", "The replied message does not contain an embed."),
+                embed=err_embed("No embed in that message."),
                 mention_author=False,
             )
             return
@@ -114,10 +111,7 @@ class PokemonExtractor(commands.Cog):
             await replied_message.reply(embed=result, mention_author=False)
         else:
             await replied_message.reply(
-                embed=err_embed(
-                    "Nothing Found",
-                    "No Pokémon IDs or Pokédex entries found in that embed.",
-                ),
+                embed=err_embed("No Pokémon found in that embed."),
                 mention_author=False,
             )
 
