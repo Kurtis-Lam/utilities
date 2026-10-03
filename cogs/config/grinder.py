@@ -590,21 +590,144 @@ async def refresh_config_embed(interaction: discord.Interaction, override_page: 
 
 
 # --- CONFIG GROUP SUBCOMMANDS ---
-@config_group.command(name="grinder", aliases=["g", "grind"])
+@config_group.group(name="grinder", aliases=["g", "grind"], invoke_without_command=True)
 @commands.is_owner()
 async def grindconfig(ctx: commands.Context):
     """Shows mode configurations for the current server."""
+    if ctx.invoked_subcommand is None:
+        if not ctx.guild:
+            await ctx.send(embed=error_embed("Server only."))
+            return
+
+        guild_id = str(ctx.guild.id)
+        configs = await get_guild_configs(guild_id)
+        g_data = await get_global_data()
+        accounts = g_data.get("accounts", [])
+
+        embed = await build_mode_configs_embed(ctx.guild, configs, accounts)
+        await ctx.send(view=ConfigView(page="modes", embed=embed))
+
+
+@grindconfig.command(name="add", aliases=["a"])
+@commands.is_owner()
+async def grindconfig_add(
+    ctx: commands.Context,
+    mode: str = commands.parameter(description="Mode name (autocatch, spam, dotcatch, commaedit, periodicmsg)."),
+    acc_idx: int = commands.parameter(description="Account index (1-based)."),
+    *,
+    args: str = commands.parameter(default="", description="Arguments separated by commas.")
+):
+    """Add a mode configuration: .c g a {mode} {account index} {args separated by commas}"""
+    if not ctx.guild:
+        await ctx.send(embed=error_embed("Server only."))
+        return
+
+    mode_lower = mode.lower()
+    if mode_lower not in VALID_MODES:
+        await ctx.send(embed=error_embed(
+            f"Invalid mode `{mode}`. Valid modes are: {', '.join([f'`{m}`' for m in VALID_MODES])}"
+        ))
+        return
+
+    g_data = await get_global_data()
+    accounts = g_data.get("accounts", [])
+
+    if not accounts:
+        await ctx.send(embed=error_embed("No accounts registered in global data."))
+        return
+
+    if acc_idx < 1 or acc_idx > len(accounts):
+        await ctx.send(embed=error_embed(
+            f"Invalid account index #{acc_idx}. Valid account range is `1` to `{len(accounts)}`."
+        ))
+        return
+
+    token = accounts[acc_idx - 1]
+    arg_list = [a.strip() for a in args.split(",") if a.strip()]
+
+    # Validate mode-specific required arguments
+    if mode_lower == "spam" and not arg_list:
+        await ctx.send(embed=error_embed("Missing required argument: Target / Channel ID for `spam` mode."))
+        return
+    elif mode_lower in ["dotcatch", "commaedit"] and not arg_list:
+        await ctx.send(embed=error_embed(f"Missing required argument: Channel ID for `{mode_lower}` mode."))
+        return
+    elif mode_lower == "periodicmsg" and len(arg_list) < 2:
+        await ctx.send(embed=error_embed(
+            "Missing required arguments for `periodicmsg` mode. Format: `{channel_id}, {message}, [time1], [time2]`"
+        ))
+        return
+
+    if mode_lower == "periodicmsg":
+        target_str = " ; ".join(arg_list)
+    else:
+        target_str = ", ".join(arg_list)
+
+    guild_id = str(ctx.guild.id)
+    configs = await get_guild_configs(guild_id)
+
+    new_cfg = {
+        "mode": mode_lower,
+        "accIndex": acc_idx,
+        "token": token,
+        "target": target_str,
+        "paused": False
+    }
+
+    configs.append(new_cfg)
+    await save_guild_configs(guild_id, configs)
+
+    new_index = len(configs)
+    user_uid = get_user_id_from_token(token)
+    user_mention = f"<@{user_uid}>" if user_uid else f"Acc #{acc_idx}"
+
+    desc = f"Added config `[#{new_index}]` for {user_mention} (Acc #{acc_idx})\n**Mode:** `{mode_lower}`"
+    if target_str:
+        desc += f"\n**Target/Args:** `{target_str}`"
+
+    await ctx.send(embed=success_embed(desc))
+
+
+@grindconfig.command(name="remove", aliases=["r"])
+@commands.is_owner()
+async def grindconfig_remove(
+    ctx: commands.Context,
+    index: int = commands.parameter(description="Index displayed in .c g.")
+):
+    """Remove a mode configuration: .c g r {index}"""
     if not ctx.guild:
         await ctx.send(embed=error_embed("Server only."))
         return
 
     guild_id = str(ctx.guild.id)
     configs = await get_guild_configs(guild_id)
+
+    if not configs:
+        await ctx.send(embed=error_embed("No configs in this server."))
+        return
+
+    if index < 1 or index > len(configs):
+        await ctx.send(embed=error_embed(f"Invalid index `#{index}`. Server has `{len(configs)}` config(s)."))
+        return
+
+    removed_cfg = configs.pop(index - 1)
+    await save_guild_configs(guild_id, configs)
+
+    mode = removed_cfg.get("mode", "unknown")
+    acc_idx = removed_cfg.get("accIndex", 0)
+    tok = removed_cfg.get("token")
+
     g_data = await get_global_data()
     accounts = g_data.get("accounts", [])
+    if tok and tok in accounts:
+        acc_idx = accounts.index(tok) + 1
 
-    embed = await build_mode_configs_embed(ctx.guild, configs, accounts)
-    await ctx.send(view=ConfigView(page="modes", embed=embed))
+    user_uid = get_user_id_from_token(tok) if tok else None
+    user_mention = f"<@{user_uid}>" if user_uid else (f"Acc #{acc_idx}" if acc_idx > 0 else "Unknown Acc")
+
+    await ctx.send(embed=success_embed(
+        f"Removed config `[#{index}]` (`{mode}` | {user_mention} | Acc #{acc_idx})."
+    ))
 
 
 async def _config_command_error(ctx: commands.Context, error: Exception):
@@ -612,6 +735,8 @@ async def _config_command_error(ctx: commands.Context, error: Exception):
 
 
 grindconfig.error(_config_command_error)
+grindconfig_add.error(_config_command_error)
+grindconfig_remove.error(_config_command_error)
 
 
 # --- COG DEFINITION ---
@@ -623,11 +748,35 @@ class GrinderCog(commands.Cog):
         """Every command in this cog: embeds for errors, how-to-use embed for missing arguments."""
         await handle_command_error(ctx, error)
 
-    @commands.command(name="grindconfig", aliases=["gc", "g"])
+    @commands.group(name="grindconfig", aliases=["gc", "g"], invoke_without_command=True)
     @commands.is_owner()
     async def grindconfig_cog(self, ctx: commands.Context):
         """Top-level command alias for viewing server configs."""
-        await grindconfig(ctx)
+        if ctx.invoked_subcommand is None:
+            await grindconfig(ctx)
+
+    @grindconfig_cog.command(name="add", aliases=["a"])
+    @commands.is_owner()
+    async def grindconfig_cog_add(
+        self,
+        ctx: commands.Context,
+        mode: str = commands.parameter(description="Mode name."),
+        acc_idx: int = commands.parameter(description="Account index."),
+        *,
+        args: str = commands.parameter(default="", description="Arguments separated by commas.")
+    ):
+        """Add a mode configuration."""
+        await grindconfig_add(ctx, mode, acc_idx, args=args)
+
+    @grindconfig_cog.command(name="remove", aliases=["r"])
+    @commands.is_owner()
+    async def grindconfig_cog_remove(
+        self,
+        ctx: commands.Context,
+        index: int = commands.parameter(description="Index displayed in .c g.")
+    ):
+        """Remove a mode configuration by its index."""
+        await grindconfig_remove(ctx, index)
 
     @commands.command(name="edit")
     @commands.is_owner()
