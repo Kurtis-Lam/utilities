@@ -61,7 +61,7 @@ class Utilities(commands.Bot):
             "config": ["base"],
             "poketwo": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer"],
             "poketwo-management": ["set", "settings", "toggle"],
-            "poketwo-utils": ["dex", "extract", "fled", "hintsolver"]
+            "poketwo-utils": ["dex", "extract", "hintsolver"]
         }
 
     async def get_prefix_with_space(self, bot, message):
@@ -104,9 +104,7 @@ async def on_ready():
 async def on_message_edit(before: discord.Message, after: discord.Message):
     if after.author.bot or after.guild is None or before.content == after.content:
         return
-
-    # discord.py only invokes commands on new messages, so manually reprocess
-    # edited command text. This lets users fix a typo like ",snipw" -> ",snipe".
+    
     await bot.process_commands(after)
 
 def get_dir_size(path: str = ".") -> int:
