@@ -13,6 +13,7 @@ import discord
 from discord.ext import commands
 
 from views.aiviews import AIConfigView
+from views.common import ConfirmLayout
 from views.embeds import (
     BRAND_COLOR,
     err_embed,
@@ -1089,8 +1090,8 @@ class AIChat(commands.Cog):
 
         embed = await self.build_config_embed(ctx.guild)
         if ctx.author.guild_permissions.administrator:
-            view = AIConfigView(self, ctx.author.id, ctx.guild)
-            view.message = await ctx.reply(embed=embed, view=view, mention_author=False)
+            view = AIConfigView(self, ctx.author.id, ctx.guild, embed)
+            view.message = await ctx.reply(view=view, mention_author=False)
         else:
             await ctx.reply(embed=embed, mention_author=False)
 
@@ -1224,11 +1225,23 @@ class AIChat(commands.Cog):
             return
 
         key = (ctx.channel.id, ctx.author.id)
-        if self.history.get(key):
-            self.history[key].clear()
-            await ctx.reply(embed=discord.Embed(description="🧹 Memory Successfully Cleared!", color=BRAND_COLOR), mention_author=False)
-        else:
+        if not self.history.get(key):
             await ctx.reply(embed=info_embed("Memory Empty", "Your memory in this channel is already empty.", emoji="🧠"), mention_author=False)
+            return
+
+        view = ConfirmLayout(
+            ctx.author,
+            f"Clear your AI memory in this channel?\nThis erases **{len(self.history[key])}** stored message(s) and can't be undone.",
+            title="🧹 Reset Memory",
+        )
+        await view.send(ctx)
+        await view.wait()
+
+        if view.value is True:
+            history = self.history.get(key)
+            if history:
+                history.clear()
+            await view.show(discord.Embed(description="🧹 Memory Successfully Cleared!", color=BRAND_COLOR))
 
     @staticmethod
     def _memory_content_to_str(content) -> str:
