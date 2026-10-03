@@ -322,7 +322,7 @@ class Recognize(commands.Cog):
         embed.add_field(name="Predicted", value=f"**{format_name(predicted)}**", inline=True)    
         embed.add_field(name="Actual Pokémon", value=f"**{format_name(actual)}**", inline=True)    
         embed.add_field(name="Confidence", value=f"**{confidence:.2%}**", inline=True)    
-        embed.add_field(name="Detection Message", value=f"[Jump to Message]({jump_url})", inline=False)     
+        embed.add_field(name="Message", value=f"[Jump]({jump_url})", inline=False)     
         embed.set_thumbnail(url=image_url)    
 
         try:
@@ -357,7 +357,7 @@ class Recognize(commands.Cog):
                 pass    
 
         if not image_url:     
-            await send_usage(ctx, note="Please attach an image or reply to a message containing a Pokémon image.")    
+            await send_usage(ctx, note="Attach or reply to an image.")    
             return
 
         await self._ensure_model_loaded()    
