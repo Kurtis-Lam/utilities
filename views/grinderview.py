@@ -5,8 +5,8 @@ from discord import ui
 
 from cogs.config import grinder as config
 from views.common import (
-    BaseView,
-    ConfirmView,
+    ConfirmLayout,
+    EmbedLayout,
     error_embed,
     extract_id,
     info_embed,
@@ -35,11 +35,11 @@ async def _guild_only(interaction: discord.Interaction) -> bool:
     return False
 
 
-async def _edit_panel(interaction: discord.Interaction, embed: discord.Embed):
+async def _edit_panel(interaction: discord.Interaction, view: discord.ui.LayoutView):
     """Refresh the panel message the modal was opened from (best effort)."""
     if interaction.message:
         try:
-            await interaction.message.edit(embed=themed(embed))
+            await interaction.message.edit(view=view)
         except discord.HTTPException:
             pass
 
@@ -70,7 +70,7 @@ class AddAccountModal(ui.Modal, title="Add Account"):
 
         data["accounts"].append(token)
         await config.save_global_data(data)
-        await _edit_panel(interaction, config.build_accounts_embed(data["accounts"]))
+        await _edit_panel(interaction, AccountsView(embed=config.build_accounts_embed(data["accounts"])))
 
         uid = config.get_user_id_from_token(token)
         mention = f"<@{uid}>" if uid else "Unknown Member"
@@ -101,7 +101,7 @@ class DeleteAccountModal(ui.Modal, title="Delete Account"):
 
         data["accounts"].pop(number - 1)
         await config.save_global_data(data)
-        await _edit_panel(interaction, config.build_accounts_embed(data["accounts"]))
+        await _edit_panel(interaction, AccountsView(embed=config.build_accounts_embed(data["accounts"])))
 
         note = "\nAccounts after it have moved up by one number." if number <= len(data["accounts"]) else ""
         await interaction.followup.send(embed=success_embed(f"Account **#{number}** removed.{note}"), ephemeral=True)
@@ -130,44 +130,55 @@ class EditAccountModal(ui.Modal, title="Edit Account Token"):
 
         data["accounts"][number - 1] = self.new_token.value.strip()
         await config.save_global_data(data)
-        await _edit_panel(interaction, config.build_accounts_embed(data["accounts"]))
+        await _edit_panel(interaction, AccountsView(embed=config.build_accounts_embed(data["accounts"])))
 
         await interaction.followup.send(embed=success_embed(f"Account **#{number}** token updated."), ephemeral=True)
 
 
-class AccountsView(ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+class AccountsView(EmbedLayout):
+    def __init__(self, embed: discord.Embed | None = None):
+        super().__init__(embed, timeout=None)
 
-    # --- ROW 0: NAVIGATION ---
-    @ui.button(label="📋 Configs", style=discord.ButtonStyle.grey, custom_id="acc_nav_cfg", row=0)
-    async def nav_configs(self, interaction: discord.Interaction, button: ui.Button):
+        self.nav_configs_btn = ui.Button(label="📋 Configs", style=discord.ButtonStyle.grey, custom_id="acc_nav_cfg")
+        self.nav_configs_btn.callback = self.nav_configs
+        self.nav_logs_btn = ui.Button(label="📜 Logs", style=discord.ButtonStyle.grey, custom_id="acc_nav_logs")
+        self.nav_logs_btn.callback = self.nav_logs
+        self.add_btn = ui.Button(label="➕ Add Account", style=discord.ButtonStyle.green, custom_id="acc_add")
+        self.add_btn.callback = self.add_account
+        self.edit_btn = ui.Button(label="✏️ Edit Account", style=discord.ButtonStyle.blurple, custom_id="acc_edit")
+        self.edit_btn.callback = self.edit_account
+        self.del_btn = ui.Button(label="🗑️ Delete Account", style=discord.ButtonStyle.red, custom_id="acc_del")
+        self.del_btn.callback = self.delete_account
+        self.render()
+
+    def rows(self):
+        return [
+            [self.nav_configs_btn, self.nav_logs_btn],
+            [self.add_btn, self.edit_btn, self.del_btn],
+        ]
+
+    async def nav_configs(self, interaction: discord.Interaction):
         if not await _guild_only(interaction):
             return
         configs = await config.get_guild_configs(str(interaction.guild_id))
         g_data = await config.get_global_data()
         embed = await config.build_mode_configs_embed(interaction.guild, configs, g_data.get("accounts", []))
-        await interaction.response.edit_message(embed=themed(embed), view=ConfigView(page="modes"))
+        await interaction.response.edit_message(view=ConfigView(page="modes", embed=embed))
 
-    @ui.button(label="📜 Logs", style=discord.ButtonStyle.grey, custom_id="acc_nav_logs", row=0)
-    async def nav_logs(self, interaction: discord.Interaction, button: ui.Button):
+    async def nav_logs(self, interaction: discord.Interaction):
         if not await _guild_only(interaction):
             return
         logs = await config.get_guild_logs(str(interaction.guild_id))
         embed = config.build_logs_embed(interaction.guild, logs)
-        await interaction.response.edit_message(embed=themed(embed), view=GrinderLogsView())
+        await interaction.response.edit_message(view=GrinderLogsView(embed=embed))
 
-    # --- ROW 1: ACTIONS ---
-    @ui.button(label="➕ Add Account", style=discord.ButtonStyle.green, custom_id="acc_add", row=1)
-    async def add_btn(self, interaction: discord.Interaction, button: ui.Button):
+    async def add_account(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AddAccountModal())
 
-    @ui.button(label="✏️ Edit Account", style=discord.ButtonStyle.blurple, custom_id="acc_edit", row=1)
-    async def edit_btn(self, interaction: discord.Interaction, button: ui.Button):
+    async def edit_account(self, interaction: discord.Interaction):
         await interaction.response.send_modal(EditAccountModal())
 
-    @ui.button(label="🗑️ Delete Account", style=discord.ButtonStyle.red, custom_id="acc_del", row=1)
-    async def del_btn(self, interaction: discord.Interaction, button: ui.Button):
+    async def delete_account(self, interaction: discord.Interaction):
         await interaction.response.send_modal(DeleteAccountModal())
 
 
@@ -348,37 +359,46 @@ def _edit_step_embed(indices: list[int], step: int, mode: str, saved: int | None
     return embed
 
 
-class SequentialEditView(BaseView):
-    def __init__(self, indices: list[int], guild_id: str, current_step: int = 0):
-        super().__init__(timeout=180)
+class SequentialEditView(EmbedLayout):
+    def __init__(
+        self,
+        indices: list[int],
+        guild_id: str,
+        current_step: int = 0,
+        embed: discord.Embed | None = None,
+    ):
+        super().__init__(embed, timeout=180)
         self.indices = indices
         self.guild_id = guild_id
         self.current_step = current_step
+        self.finished = False
         self.update_button()
 
     def update_button(self):
-        self.clear_items()
-        if self.current_step >= len(self.indices):
-            return
+        self.buttons: list[ui.Button] = []
+        if self.current_step < len(self.indices):
+            cfg_idx = self.indices[self.current_step]
+            edit = ui.Button(
+                label=f"Edit Config #{cfg_idx}",
+                emoji="✏️",
+                style=discord.ButtonStyle.blurple,
+                custom_id=f"seq_edit_{cfg_idx}_{self.current_step}",
+            )
+            edit.callback = self.on_button_click
+            self.buttons.append(edit)
 
-        cfg_idx = self.indices[self.current_step]
-        edit = ui.Button(
-            label=f"Edit Config #{cfg_idx}",
-            emoji="✏️",
-            style=discord.ButtonStyle.blurple,
-            custom_id=f"seq_edit_{cfg_idx}_{self.current_step}",
-        )
-        edit.callback = self.on_button_click
-        self.add_item(edit)
+            if self.current_step + 1 < len(self.indices):
+                skip = ui.Button(label="Skip", emoji="⏭️", style=discord.ButtonStyle.secondary)
+                skip.callback = self.on_skip
+                self.buttons.append(skip)
 
-        if self.current_step + 1 < len(self.indices):
-            skip = ui.Button(label="Skip", emoji="⏭️", style=discord.ButtonStyle.secondary)
-            skip.callback = self.on_skip
-            self.add_item(skip)
+            cancel = ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+            cancel.callback = self.on_cancel
+            self.buttons.append(cancel)
+        self.render()
 
-        cancel = ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
-        cancel.callback = self.on_cancel
-        self.add_item(cancel)
+    def rows(self):
+        return [] if self.finished else [self.buttons]
 
     async def _mode_of(self, cfg_idx: int) -> str:
         configs = await config.get_guild_configs(self.guild_id)
@@ -405,21 +425,25 @@ class SequentialEditView(BaseView):
         embed.description = f"⏭️ Skipped config **#{skipped}**.\n\n" + embed.description
         self.superseded = True
         await interaction.response.edit_message(
-            embed=themed(embed),
-            view=SequentialEditView(self.indices, self.guild_id, current_step=next_step),
+            view=SequentialEditView(self.indices, self.guild_id, current_step=next_step, embed=embed),
         )
 
     async def on_cancel(self, interaction: discord.Interaction):
         self.superseded = True
-        await interaction.response.edit_message(embed=info_embed("Editing cancelled."), view=None)
+        self.finished = True
+        await self.push(interaction, info_embed("Editing cancelled."))
 
     async def advance(self, interaction: discord.Interaction, completed_idx: int):
         next_step = self.current_step + 1
         if next_step < len(self.indices):
             mode = await self._mode_of(self.indices[next_step])
             await interaction.followup.send(
-                embed=_edit_step_embed(self.indices, next_step, mode, saved=completed_idx),
-                view=SequentialEditView(self.indices, self.guild_id, current_step=next_step),
+                view=SequentialEditView(
+                    self.indices,
+                    self.guild_id,
+                    current_step=next_step,
+                    embed=_edit_step_embed(self.indices, next_step, mode, saved=completed_idx),
+                ),
                 ephemeral=True,
             )
         else:
@@ -460,8 +484,7 @@ class PromptEditConfigModal(ui.Modal, title="Edit Configuration"):
 
         first_mode = configs[indices[0] - 1].get("mode", "").lower()
         await interaction.response.send_message(
-            embed=_edit_step_embed(indices, 0, first_mode),
-            view=SequentialEditView(indices, guild_id),
+            view=SequentialEditView(indices, guild_id, embed=_edit_step_embed(indices, 0, first_mode)),
             ephemeral=True,
         )
 
@@ -649,33 +672,60 @@ RESET_NOUNS = {
 }
 
 
-class ConfigView(ui.View):
-    def __init__(self, page="modes"):
-        super().__init__(timeout=None)
+class ConfigView(EmbedLayout):
+    def __init__(self, page="modes", embed: discord.Embed | None = None):
+        super().__init__(embed, timeout=None)
         self.page = page
         self.reset_noun = RESET_NOUNS.get(page, "configurations")
 
-        # Highlight the active tab
-        self.nav_modes.style = discord.ButtonStyle.blurple if page == "modes" else discord.ButtonStyle.grey
-        self.nav_autocatch.style = discord.ButtonStyle.blurple if page == "autocatch" else discord.ButtonStyle.grey
-        self.nav_excludes.style = discord.ButtonStyle.blurple if page == "excludes" else discord.ButtonStyle.grey
-        self.nav_bots.style = discord.ButtonStyle.blurple if page == "detector_bots" else discord.ButtonStyle.grey
+        def active(name: str) -> discord.ButtonStyle:
+            return discord.ButtonStyle.blurple if page == name else discord.ButtonStyle.grey
 
-        self.reset_all.label = f"💥 Reset All {self.reset_noun.title()}"
+        def button(label, style, custom_id, callback):
+            item = ui.Button(label=label, style=style, custom_id=custom_id)
+            item.callback = callback
+            return item
+
+        self.nav_accounts = button("⚙️ Accounts", discord.ButtonStyle.grey, "cfg_nav_accounts", self.on_nav_accounts)
+        self.nav_logs = button("📜 Logs", discord.ButtonStyle.grey, "cfg_nav_logs", self.on_nav_logs)
+        self.nav_modes = button("🎛️ Modes", active("modes"), "cfg_nav_modes", self.on_nav_modes)
+        self.nav_autocatch = button("🎯 AutoCatch", active("autocatch"), "cfg_nav_autocatch", self.on_nav_autocatch)
+        self.nav_excludes = button("🚫 Excludes", active("excludes"), "cfg_nav_excludes", self.on_nav_excludes)
+        self.nav_bots = button("🤖 Bots", active("detector_bots"), "cfg_nav_bots", self.on_nav_bots)
+
+        self.add_cfg = button("➕ Add Config", discord.ButtonStyle.green, "cfg_add", self.on_add_cfg)
+        self.edit_cfg = button("✏️ Edit Config", discord.ButtonStyle.blurple, "cfg_edit", self.on_edit_cfg)
+        self.rem_cfg = button("🗑️ Remove Config", discord.ButtonStyle.red, "cfg_rem", self.on_rem_cfg)
+
+        self.add_ex = button("➕ Add Excludes", discord.ButtonStyle.green, "cfg_add_ex", self.on_add_ex)
+        self.rem_ex = button("🗑️ Remove Excludes", discord.ButtonStyle.red, "cfg_rem_ex", self.on_rem_ex)
+        self.add_bot = button("➕ Add Bot", discord.ButtonStyle.green, "cfg_add_bot", self.on_add_bot)
+        self.rem_bot = button("🗑️ Remove Bot", discord.ButtonStyle.red, "cfg_rem_bot", self.on_rem_bot)
+
+        self.reset_all = button(
+            f"💥 Reset All {self.reset_noun.title()}", discord.ButtonStyle.danger, "cfg_reset_all", self.on_reset_all
+        )
+        self.render()
+
+    def rows(self):
+        page = self.page
+        rows = [
+            [self.nav_accounts, self.nav_logs],
+            [self.nav_modes, self.nav_autocatch, self.nav_excludes, self.nav_bots],
+        ]
 
         if page == "autocatch":
-            self.remove_item(self.edit_cfg)
-        elif page not in ["modes", "autocatch"]:
-            self.remove_item(self.add_cfg)
-            self.remove_item(self.edit_cfg)
-            self.remove_item(self.rem_cfg)
+            rows.append([self.add_cfg, self.rem_cfg])
+        elif page == "modes":
+            rows.append([self.add_cfg, self.edit_cfg, self.rem_cfg])
 
-        if page != "excludes":
-            self.remove_item(self.add_ex)
-            self.remove_item(self.rem_ex)
-        if page != "detector_bots":
-            self.remove_item(self.add_bot)
-            self.remove_item(self.rem_bot)
+        if page == "excludes":
+            rows.append([self.add_ex, self.rem_ex])
+        if page == "detector_bots":
+            rows.append([self.add_bot, self.rem_bot])
+
+        rows.append([self.reset_all])
+        return rows
 
     async def change_page(self, interaction: discord.Interaction, new_page: str):
         guild_id = str(interaction.guild_id)
@@ -684,12 +734,12 @@ class ConfigView(ui.View):
 
         if new_page == "accounts":
             embed = config.build_accounts_embed(accounts)
-            await interaction.response.edit_message(embed=themed(embed), view=AccountsView())
+            await interaction.response.edit_message(view=AccountsView(embed=embed))
             return
         elif new_page == "logs":
             logs = await config.get_guild_logs(guild_id)
             embed = config.build_logs_embed(interaction.guild, logs)
-            await interaction.response.edit_message(embed=themed(embed), view=GrinderLogsView())
+            await interaction.response.edit_message(view=GrinderLogsView(embed=embed))
             return
 
         if new_page == "autocatch":
@@ -706,86 +756,67 @@ class ConfigView(ui.View):
             configs = await config.get_guild_configs(guild_id)
             embed = await config.build_mode_configs_embed(interaction.guild, configs, accounts)
 
-        await interaction.response.edit_message(embed=themed(embed), view=ConfigView(page=new_page))
+        await interaction.response.edit_message(view=ConfigView(page=new_page, embed=embed))
 
-    # --- ROW 0: SECTION NAVIGATION ---
-    @ui.button(label="⚙️ Accounts", style=discord.ButtonStyle.grey, custom_id="cfg_nav_accounts", row=0)
-    async def nav_accounts(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_nav_accounts(self, interaction: discord.Interaction):
         await self.change_page(interaction, "accounts")
 
-    @ui.button(label="📜 Logs", style=discord.ButtonStyle.grey, custom_id="cfg_nav_logs", row=0)
-    async def nav_logs(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_nav_logs(self, interaction: discord.Interaction):
         if await _guild_only(interaction):
             await self.change_page(interaction, "logs")
 
-    # --- ROW 1: CONFIG TABS ---
-    @ui.button(label="🎛️ Modes", style=discord.ButtonStyle.grey, custom_id="cfg_nav_modes", row=1)
-    async def nav_modes(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_nav_modes(self, interaction: discord.Interaction):
         if await _guild_only(interaction):
             await self.change_page(interaction, "modes")
 
-    @ui.button(label="🎯 AutoCatch", style=discord.ButtonStyle.grey, custom_id="cfg_nav_autocatch", row=1)
-    async def nav_autocatch(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_nav_autocatch(self, interaction: discord.Interaction):
         if await _guild_only(interaction):
             await self.change_page(interaction, "autocatch")
 
-    @ui.button(label="🚫 Excludes", style=discord.ButtonStyle.grey, custom_id="cfg_nav_excludes", row=1)
-    async def nav_excludes(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_nav_excludes(self, interaction: discord.Interaction):
         if await _guild_only(interaction):
             await self.change_page(interaction, "excludes")
 
-    @ui.button(label="🤖 Bots", style=discord.ButtonStyle.grey, custom_id="cfg_nav_bots", row=1)
-    async def nav_bots(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_nav_bots(self, interaction: discord.Interaction):
         if await _guild_only(interaction):
             await self.change_page(interaction, "detector_bots")
 
-    # --- ROW 2: CONFIG ACTIONS ---
-    @ui.button(label="➕ Add Config", style=discord.ButtonStyle.green, custom_id="cfg_add", row=2)
-    async def add_cfg(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_add_cfg(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AddConfigModal())
 
-    @ui.button(label="✏️ Edit Config", style=discord.ButtonStyle.blurple, custom_id="cfg_edit", row=2)
-    async def edit_cfg(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_edit_cfg(self, interaction: discord.Interaction):
         await interaction.response.send_modal(PromptEditConfigModal())
 
-    @ui.button(label="🗑️ Remove Config", style=discord.ButtonStyle.red, custom_id="cfg_rem", row=2)
-    async def rem_cfg(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_rem_cfg(self, interaction: discord.Interaction):
         await interaction.response.send_modal(RemoveConfigModal())
 
-    # --- ROW 3: EXCLUDE & BOT ACTIONS ---
-    @ui.button(label="➕ Add Excludes", style=discord.ButtonStyle.green, custom_id="cfg_add_ex", row=3)
-    async def add_ex(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_add_ex(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AddExcludeModal())
 
-    @ui.button(label="🗑️ Remove Excludes", style=discord.ButtonStyle.red, custom_id="cfg_rem_ex", row=3)
-    async def rem_ex(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_rem_ex(self, interaction: discord.Interaction):
         await interaction.response.send_modal(RemoveExcludeModal())
 
-    @ui.button(label="➕ Add Bot", style=discord.ButtonStyle.green, custom_id="cfg_add_bot", row=3)
-    async def add_bot(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_add_bot(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AddBotModal())
 
-    @ui.button(label="🗑️ Remove Bot", style=discord.ButtonStyle.red, custom_id="cfg_rem_bot", row=3)
-    async def rem_bot(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_rem_bot(self, interaction: discord.Interaction):
         await interaction.response.send_modal(RemoveBotModal())
 
-    # --- ROW 4: DANGER ZONE ---
-    @ui.button(label="💥 Reset All", style=discord.ButtonStyle.danger, custom_id="cfg_reset_all", row=4)
-    async def reset_all(self, interaction: discord.Interaction, button: ui.Button):
+    async def on_reset_all(self, interaction: discord.Interaction):
         if not await _guild_only(interaction):
             return
 
-        confirm_view = ConfirmView(
-            author=interaction.user, confirm_label=f"Reset all {self.reset_noun}", cancel_label="Cancel"
+        confirm_view = ConfirmLayout(
+            interaction.user,
+            f"All {self.reset_noun} will be removed. This can't be undone.",
+            title="⚠️ Reset?",
+            confirm_label=f"Reset all {self.reset_noun}",
+            cancel_label="Cancel",
+            cancel_text="Cancelled.",
+            timeout_text="Timed out.",
         )
-        await interaction.response.send_message(
-            embed=warning_embed(
-                f"All {self.reset_noun} will be removed. This can't be undone.",
-                title="Reset?",
-            ),
-            view=confirm_view,
-            ephemeral=True,
-        )
+        await interaction.response.send_message(view=confirm_view, ephemeral=True)
+        confirm_view.message = await interaction.original_response()
 
         await confirm_view.wait()
 
@@ -799,16 +830,7 @@ class ConfigView(ui.View):
                 await config.save_guild_detector_bots(guild_id, [])
 
             await config.refresh_config_embed(interaction, override_page=self.page)
-            result = success_embed(f"All {self.reset_noun} have been reset.")
-        elif confirm_view.value is False:
-            result = info_embed("Cancelled.")
-        else:
-            result = info_embed("Timed out.")
-
-        try:
-            await interaction.edit_original_response(embed=themed(result), view=None)
-        except discord.HTTPException:
-            await interaction.followup.send(embed=themed(result), ephemeral=True)
+            await confirm_view.show(success_embed(f"All {self.reset_noun} have been reset."))
 
 
 # =============================================================================
@@ -843,7 +865,7 @@ class SetLogModal(ui.Modal):
 
         logs = await config.get_guild_logs(guild_id)
         if interaction.guild:
-            await _edit_panel(interaction, config.build_logs_embed(interaction.guild, logs))
+            await _edit_panel(interaction, GrinderLogsView(embed=config.build_logs_embed(interaction.guild, logs)))
 
         await interaction.followup.send(
             embed=success_embed(f"**{self.log_type.capitalize()}** logs will now go to <#{channel_id}>."),
@@ -851,35 +873,46 @@ class SetLogModal(ui.Modal):
         )
 
 
-class GrinderLogsView(ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+class GrinderLogsView(EmbedLayout):
+    def __init__(self, embed: discord.Embed | None = None):
+        super().__init__(embed, timeout=None)
 
-    # --- ROW 0: NAVIGATION ---
-    @ui.button(label="📋 Configs", style=discord.ButtonStyle.grey, custom_id="log_nav_cfg", row=0)
-    async def nav_configs(self, interaction: discord.Interaction, button: ui.Button):
+        self.nav_configs_btn = ui.Button(label="📋 Configs", style=discord.ButtonStyle.grey, custom_id="log_nav_cfg")
+        self.nav_configs_btn.callback = self.nav_configs
+        self.nav_accounts_btn = ui.Button(label="⚙️ Accounts", style=discord.ButtonStyle.grey, custom_id="log_nav_acc")
+        self.nav_accounts_btn.callback = self.nav_accounts
+        self.alerts_btn = ui.Button(label="🔔 Set Alerts", style=discord.ButtonStyle.blurple, custom_id="log_alerts")
+        self.alerts_btn.callback = self.set_alerts
+        self.autocatch_btn = ui.Button(label="🎯 Set Autocatch", style=discord.ButtonStyle.blurple, custom_id="log_autocatch")
+        self.autocatch_btn.callback = self.set_autocatch
+        self.switch_btn = ui.Button(label="🔀 Set Switch", style=discord.ButtonStyle.blurple, custom_id="log_switch")
+        self.switch_btn.callback = self.set_switch
+        self.render()
+
+    def rows(self):
+        return [
+            [self.nav_configs_btn, self.nav_accounts_btn],
+            [self.alerts_btn, self.autocatch_btn, self.switch_btn],
+        ]
+
+    async def nav_configs(self, interaction: discord.Interaction):
         if not await _guild_only(interaction):
             return
         configs = await config.get_guild_configs(str(interaction.guild_id))
         g_data = await config.get_global_data()
         embed = await config.build_mode_configs_embed(interaction.guild, configs, g_data.get("accounts", []))
-        await interaction.response.edit_message(embed=themed(embed), view=ConfigView(page="modes"))
+        await interaction.response.edit_message(view=ConfigView(page="modes", embed=embed))
 
-    @ui.button(label="⚙️ Accounts", style=discord.ButtonStyle.grey, custom_id="log_nav_acc", row=0)
-    async def nav_accounts(self, interaction: discord.Interaction, button: ui.Button):
+    async def nav_accounts(self, interaction: discord.Interaction):
         data = await config.get_global_data()
         embed = config.build_accounts_embed(data.get("accounts", []))
-        await interaction.response.edit_message(embed=themed(embed), view=AccountsView())
+        await interaction.response.edit_message(view=AccountsView(embed=embed))
 
-    # --- ROW 1: SET LOG CHANNELS ---
-    @ui.button(label="🔔 Set Alerts", style=discord.ButtonStyle.blurple, custom_id="log_alerts", row=1)
-    async def set_alerts(self, interaction: discord.Interaction, button: ui.Button):
+    async def set_alerts(self, interaction: discord.Interaction):
         await interaction.response.send_modal(SetLogModal("alerts"))
 
-    @ui.button(label="🎯 Set Autocatch", style=discord.ButtonStyle.blurple, custom_id="log_autocatch", row=1)
-    async def set_autocatch(self, interaction: discord.Interaction, button: ui.Button):
+    async def set_autocatch(self, interaction: discord.Interaction):
         await interaction.response.send_modal(SetLogModal("autocatch"))
 
-    @ui.button(label="🔀 Set Switch", style=discord.ButtonStyle.blurple, custom_id="log_switch", row=1)
-    async def set_switch(self, interaction: discord.Interaction, button: ui.Button):
+    async def set_switch(self, interaction: discord.Interaction):
         await interaction.response.send_modal(SetLogModal("switch"))
