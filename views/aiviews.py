@@ -10,6 +10,7 @@ from typing import Optional
 
 import discord
 
+from views.common import BaseLayout, container_from_embed
 from views.embeds import BRAND_COLOR
 
 _MENTION_RE = re.compile(r"^<#(\d+)>$")
@@ -87,22 +88,32 @@ class ChannelModal(discord.ui.Modal):
             await interaction.response.send_message(embed=discord.Embed(description=text, color=discord.Color.red()), ephemeral=True)
 
 
-class AIConfigView(discord.ui.View):
-    """Buttons shown under `.ai config` (administrators only)."""
+class AIConfigView(BaseLayout):
+    """Add / Remove / Clear buttons shown inside the `.ai config` container (administrators only)."""
 
-    def __init__(self, cog, author_id: int, guild: discord.Guild, timeout: float = 180.0):
-        super().__init__(timeout=timeout)
+    def __init__(self, cog, author_id: int, guild: discord.Guild, embed: discord.Embed, timeout: float = 180.0):
+        super().__init__(author_id=author_id, timeout=timeout)
         self.cog = cog
-        self.author_id = author_id
         self.guild = guild
-        self.message: Optional[discord.Message] = None
+        self.add_button = discord.ui.Button(label="Add", emoji="➕", style=discord.ButtonStyle.success)
+        self.remove_button = discord.ui.Button(label="Remove", emoji="➖", style=discord.ButtonStyle.secondary)
+        self.clear_button = discord.ui.Button(label="Clear", emoji="🗑️", style=discord.ButtonStyle.danger)
+        self.add_button.callback = self._on_add
+        self.remove_button.callback = self._on_remove
+        self.clear_button.callback = self._on_clear
+        self.render(embed)
+
+    def render(self, embed: discord.Embed) -> None:
+        self.clear_items()
+        self.add_item(
+            container_from_embed(
+                embed,
+                discord.ui.ActionRow(self.add_button, self.remove_button, self.clear_button),
+            )
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                embed=discord.Embed(description="⚠️ Not your menu.", color=discord.Color.gold()),
-                ephemeral=True,
-            )
+        if not await super().interaction_check(interaction):
             return False
         perms = getattr(interaction.user, "guild_permissions", None)
         if perms is None or not perms.administrator:
@@ -118,9 +129,10 @@ class AIConfigView(discord.ui.View):
     async def _refresh(self, interaction: discord.Interaction, result_text: str):
         """Redraws the config embed in place, then privately tells the user what happened."""
         embed = await self.cog.build_config_embed(self.guild)
+        self.render(embed)
         result = discord.Embed(description=result_text, color=BRAND_COLOR)
         try:
-            await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.response.edit_message(view=self)
         except discord.HTTPException:
             await interaction.response.send_message(embed=result, ephemeral=True)
             return
@@ -157,16 +169,13 @@ class AIConfigView(discord.ui.View):
 
     # -- buttons ------------------------------------------------------------
 
-    @discord.ui.button(label="Add", emoji="➕", style=discord.ButtonStyle.success)
-    async def add_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _on_add(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ChannelModal(self, "add"))
 
-    @discord.ui.button(label="Remove", emoji="➖", style=discord.ButtonStyle.secondary)
-    async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _on_remove(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ChannelModal(self, "remove"))
 
-    @discord.ui.button(label="Clear", emoji="🗑️", style=discord.ButtonStyle.danger)
-    async def clear_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _on_clear(self, interaction: discord.Interaction):
         try:
             count = await self.cog.clear_ai_channels(self.guild.id)
         except Exception as e:
@@ -178,13 +187,3 @@ class AIConfigView(discord.ui.View):
             return
         text = f"🗑️ Cleared **{count}** AI channel(s)." if count else "⚠️ There are no AI channels to clear."
         await self._refresh(interaction, text)
-
-    async def on_timeout(self):
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except (discord.NotFound, discord.HTTPException):
-                pass
