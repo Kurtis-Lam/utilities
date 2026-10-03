@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 # Import ConfirmView from views/common.py
-from views.common import ConfirmView
+from views.common import confirm
 from views.embeds import handle_common_error, send_usage
 from views.prompts import ask, is_skip, one_line
 
@@ -20,35 +20,13 @@ class Channels(commands.Cog):
             raise error
 
     async def confirm_action(self, ctx, prompt: str) -> bool:
-        view = ConfirmView(ctx.author)
-        embed = discord.Embed(
+        return await confirm(
+            ctx,
+            prompt,
             title="⚠️ Confirm",
-            description=prompt,
-            color=discord.Color.gold()
+            cancel_text="❌ Cancelled",
+            timeout_text="⏱️ Timed out",
         )
-        msg = await ctx.reply(embed=embed, view=view, mention_author=False)
-        await view.wait()
-        
-        if view.value is True:
-            try:
-                await msg.edit(view=None)
-            except discord.HTTPException:
-                pass
-            return True
-        elif view.value is False:
-            cancel_embed = discord.Embed(title="❌ Cancelled", color=discord.Color.red())
-            try:
-                await msg.edit(embed=cancel_embed, view=None)
-            except discord.HTTPException:
-                pass
-            return False
-        else:
-            timeout_embed = discord.Embed(title="⏱️ Timed out", color=discord.Color.red())
-            try:
-                await msg.edit(embed=timeout_embed, view=None)
-            except discord.HTTPException:
-                pass
-            return False
 
     @commands.hybrid_command(aliases=["cch"], name="createchannel", description="Creates a new text channel.", with_app_command=True)
     @app_commands.describe(
