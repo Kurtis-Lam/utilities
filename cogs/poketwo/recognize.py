@@ -171,7 +171,7 @@ class PokemonRecognizer:
 
         # 3. Load constant local datasets
         try:
-            converts_path = resolve_file_path("pokes/converts.json")
+            converts_path = resolve_file_path("data/pokes/converts.json")
             with open(converts_path, "r", encoding="utf-8") as f:
                 converts = json.load(f)
                 self.converts_sorted = sorted(
@@ -181,7 +181,7 @@ class PokemonRecognizer:
             self.converts_sorted = []
 
         try:
-            pokevars_path = resolve_file_path("pokevars.json")
+            pokevars_path = resolve_file_path("data/pokevars.json")
             with open(pokevars_path, "r", encoding="utf-8") as f:
                 pokevars_list = json.load(f)
                 self.pokevars = {name.strip().lower() for name in pokevars_list}
