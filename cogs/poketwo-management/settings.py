@@ -19,8 +19,7 @@ class Settings(commands.Cog):
     async def _get_config_cog(self, ctx: commands.Context):
         cog = self.bot.get_cog("AutoLockConfig")
         if not cog:
-            await ctx.send(embed=err_embed(
-                "Internal Error", "`AutoLockConfig` cog is not loaded.", emoji="⚠️"))
+            await ctx.send(embed=err_embed("AutoLockConfig is not loaded.", emoji="⚠️"))
         return cog
 
     # Server-wide settings are already covered by `.c a` (AutoLockConfig's own
@@ -29,18 +28,18 @@ class Settings(commands.Cog):
     @commands.command(
         name="channelsettings",
         aliases=["chsettings"],
-        description="Show the effective autolock settings for the current channel.",
+        description="This channel's autolock settings.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def channel_settings(self, ctx: commands.Context):
-        """Displays settings for all autolock categories specific to the current channel."""
+        """This channel's autolock settings."""
         cog = await self._get_config_cog(ctx)
         if not cog:
             return
 
         embed = discord.Embed(
-            title=f"⚙️ Channel Settings — #{ctx.channel.name}",
+            title=f"⚙️ #{ctx.channel.name}",
             color=discord.Color.green(),
         )
 
@@ -51,15 +50,11 @@ class Settings(commands.Cog):
 
             delay_enabled = cfg.get("delay_enabled", True)
             delay_val = cfg.get("delay", 15)
-            delay_str = f"{delay_val}s" if delay_enabled else "Off (Instant)"
+            delay_str = f"{delay_val}s" if delay_enabled else "Off"
 
             restricted = "✅ Yes" if cfg.get("restrict_unlockers", False) else "❌ No"
 
-            field_value = (
-                f"**Status:** {enabled}\n"
-                f"**Delay:** ⏱️ {delay_str}\n"
-                f"**Restrict Unlockers:** {restricted}"
-            )
+            field_value = f"{enabled}\n⏱️ {delay_str}\n🔐 Restrict: {restricted}"
 
             embed.add_field(
                 name=_label(cat),
@@ -67,7 +62,7 @@ class Settings(commands.Cog):
                 inline=True,
             )
 
-        embed.set_footer(text="Use .set or .toggle commands to modify channel settings.")
+        embed.set_footer(text="Edit with .set / .toggle")
         await ctx.send(embed=embed)
 
 
