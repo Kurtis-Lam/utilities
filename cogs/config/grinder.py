@@ -415,16 +415,18 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
             if paused and pause_until:
                 pause_until_sec = int(pause_until / 1000) if pause_until > 1e11 else int(pause_until)
                 if current_time < pause_until_sec:
-                    line += f" | ⏸️ **PAUSED** (<t:{pause_until_sec}:R>)"
+                    line += f" | ⏸️ **Lock OFF** (<t:{pause_until_sec}:R>)"
                 else:
-                    line += " | ⏸️ **PAUSED** (Expired)"
+                    line += " | ⏸️ **Lock OFF** (Expired)"
             elif paused:
-                line += " | ⏸️ **PAUSED**"
+                line += " | ⏸️ **Lock OFF**"
+            else:
+                line += " | 🟢 **Lock ON**"
 
             target_str = cfg.get('target', '')
             aspects = parse_target_aspects(mode, target_str, guild)
             for label, val in aspects:
-                if val:
+                if label.lower() in ["target id", "chid", "channel"] and val:
                     line += f"\n  {label}: `{val}`"
 
             lines.append(line)
@@ -464,16 +466,18 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
             if paused and pause_until:
                 pause_until_sec = int(pause_until / 1000) if pause_until > 1e11 else int(pause_until)
                 if current_time < pause_until_sec:
-                    line += f" | ⏸️ **PAUSED** (<t:{pause_until_sec}:R>)"
+                    line += f" | ⏸️ **Lock OFF** (<t:{pause_until_sec}:R>)"
                 else:
-                    line += " | ⏸️ **PAUSED** (Expired)"
+                    line += " | ⏸️ **Lock OFF** (Expired)"
             elif paused:
-                line += " | ⏸️ **PAUSED**"
+                line += " | ⏸️ **Lock OFF**"
+            else:
+                line += " | 🟢 **Lock ON**"
 
             target_str = cfg.get('target', '')
             aspects = parse_target_aspects(cfg_mode, target_str, guild)
             for label, val in aspects:
-                if val:
+                if label.lower() in ["target id", "chid", "channel"] and val:
                     line += f"\n  {label}: `{val}`"
 
             lines.append(line)
@@ -881,7 +885,7 @@ class GrinderCog(commands.Cog):
 
         if duration:
             await ctx.send(embed=make_embed(description=(
-                f"⏸️ Paused Config **#{idx}** (`{mode}` | {acc_str}) for **{duration}** "
+                f"⏸️️ Paused Config **#{idx}** (`{mode}` | {acc_str}) for **{duration}** "
                 f"(resumes <t:{int(pause_until / 1000)}:R>)."
             )))
         else:
