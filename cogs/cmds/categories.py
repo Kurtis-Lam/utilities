@@ -195,7 +195,7 @@ class Categories(commands.Cog):
             name = reply.content.strip().replace("-", " ")
             if not name:
                 return await ctx.reply(
-                    embed=one_line("❌ The category name can't be empty. Cancelled."), mention_author=False
+                    one_line("❌ The category name can't be empty. Cancelled."), mention_author=False
                 )
 
             reply = await ask(
@@ -209,7 +209,7 @@ class Categories(commands.Cog):
                 user = await self._resolve_member_or_role(ctx, reply.content.strip())
                 if user is None:
                     return await ctx.reply(
-                        embed=one_line("❌ Couldn't find that user or role. Cancelled."), mention_author=False
+                        one_line("❌ Couldn't find that user or role. Cancelled."), mention_author=False
                     )
 
             if not (prelock or prehide):
@@ -228,7 +228,7 @@ class Categories(commands.Cog):
                     prelock = prehide = True
                 elif not is_skip(choice):
                     return await ctx.reply(
-                        embed=one_line("❌ Invalid preaction. Cancelled."), mention_author=False
+                        one_line("❌ Invalid preaction. Cancelled."), mention_author=False
                     )
 
         overwrites = {}
@@ -388,7 +388,7 @@ class Categories(commands.Cog):
             target_category = await self.get_target_category(ctx, category)
             if not target_category:
                 return await ctx.reply(
-                    embed=one_line("❌ Couldn't find that category. Cancelled."), mention_author=False
+                    one_line("❌ Couldn't find that category. Cancelled."), mention_author=False
                 )
 
             reply = await ask(
@@ -400,7 +400,7 @@ class Categories(commands.Cog):
             name = reply.content.strip()
             if not name:
                 return await ctx.reply(
-                    embed=one_line("❌ The new name can't be empty. Cancelled."), mention_author=False
+                    one_line("❌ The new name can't be empty. Cancelled."), mention_author=False
                 )
         else:
             target_category = await self.get_target_category(ctx, category)
