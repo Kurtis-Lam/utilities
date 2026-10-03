@@ -17,10 +17,10 @@ from .base import config_group
 VALID_MODES = ["autocatch", "spam", "dotcatch", "commaedit", "periodicmsg"]
 
 MODE_PARAMS_INFO = {
-    "autocatch": {"required": ["Account Index"], "optional": ["Target ID", "Pokemons", "Datafile"]},
+    "autocatch": {"required": ["Account Index"], "optional": ["Target ID"]},
     "spam": {"required": ["Account Index", "Target / Channel ID"], "optional": []},
-    "dotcatch": {"required": ["Account Index", "Channel ID"], "optional": ["Pokemons", "Datafile"]},
-    "commaedit": {"required": ["Account Index", "Channel ID"], "optional": ["Pokemons", "Datafile"]},
+    "dotcatch": {"required": ["Account Index", "Channel ID"], "optional": []},
+    "commaedit": {"required": ["Account Index", "Channel ID"], "optional": []},
     "periodicmsg": {"required": ["Account Index", "Channel ID", "Message"], "optional": ["Time 1 (Delay)", "Time 2 (Interval)"]},
 }
 
@@ -127,25 +127,14 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
     if mode_lower in ["autocatch", "dotcatch", "commaedit"]:
         parts = [p.strip() for p in target.split(',') if p.strip()]
         chids = []
-        pokes = []
-        datafile = ""
 
         for p in parts:
-            if p.lower().endswith(".json"):
-                if not datafile:
-                    datafile = p
-            elif p.isdigit():
+            if p.isdigit():
                 chids.append(format_id_with_name(p, guild))
-            else:
-                pokes.append(p)
 
         aspects = []
         if chids:
             aspects.append(("Target ID", ", ".join(chids)))
-        if pokes:
-            aspects.append(("Pokemons", ", ".join(pokes)))
-        if datafile:
-            aspects.append(("Datafile", datafile))
         return aspects
 
     elif mode_lower == "periodicmsg":
