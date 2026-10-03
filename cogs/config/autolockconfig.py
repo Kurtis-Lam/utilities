@@ -39,20 +39,20 @@ def _label(category: str) -> str:
 def _delay_text(cfg: dict) -> str:
     if cfg.get("delay_enabled", True):
         return f"`{cfg.get('delay', DEFAULT_DELAY)}s`"
-    return "`Off` (locks instantly)"
+    return "`Off`"
 
 
 @config_group.command(
     name="autolock",
     aliases=["a", "al"],
-    description="Configure autolock behavior for res/sh/cl/tp/rp and rare/regional/gmax/paradox/eevos locks.",
+    description="Configure autolocks.",
 )
 @commands.has_permissions(administrator=True)
 async def autolockconfig(ctx: commands.Context):
     cog = ctx.bot.get_cog("AutoLockConfig")
 
     if cog is None:
-        return await ctx.send(embed=error_embed("Internal error: `AutoLockConfig` cog is not loaded."))
+        return await ctx.send(embed=error_embed("AutoLockConfig is not loaded."))
 
     embed = themed(await cog.build_main_embed(ctx.guild))
     view = AutoLockMainView(cog, guild_id=ctx.guild.id, author_id=ctx.author.id)
@@ -392,7 +392,7 @@ class AutoLockConfig(commands.Cog):
 
     def _format_whitelist(self, guild: discord.Guild, whitelist: list) -> str:
         if not whitelist:
-            return "None (no whitelist channels configured)"
+            return "None"
 
         ordered = self._get_ordered_whitelist(guild, whitelist)
         lines = []
@@ -404,7 +404,7 @@ class AutoLockConfig(commands.Cog):
 
             ch = guild.get_channel(item) if isinstance(item, int) or str(item).isdigit() else None
             if ch is None:
-                lines.append(f"`{idx}.` `{item}` (unknown/deleted)")
+                lines.append(f"`{idx}.` `{item}` (deleted)")
             elif isinstance(ch, discord.CategoryChannel):
                 lines.append(f"`{idx}.` 📁 {ch.name}")
             else:
@@ -427,8 +427,8 @@ class AutoLockConfig(commands.Cog):
         doc = await self.get_guild_config(guild.id)
 
         embed = discord.Embed(
-            title=f"🔒 AutoLock Configuration — {guild.name}",
-            description="Select a category below to configure its lock behavior.",
+            title=f"🔒 AutoLock — {guild.name}",
+            description="Pick a category.",
             color=discord.Color.blurple(),
         )
 
@@ -445,13 +445,13 @@ class AutoLockConfig(commands.Cog):
             if cat in ROLE_CATEGORIES:
                 role = await self.get_ping_role(guild, cat)
                 lines.append(f"Role: {role.mention if role else 'Not set'}")
-                lines.append("Unlock: anyone (role ping)")
+                lines.append("Unlock: anyone")
             if cat in RESTRICT_CATEGORIES:
-                lines.append(f"Restrict Unlockers: `{cfg.get('restrict_unlockers', True)}`")
+                lines.append(f"Restrict: `{cfg.get('restrict_unlockers', True)}`")
 
             override_count = self._count_channel_overrides(doc, cat)
             if override_count:
-                lines.append(f"Channel Overrides: `{override_count}`")
+                lines.append(f"Overrides: `{override_count}`")
 
             embed.add_field(name=f"{_label(cat)} {status_icon}", value="\n".join(lines), inline=True)
 
@@ -465,25 +465,17 @@ class AutoLockConfig(commands.Cog):
         delay_on = cfg.get("delay_enabled", True)
 
         embed = discord.Embed(
-            title=f"⚙️ {_label(category)} Settings — {guild.name}",
+            title=f"⚙️ {_label(category)} — {guild.name}",
             color=discord.Color.blurple(),
         )
 
         if category in CATEGORY_DESCRIPTIONS:
             embed.description = CATEGORY_DESCRIPTIONS[category]
-        elif category == "re":
-            embed.description = (
-                "Locks the channel when a Pokémon someone has reserved spawns. "
-                "Highest unlock priority (Reserves > Shiny Hunt > Collection > everything else)."
-            )
 
         embed.add_field(name="Lock Status", value=f"`{status_str}`", inline=False)
         embed.add_field(
             name="Lock Delay",
-            value=(
-                f"`{cfg.get('delay', DEFAULT_DELAY)}` seconds — "
-                + ("On ✅ (waits before locking)" if delay_on else "Off ❌ (locks immediately)")
-            ),
+            value=f"`{cfg.get('delay', DEFAULT_DELAY)}s` — " + ("On ✅" if delay_on else "Off ❌"),
             inline=False,
         )
         embed.add_field(
@@ -495,39 +487,30 @@ class AutoLockConfig(commands.Cog):
         if category in ROLE_CATEGORIES:
             role = await self.get_ping_role(guild, category)
             embed.add_field(
-                name="Ping Role (read-only here)",
+                name="Ping Role",
                 value=(
                     f"{role.mention if role else 'Not set'}\n"
-                    f"-# Set with {ROLE_COMMAND_HINTS[category]}, not here."
+                    f"-# Set with {ROLE_COMMAND_HINTS[category]}"
                 ),
                 inline=False,
             )
             embed.add_field(
                 name="Who Can Unlock",
-                value="Anyone — this lock pings a role, not specific users, so it can't be restricted.",
+                value="Anyone (role ping).",
                 inline=False,
             )
 
         if category in RESTRICT_CATEGORIES:
             embed.add_field(
                 name="Restrict Unlockers",
-                value=(
-                    f"`{cfg.get('restrict_unlockers', True)}` — when enabled, only the user(s) "
-                    "pinged for this lock may unlock the channel (server admins can always unlock). "
-                    "If several restricted locks trigger at once, Reserves > Shiny Hunt > Collection > others."
-                ),
+                value=f"`{cfg.get('restrict_unlockers', True)}` — only pinged user(s) can unlock (admins always can).",
                 inline=False,
             )
 
         override_count = self._count_channel_overrides(doc, category)
         embed.add_field(
-            name="Channel Overrides",
-            value=(
-                f"`{override_count}` channel(s) have custom settings for this lock "
-                "(set via `.set`/`.toggle` without `--global`)."
-                if override_count
-                else "None — every channel currently uses the settings above."
-            ),
+            name="Overrides",
+            value=f"`{override_count}` channel(s)." if override_count else "None.",
             inline=False,
         )
 
