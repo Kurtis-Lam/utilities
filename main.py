@@ -100,6 +100,15 @@ bot = Utilities(prefix=PREFIX)
 async def on_ready():
     print(f'We have logged in as {bot.user}')
 
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    if after.author.bot or after.guild is None or before.content == after.content:
+        return
+
+    # discord.py only invokes commands on new messages, so manually reprocess
+    # edited command text. This lets users fix a typo like ",snipw" -> ",snipe".
+    await bot.process_commands(after)
+
 def get_dir_size(path: str = ".") -> int:
     """Recursively calculate directory size in bytes."""
     total = 0
