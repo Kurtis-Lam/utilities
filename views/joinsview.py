@@ -1,7 +1,7 @@
 import discord
 from discord.ui import Button, ChannelSelect, Modal, RoleSelect, TextInput
 
-from views.common import BaseView, make_embed, success_embed, themed
+from views.common import EmbedLayout, make_embed, success_embed
 
 TOTAL_PAGES = 3
 PLACEHOLDER_HELP = "{mention}  {username}  {display_name}  {server}  {membercount}"
@@ -110,123 +110,154 @@ class WelcomeMessageModal(Modal, title="Edit Welcome Message"):
             {"_id": self.guild_id}, {"$set": {"welcome_message": new_message}}, upsert=True
         )
         self.view_instance.config["welcome_message"] = new_message
-        await interaction.response.edit_message(
-            embed=themed(get_welcome_embed(self.view_instance.config, interaction.guild, interaction.user)),
-            view=self.view_instance,
+        await self.view_instance.push(
+            interaction, get_welcome_embed(self.view_instance.config, interaction.guild, interaction.user)
         )
         await interaction.followup.send(embed=success_embed("Welcome message updated."), ephemeral=True)
 
 
 # --- Views -----------------------------------------------------------------------
 
-class WelcomeConfigView(BaseView):
-    def __init__(self, collection, config: dict, author_id: int | None = None):
-        super().__init__(author_id=author_id, timeout=180)
+class WelcomeConfigView(EmbedLayout):
+    def __init__(
+        self,
+        collection,
+        config: dict,
+        author_id: int | None = None,
+        guild: discord.Guild | None = None,
+        member: discord.abc.User | None = None,
+    ):
+        super().__init__(get_welcome_embed(config, guild, member), author_id=author_id, timeout=180)
         self.collection = collection
         self.config = config
         self.guild_id = config["_id"]
+
+        self.channel_select = ChannelSelect(
+            channel_types=[discord.ChannelType.text],
+            placeholder="📍 Welcome channel",
+        )
+        self.channel_select.callback = self.select_welcome_channel
+
+        self.edit_message_btn = Button(label="Edit Message", emoji="📝", style=discord.ButtonStyle.primary)
+        self.edit_message_btn.callback = self.edit_message_cb
+
+        self.toggle_embed_btn = Button(label="Switch Format", style=discord.ButtonStyle.secondary)
+        self.toggle_embed_btn.callback = self.toggle_embed_cb
+
+        self.next_page_btn = Button(label="Next: Greets", emoji="▶️", style=discord.ButtonStyle.success)
+        self.next_page_btn.callback = self.next_page_cb
+
         self._sync_toggle()
+        self.render()
+
+    def rows(self):
+        return [
+            [self.channel_select],
+            [self.edit_message_btn, self.toggle_embed_btn],
+            [self.next_page_btn],
+        ]
 
     def _sync_toggle(self):
         use_embed = self.config.get("use_embed", True)
         self.toggle_embed_btn.label = "Switch to Plain Text" if use_embed else "Switch to Embed"
         self.toggle_embed_btn.emoji = "💬" if use_embed else "🖼️"
 
-    @discord.ui.select(
-        cls=ChannelSelect,
-        channel_types=[discord.ChannelType.text],
-        placeholder="📍 Welcome channel",
-        row=0,
-    )
-    async def select_welcome_channel(self, interaction: discord.Interaction, select: ChannelSelect):
-        channel_id = select.values[0].id
+    async def select_welcome_channel(self, interaction: discord.Interaction):
+        channel_id = self.channel_select.values[0].id
         self.config["welcome_channel"] = channel_id
         await self.collection.update_one(
             {"_id": self.guild_id}, {"$set": {"welcome_channel": channel_id}}, upsert=True
         )
-        await interaction.response.edit_message(
-            embed=themed(get_welcome_embed(self.config, interaction.guild, interaction.user)), view=self
-        )
+        await self.push(interaction, get_welcome_embed(self.config, interaction.guild, interaction.user))
 
-    @discord.ui.button(label="Edit Message", emoji="📝", style=discord.ButtonStyle.primary, row=1)
-    async def edit_message_btn(self, interaction: discord.Interaction, button: Button):
+    async def edit_message_cb(self, interaction: discord.Interaction):
         modal = WelcomeMessageModal(self.collection, self.guild_id, self)
         modal.message_input.default = self.config.get("welcome_message", "")
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Switch Format", style=discord.ButtonStyle.secondary, row=1)
-    async def toggle_embed_btn(self, interaction: discord.Interaction, button: Button):
+    async def toggle_embed_cb(self, interaction: discord.Interaction):
         new_val = not self.config.get("use_embed", True)
         self.config["use_embed"] = new_val
         await self.collection.update_one({"_id": self.guild_id}, {"$set": {"use_embed": new_val}}, upsert=True)
         self._sync_toggle()
-        await interaction.response.edit_message(
-            embed=themed(get_welcome_embed(self.config, interaction.guild, interaction.user)), view=self
-        )
+        await self.push(interaction, get_welcome_embed(self.config, interaction.guild, interaction.user))
 
-    @discord.ui.button(label="Next: Greets", emoji="▶️", style=discord.ButtonStyle.success, row=2)
-    async def next_page_btn(self, interaction: discord.Interaction, button: Button):
+    async def next_page_cb(self, interaction: discord.Interaction):
         view = GreetConfigView(self.collection, self.config, self.author_id)
-        await self.swap(interaction, embed=get_greet_embed(self.config), view=view)
+        await self.swap(interaction, view=view)
 
 
-class GreetConfigView(BaseView):
+class GreetConfigView(EmbedLayout):
     def __init__(self, collection, config: dict, author_id: int | None = None):
-        super().__init__(author_id=author_id, timeout=180)
+        super().__init__(get_greet_embed(config), author_id=author_id, timeout=180)
         self.collection = collection
         self.config = config
         self.guild_id = config["_id"]
 
-    @discord.ui.select(
-        cls=ChannelSelect,
-        channel_types=[discord.ChannelType.text],
-        placeholder="📍 Greet channels (max 10)",
-        min_values=0,
-        max_values=10,
-        row=0,
-    )
-    async def select_greet_channels(self, interaction: discord.Interaction, select: ChannelSelect):
-        channel_ids = [channel.id for channel in select.values]
+        self.channel_select = ChannelSelect(
+            channel_types=[discord.ChannelType.text],
+            placeholder="📍 Greet channels (max 10)",
+            min_values=0,
+            max_values=10,
+        )
+        self.channel_select.callback = self.select_greet_channels
+
+        self.prev_page_btn = Button(label="Back: Welcome", emoji="◀️", style=discord.ButtonStyle.secondary)
+        self.prev_page_btn.callback = self.prev_page_cb
+
+        self.next_page_btn = Button(label="Next: Autoroles", emoji="▶️", style=discord.ButtonStyle.success)
+        self.next_page_btn.callback = self.next_page_cb
+        self.render()
+
+    def rows(self):
+        return [[self.channel_select], [self.prev_page_btn, self.next_page_btn]]
+
+    async def select_greet_channels(self, interaction: discord.Interaction):
+        channel_ids = [channel.id for channel in self.channel_select.values]
         self.config["greet_channels"] = channel_ids
         await self.collection.update_one(
             {"_id": self.guild_id}, {"$set": {"greet_channels": channel_ids}}, upsert=True
         )
-        await interaction.response.edit_message(embed=themed(get_greet_embed(self.config)), view=self)
+        await self.push(interaction, get_greet_embed(self.config))
 
-    @discord.ui.button(label="Back: Welcome", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
-    async def prev_page_btn(self, interaction: discord.Interaction, button: Button):
-        view = WelcomeConfigView(self.collection, self.config, self.author_id)
-        await self.swap(
-            interaction, embed=get_welcome_embed(self.config, interaction.guild, interaction.user), view=view
+    async def prev_page_cb(self, interaction: discord.Interaction):
+        view = WelcomeConfigView(
+            self.collection, self.config, self.author_id, interaction.guild, interaction.user
         )
+        await self.swap(interaction, view=view)
 
-    @discord.ui.button(label="Next: Autoroles", emoji="▶️", style=discord.ButtonStyle.success, row=1)
-    async def next_page_btn(self, interaction: discord.Interaction, button: Button):
+    async def next_page_cb(self, interaction: discord.Interaction):
         view = AutoroleConfigView(self.collection, self.config, self.author_id)
-        await self.swap(interaction, embed=get_autorole_embed(self.config), view=view)
+        await self.swap(interaction, view=view)
 
 
-class AutoroleConfigView(BaseView):
+class AutoroleConfigView(EmbedLayout):
     def __init__(self, collection, config: dict, author_id: int | None = None):
-        super().__init__(author_id=author_id, timeout=180)
+        super().__init__(get_autorole_embed(config), author_id=author_id, timeout=180)
         self.collection = collection
         self.config = config
         self.guild_id = config["_id"]
 
-    @discord.ui.select(
-        cls=RoleSelect,
-        placeholder="🏷️ Autoroles (max 10)",
-        min_values=0,
-        max_values=10,
-        row=0,
-    )
-    async def select_autoroles(self, interaction: discord.Interaction, select: RoleSelect):
-        role_ids = [role.id for role in select.values]
+        self.role_select = RoleSelect(
+            placeholder="🏷️ Autoroles (max 10)",
+            min_values=0,
+            max_values=10,
+        )
+        self.role_select.callback = self.select_autoroles
+
+        self.prev_page_btn = Button(label="Back: Greets", emoji="◀️", style=discord.ButtonStyle.secondary)
+        self.prev_page_btn.callback = self.prev_page_cb
+        self.render()
+
+    def rows(self):
+        return [[self.role_select], [self.prev_page_btn]]
+
+    async def select_autoroles(self, interaction: discord.Interaction):
+        role_ids = [role.id for role in self.role_select.values]
         self.config["autoroles"] = role_ids
         await self.collection.update_one({"_id": self.guild_id}, {"$set": {"autoroles": role_ids}}, upsert=True)
-        await interaction.response.edit_message(embed=themed(get_autorole_embed(self.config)), view=self)
+        await self.push(interaction, get_autorole_embed(self.config))
 
-    @discord.ui.button(label="Back: Greets", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
-    async def prev_page_btn(self, interaction: discord.Interaction, button: Button):
+    async def prev_page_cb(self, interaction: discord.Interaction):
         view = GreetConfigView(self.collection, self.config, self.author_id)
-        await self.swap(interaction, embed=get_greet_embed(self.config), view=view)
+        await self.swap(interaction, view=view)
