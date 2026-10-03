@@ -3,7 +3,7 @@ from discord.ext import commands
 
 from views.common import error_embed
 from views.embeds import handle_command_error
-from views.joinsview import WelcomeConfigView, get_welcome_embed
+from views.joinsview import WelcomeConfigView
 from .base import config_group
 
 
@@ -20,9 +20,8 @@ async def joinsconfig(ctx: commands.Context):
         return await ctx.send(embed=error_embed("Joins module unavailable."))
 
     config = await cog.get_guild_config(ctx.guild.id)
-    embed = get_welcome_embed(config)
     view = WelcomeConfigView(cog.collection, config, author_id=ctx.author.id)
-    await ctx.send(embed=embed, view=view)
+    view.message = await ctx.send(view=view)
 
 
 @joinsconfig.error
