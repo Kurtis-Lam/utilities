@@ -77,8 +77,34 @@ def parse_indices_and_duration(raw_str: str):
     return indices, duration
 
 
+# --- HELPER: FORMAT ID WITH NAME ---
+def format_id_with_name(id_str: str, guild: Optional[discord.Guild] = None) -> str:
+    if not id_str or not id_str.isdigit():
+        return id_str
+
+    target_id = int(id_str)
+
+    if guild:
+        # Check channel in current guild
+        channel = guild.get_channel(target_id)
+        if channel:
+            return f"{id_str} [{channel.name}]"
+        
+        # Check if the ID matches the current guild itself
+        if guild.id == target_id:
+            return f"{id_str} [{guild.name}]"
+
+        # Check in bot's cached guilds if guild.me exists / via client cache
+        if guild._state and hasattr(guild._state, "_get_guild"):
+            g = guild._state._get_guild(target_id)
+            if g:
+                return f"{id_str} [{g.name}]"
+
+    return id_str
+
+
 # --- HELPER: PARSE TARGET ASPECTS FOR DISPLAY ---
-def parse_target_aspects(mode: str, target: str) -> list[tuple[str, str]]:
+def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] = None) -> list[tuple[str, str]]:
     if not target:
         return []
 
@@ -91,7 +117,11 @@ def parse_target_aspects(mode: str, target: str) -> list[tuple[str, str]]:
             for p in subparts:
                 sep = "=" if "=" in p else ":"
                 k, v = p.split(sep, 1)
-                aspects.append((k.strip().capitalize(), v.strip()))
+                key_clean = k.strip()
+                val_clean = v.strip()
+                if "id" in key_clean.lower() or "chid" in key_clean.lower() or "channel" in key_clean.lower() or "guild" in key_clean.lower():
+                    val_clean = ", ".join([format_id_with_name(item.strip(), guild) for item in val_clean.split(",") if item.strip()])
+                aspects.append((key_clean.capitalize(), val_clean))
             return aspects
 
     if mode_lower in ["autocatch", "dotcatch", "commaedit"]:
@@ -105,7 +135,7 @@ def parse_target_aspects(mode: str, target: str) -> list[tuple[str, str]]:
                 if not datafile:
                     datafile = p
             elif p.isdigit():
-                chids.append(p)
+                chids.append(format_id_with_name(p, guild))
             else:
                 pokes.append(p)
 
@@ -124,6 +154,8 @@ def parse_target_aspects(mode: str, target: str) -> list[tuple[str, str]]:
         aspects = []
         for i, part in enumerate(parts):
             lbl = labels[i] if i < len(labels) else f"Arg{i+1}"
+            if lbl.lower() in ["chid", "channel"]:
+                part = format_id_with_name(part, guild)
             aspects.append((lbl, part))
         return aspects
 
@@ -131,7 +163,8 @@ def parse_target_aspects(mode: str, target: str) -> list[tuple[str, str]]:
         parts = [p.strip() for p in target.split() if p.strip()]
         aspects = []
         for i, part in enumerate(parts):
-            aspects.append((f"Arg{i+1}", part))
+            val = format_id_with_name(part, guild) if part.isdigit() else part
+            aspects.append((f"Arg{i+1}", val))
         return aspects
 
 
@@ -298,7 +331,7 @@ async def save_guild_logs(guild_id: str, logs: dict):
     await asyncio.to_thread(ref.child("logs").child(str(guild_id)).set, logs)
 
 
-# --- HELPER: CHUNK EMBED FIELDS ---
+# --- HELPER TO CHUNK EMBED FIELDS ---
 def add_chunked_field(embed: discord.Embed, title: str, lines: list[str]):
     if not lines:
         return
@@ -327,7 +360,7 @@ def add_chunked_field(embed: discord.Embed, title: str, lines: list[str]):
 def build_accounts_embed(accounts: list):
     embed = discord.Embed(title="⚙️ Grinder Accounts (Global)", color=discord.Color.blue())
     if not accounts:
-        embed.description = "No accounts stored."
+        embed.description = "No accounts."
     else:
         desc = ""
         for idx, token in enumerate(accounts, 1):
@@ -342,7 +375,7 @@ def build_accounts_embed(accounts: list):
 async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts: list):
     embed = discord.Embed(title=f"📋 Mode Configurations — {guild.name}", color=discord.Color.gold())
     if not configs:
-        embed.description = "No configurations found for this server."
+        embed.description = "No configs in this server."
         return embed
 
     mode_groups = {m: [] for m in VALID_MODES}
@@ -400,7 +433,7 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
                 line += " | ⏸️ **PAUSED**"
 
             target_str = cfg.get('target', '')
-            aspects = parse_target_aspects(mode, target_str)
+            aspects = parse_target_aspects(mode, target_str, guild)
             for label, val in aspects:
                 if val:
                     line += f"\n  {label}: `{val}`"
@@ -449,7 +482,7 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
                 line += " | ⏸️ **PAUSED**"
 
             target_str = cfg.get('target', '')
-            aspects = parse_target_aspects(cfg_mode, target_str)
+            aspects = parse_target_aspects(cfg_mode, target_str, guild)
             for label, val in aspects:
                 if val:
                     line += f"\n  {label}: `{val}`"
@@ -492,7 +525,7 @@ async def build_autocatch_configs_embed(guild: discord.Guild, autocatch_data: di
             pairs_str_list.append(f"• **Pair #{p_idx}:** {' & '.join(pair_members)}")
         pairs_fmt = "\n".join(pairs_str_list)
     else:
-        pairs_fmt = "*No active pairs configured*"
+        pairs_fmt = "*None*"
 
     embed.add_field(name="🎯 Current Catcher Turn", value=current_catcher_str, inline=False)
     embed.add_field(name="👥 Active Catch Pairs", value=pairs_fmt, inline=False)
@@ -502,7 +535,7 @@ async def build_autocatch_configs_embed(guild: discord.Guild, autocatch_data: di
 async def build_excludes_configs_embed(guild: discord.Guild, excludes: list):
     embed = discord.Embed(title=f"🚫 Excludes Configurations — {guild.name}", color=discord.Color.red())
     if not excludes:
-        embed.description = "No excludes configured for this server."
+        embed.description = "No excludes."
         return embed
 
     ex_strs = []
@@ -522,7 +555,7 @@ async def build_excludes_configs_embed(guild: discord.Guild, excludes: list):
 async def build_detector_bots_embed(guild: discord.Guild, bots: list):
     embed = discord.Embed(title=f"🤖 Detector Bots — {guild.name}", color=discord.Color.dark_theme())
     if not bots:
-        embed.description = "No detector bots configured for this server."
+        embed.description = "No detector bots."
         return embed
 
     bot_strs = []
@@ -599,7 +632,7 @@ async def refresh_config_embed(interaction: discord.Interaction, override_page: 
 async def grindconfig(ctx: commands.Context):
     """Shows mode configurations for the current server."""
     if not ctx.guild:
-        await ctx.send(embed=error_embed("This command must be used within a server."))
+        await ctx.send(embed=error_embed("Server only."))
         return
 
     guild_id = str(ctx.guild.id)
@@ -627,7 +660,7 @@ async def grindaccounts_cmd(ctx: commands.Context):
 async def grinderlogs_cmd(ctx: commands.Context):
     """Shows log channels for the current server."""
     if not ctx.guild:
-        await ctx.send(embed=error_embed("This command must be used within a server."))
+        await ctx.send(embed=error_embed("Server only."))
         return
 
     guild_id = str(ctx.guild.id)
@@ -665,13 +698,13 @@ class GrinderCog(commands.Cog):
     async def edit(
         self,
         ctx: commands.Context,
-        user: discord.User = commands.parameter(description="The member whose autocatch configs to update (mention or ID)."),
+        user: discord.User = commands.parameter(description="Member (mention or ID)."),
         *,
-        filenames: str = commands.parameter(description="One or more datafile names, separated by spaces or commas (.json is added automatically)."),
+        filenames: str = commands.parameter(description="Datafile name(s); .json is optional."),
     ):
-        """Set the datafile(s) used by all of a member's autocatch configurations in this server."""
+        """Set datafile(s) for a member's autocatch configs."""
         if not ctx.guild:
-            await ctx.send(embed=error_embed("This command must be used within a server."))
+            await ctx.send(embed=error_embed("Server only."))
             return
 
         g_data = await get_global_data()
@@ -683,19 +716,19 @@ class GrinderCog(commands.Cog):
         ]
 
         if not user_tokens:
-            await ctx.send(embed=error_embed(f"No registered accounts found for {user.mention}."))
+            await ctx.send(embed=error_embed(f"No accounts for {user.mention}."))
             return
 
         guild_id = str(ctx.guild.id)
         configs = await get_guild_configs(guild_id)
 
         if not configs:
-            await ctx.send(embed=error_embed("No configurations found for this server."))
+            await ctx.send(embed=error_embed("No configs in this server."))
             return
 
         raw_files = [f.strip() for f in filenames.replace(',', ' ').split() if f.strip()]
         if not raw_files:
-            await send_usage(ctx, note="Please provide at least one datafile name.")
+            await send_usage(ctx, note="Give a datafile name.")
             return
 
         combined_files = " ".join([
@@ -721,11 +754,11 @@ class GrinderCog(commands.Cog):
         if updated_count > 0:
             await save_guild_configs(guild_id, configs)
             await ctx.send(embed=success_embed(
-                f"Updated {updated_count} `autocatch` configuration(s) for {user.mention} to `{combined_files}`."
+                f"Updated {updated_count} autocatch config(s) for {user.mention}: `{combined_files}`."
             ))
         else:
             await ctx.send(embed=error_embed(
-                f"{user.mention} has no `autocatch` configurations in this server, so nothing was updated."
+                f"{user.mention} has no autocatch configs here."
             ))
 
     @commands.command(name="pause", aliases=["p"])
@@ -734,18 +767,18 @@ class GrinderCog(commands.Cog):
         self,
         ctx: commands.Context,
         *,
-        raw_args: str = commands.parameter(default="", description="Config numbers and/or a duration like 30s, 4m, 2h, 1d. Leave empty to pause every config."),
+        raw_args: str = commands.parameter(default="", description="Config numbers and/or a duration (30s, 2h, 1d). Empty = all."),
     ):
-        """Pause configurations in this server (all of them, or only the numbers you list)."""
+        """Pause configs (all, or the numbers you list)."""
         if not ctx.guild:
-            await ctx.send(embed=error_embed("This command must be used within a server."))
+            await ctx.send(embed=error_embed("Server only."))
             return
 
         guild_id = str(ctx.guild.id)
         configs = await get_guild_configs(guild_id)
 
         if not configs:
-            await ctx.send(embed=error_embed("No configurations found for this server."))
+            await ctx.send(embed=error_embed("No configs in this server."))
             return
 
         indices, duration = parse_indices_and_duration(raw_args)
@@ -754,7 +787,7 @@ class GrinderCog(commands.Cog):
         if duration is not None:
             seconds = parse_duration(duration)
             if seconds is None:
-                await send_usage(ctx, note="Invalid duration format! Use e.g. `30s`, `4m`, `2h`, `1d`.")
+                await send_usage(ctx, note="Invalid duration, e.g. `30s`, `2h`.")
                 return
             pause_until = int((time.time() + seconds) * 1000)
 
@@ -767,11 +800,11 @@ class GrinderCog(commands.Cog):
                     if idx not in target_indices:
                         target_indices.append(idx)
                 else:
-                    await ctx.send(embed=error_embed(f"Invalid index `#{idx}`. Server has {len(configs)} configuration(s)."))
+                    await ctx.send(embed=error_embed(f"Invalid index #{idx}. Max is {len(configs)}."))
                     return
 
         if not target_indices:
-            await ctx.send(embed=error_embed("No valid config indices specified."))
+            await ctx.send(embed=error_embed("No valid configs."))
             return
 
         g_data = await get_global_data()
@@ -800,11 +833,11 @@ class GrinderCog(commands.Cog):
                 mode = cfg.get("mode", "unknown")
                 arg = cfg.get("target") or "None"
                 acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
-                lines.append(f"`[#{idx}]` **Account:** {user_mention} ({acc_str}) | **Mode:** `{mode}` | **Argument:** `{arg}`")
+                lines.append(f"`[#{idx}]` {user_mention} ({acc_str}) | `{mode}` | `{arg}`")
 
             embed = discord.Embed(
-                title="⚠️ Confirm Pause Configurations",
-                description=f"Are you sure you want to pause the following **{len(target_indices)}** configuration(s)?\n\n" + "\n".join(lines),
+                title="⚠️ Pause",
+                description=f"Pause **{len(target_indices)}** config(s)?\n\n" + "\n".join(lines),
                 color=discord.Color.orange()
             )
             if duration:
@@ -825,9 +858,9 @@ class GrinderCog(commands.Cog):
                 dur_str = f" for **{duration}** (resumes <t:{int(pause_until / 1000)}:R>)" if duration else " indefinitely"
                 await confirm_msg.edit(embed=make_embed(description=f"⏸️ Paused **{len(target_indices)}** configuration(s){dur_str}."), view=None)
             elif confirm_view.value is False:
-                await confirm_msg.edit(embed=error_embed("Pause cancelled."), view=None)
+                await confirm_msg.edit(embed=error_embed("Cancelled."), view=None)
             else:
-                await confirm_msg.edit(embed=make_embed(description="⏰ Pause confirmation timed out."), view=None)
+                await confirm_msg.edit(embed=make_embed(description="⏰ Timed out."), view=None)
             return
 
         idx = target_indices[0]
@@ -867,18 +900,18 @@ class GrinderCog(commands.Cog):
         self,
         ctx: commands.Context,
         *,
-        raw_args: str = commands.parameter(default="", description="Config numbers to resume. Leave empty to resume every config."),
+        raw_args: str = commands.parameter(default="", description="Config numbers. Empty = all."),
     ):
-        """Resume paused configurations in this server (all of them, or only the numbers you list)."""
+        """Resume configs (all, or the numbers you list)."""
         if not ctx.guild:
-            await ctx.send(embed=error_embed("This command must be used within a server."))
+            await ctx.send(embed=error_embed("Server only."))
             return
 
         guild_id = str(ctx.guild.id)
         configs = await get_guild_configs(guild_id)
 
         if not configs:
-            await ctx.send(embed=error_embed("No configurations found for this server."))
+            await ctx.send(embed=error_embed("No configs in this server."))
             return
 
         indices, _ = parse_indices_and_duration(raw_args)
@@ -892,11 +925,11 @@ class GrinderCog(commands.Cog):
                     if idx not in target_indices:
                         target_indices.append(idx)
                 else:
-                    await ctx.send(embed=error_embed(f"Invalid index `#{idx}`. Server has {len(configs)} configuration(s)."))
+                    await ctx.send(embed=error_embed(f"Invalid index #{idx}. Max is {len(configs)}."))
                     return
 
         if not target_indices:
-            await ctx.send(embed=error_embed("No valid config indices specified."))
+            await ctx.send(embed=error_embed("No valid configs."))
             return
 
         g_data = await get_global_data()
@@ -925,11 +958,11 @@ class GrinderCog(commands.Cog):
                 mode = cfg.get("mode", "unknown")
                 arg = cfg.get("target") or "None"
                 acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
-                lines.append(f"`[#{idx}]` **Account:** {user_mention} ({acc_str}) | **Mode:** `{mode}` | **Argument:** `{arg}`")
+                lines.append(f"`[#{idx}]` {user_mention} ({acc_str}) | `{mode}` | `{arg}`")
 
             embed = discord.Embed(
-                title="⚠️ Confirm Resume Configurations",
-                description=f"Are you sure you want to resume the following **{len(target_indices)}** configuration(s)?\n\n" + "\n".join(lines),
+                title="⚠️ Resume",
+                description=f"Resume **{len(target_indices)}** config(s)?\n\n" + "\n".join(lines),
                 color=discord.Color.green()
             )
 
@@ -947,9 +980,9 @@ class GrinderCog(commands.Cog):
 
                 await confirm_msg.edit(embed=make_embed(description=f"▶️ Resumed **{len(target_indices)}** configuration(s)."), view=None)
             elif confirm_view.value is False:
-                await confirm_msg.edit(embed=error_embed("Resume cancelled."), view=None)
+                await confirm_msg.edit(embed=error_embed("Cancelled."), view=None)
             else:
-                await confirm_msg.edit(embed=make_embed(description="⏰ Resume confirmation timed out."), view=None)
+                await confirm_msg.edit(embed=make_embed(description="⏰ Timed out."), view=None)
             return
 
         idx = target_indices[0]
@@ -979,19 +1012,19 @@ class GrinderCog(commands.Cog):
     async def syncguilds(
         self,
         ctx: commands.Context,
-        from_guild: str = commands.parameter(description="ID of the server to copy settings FROM."),
-        to_guild: str = commands.parameter(description="ID of the server to copy settings TO."),
+        from_guild: str = commands.parameter(description="Source server ID."),
+        to_guild: str = commands.parameter(description="Target server ID."),
     ):
-        """Copy mode configs (except SPAM), excludes and log channels from one server to another."""
+        """Copy configs (except SPAM), excludes and logs to another server."""
         from_id = re.sub(r'\D', '', str(from_guild))
         to_id = re.sub(r'\D', '', str(to_guild))
 
         if not from_id or not to_id:
-            await send_usage(ctx, note="Please provide valid source and destination Guild IDs.")
+            await send_usage(ctx, note="Give two valid server IDs.")
             return
 
         if from_id == to_id:
-            await ctx.send(embed=error_embed("Source and destination Guild IDs cannot be the same."))
+            await ctx.send(embed=error_embed("IDs must differ."))
             return
 
         source_configs = await get_guild_configs(from_id)
@@ -999,7 +1032,7 @@ class GrinderCog(commands.Cog):
         source_logs = await get_guild_logs(from_id)
 
         if not source_configs and not source_excludes and not source_logs:
-            await ctx.send(embed=error_embed(f"No configurations, excludes, or log channels found for source guild `{from_id}`."))
+            await ctx.send(embed=error_embed(f"Nothing to sync from {from_id}."))
             return
 
         if source_configs:
@@ -1017,7 +1050,7 @@ class GrinderCog(commands.Cog):
             await save_guild_logs(to_id, source_logs)
 
         await ctx.send(embed=success_embed(
-            f"Successfully synced mode configs (excluding SPAM), excludes, and logs from guild `{from_id}` to guild `{to_id}`!"
+            f"Synced configs (no SPAM), excludes and logs: `{from_id}` → `{to_id}`."
         ))
 
 
