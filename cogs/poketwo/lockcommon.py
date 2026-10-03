@@ -4,6 +4,8 @@ import time
 
 import discord
 
+from views.common import one_line_embed
+
 POKETWO_ID = 716390085896962058
 
 # Default number of seconds a delay-enabled lock waits before actually
@@ -92,7 +94,7 @@ def can_unlock(lock_doc: dict | None, member: discord.Member) -> bool:
 def unlock_denied_message(lock_doc: dict) -> str:
     allowed = lock_doc.get("allowed_users") or []
     mentions = ", ".join(f"<@{uid}>" for uid in allowed)
-    return f"⚠️ Only {mentions} (or a server admin) can unlock this channel."
+    return f"⚠️ Only {mentions} or an admin can unlock."
 
 
 # --- Embed styling shared by .lock / .unlock / .uac / .lockstats and AutoLock ---
@@ -145,11 +147,11 @@ def stamp(unix: int) -> str:
 
 def who_can_unlock_text(allowed_users) -> str:
     if allowed_users is None:
-        return "Anyone: use `.unlock` / `.u` or the **Unlock** button."
+        return "Anyone (`.u` or the button)."
     if not allowed_users:
         return "Server admins only."
     mentions = ", ".join(f"<@{uid}>" for uid in allowed_users)
-    return f"{mentions} or a server admin."
+    return f"{mentions} or an admin."
 
 
 def _categories_label(categories) -> str:
@@ -178,7 +180,7 @@ def locked_embed(
 
     text = who_can_unlock_text(allowed_users)
     if restricted_by:
-        text += f"\n-# Restricted by the `{_categories_label(restricted_by)}` lock."
+        text += f"\n-# Restricted by `{_categories_label(restricted_by)}`."
     embed.add_field(name="🔐 Who Can Unlock", value=text, inline=False)
     return embed
 
@@ -197,7 +199,7 @@ def unlocked_embed(channel, *, unlocked_by, locked_at: int | None = None, when: 
 def already_locked_embed(channel, lock_doc: dict | None = None) -> discord.Embed:
     embed = discord.Embed(
         title="🔒 Already Locked",
-        description=f"{channel.mention} is already locked, so nothing was changed.",
+        description=channel.mention,
         color=WARN_COLOR,
     )
     if lock_doc:
@@ -219,22 +221,19 @@ def already_locked_embed(channel, lock_doc: dict | None = None) -> discord.Embed
 def already_unlocked_embed(channel) -> discord.Embed:
     return discord.Embed(
         title="🔓 Already Unlocked",
-        description=f"{channel.mention} isn't locked, so there's nothing to unlock.",
+        description=channel.mention,
         color=WARN_COLOR,
     )
 
 
 def unlock_denied_embed(channel, lock_doc: dict) -> discord.Embed:
-    embed = discord.Embed(
-        title="⛔ Can't Unlock This Channel",
-        description=f"{channel.mention} is locked and restricted.",
-        color=LOCK_COLOR,
-    )
-    embed.add_field(name="🔐 Who Can Unlock", value=who_can_unlock_text(lock_doc.get("allowed_users")), inline=False)
-    locked_at = to_unix(lock_doc.get("locked_at"))
-    if locked_at:
-        embed.add_field(name="🕒 Locked At", value=stamp(locked_at), inline=False)
-    return embed
+    """One-line error: who is allowed to unlock."""
+    allowed = lock_doc.get("allowed_users")
+    if not allowed:
+        text = "Only admins can unlock."
+    else:
+        text = "Only " + ", ".join(f"<@{uid}>" for uid in allowed) + " or an admin can unlock."
+    return one_line_embed(text, "⛔", LOCK_COLOR)
 
 
 # --- Field helpers that stay inside Discord's 1024-char field limit ---
