@@ -6,7 +6,7 @@ the bot asks one question at a time and waits (default 30 seconds) for the
 invoking user to answer in the same channel.
 """
 import asyncio
-from typing import Optional
+from contextlib import suppress
 
 import discord
 
@@ -43,7 +43,7 @@ class PromptView(discord.ui.View):
         await interaction.response.defer()
 
 
-async def ask(ctx, question: str, *, timeout: float = DEFAULT_TIMEOUT) -> Optional[discord.Message]:
+async def ask(ctx, question: str, *, timeout: float = DEFAULT_TIMEOUT) -> discord.Message | None:
     """
     Asks `question` as text with a Cancel button and waits for the user's reply message
     in the same channel or for them to click Cancel.
@@ -69,31 +69,21 @@ async def ask(ctx, question: str, *, timeout: float = DEFAULT_TIMEOUT) -> Option
         task.cancel()
 
     if msg_task in done:
-        try:
+        with suppress(asyncio.CancelledError, Exception):
             reply = msg_task.result()
             if reply.content.strip().lower() in CANCEL_WORDS:
-                try:
+                with suppress(discord.HTTPException):
                     await prompt.edit(content="❌ Cancelled.", view=None)
-                except discord.HTTPException:
-                    pass
                 return None
-            try:
+            with suppress(discord.HTTPException):
                 await prompt.edit(view=None)
-            except discord.HTTPException:
-                pass
             return reply
-        except Exception:
-            pass
 
     if view.cancelled:
-        try:
+        with suppress(discord.HTTPException):
             await prompt.edit(content="❌ Cancelled.", view=None)
-        except discord.HTTPException:
-            pass
         return None
 
-    try:
+    with suppress(discord.HTTPException):
         await prompt.edit(content=f"⏱️ No reply within {int(timeout)} seconds. Cancelled.", view=None)
-    except discord.HTTPException:
-        pass
     return None
