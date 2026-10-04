@@ -103,7 +103,7 @@ class Utilities(commands.Bot):
             "owner_cmds": ["reload", "pull", "stats", "restart"],
             "cmds": ["ai", "categories", "channels", "members", "messages", "ping", "roles", "utilities"],
             "config": ["base"],
-            "poketwo_helper": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer"],
+            "poketwo_helper": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer", "starboard"],
             "poketwo_management": ["set", "settings", "toggle"],
             "poketwo_utils": ["dex", "extract", "hintsolver"],
         }
