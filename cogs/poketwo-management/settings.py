@@ -59,6 +59,12 @@ class Settings(commands.Cog):
             title=f"⚙️ #{ctx.channel.name}",
             color=discord.Color.green(),
         )
+        naming_enabled = await cog.get_naming_enabled(ctx.guild.id, ctx.channel.id)
+        embed.add_field(
+            name="Pokémon Naming",
+            value="✅ Enabled" if naming_enabled else "❌ Disabled",
+            inline=False,
+        )
 
         for cat in ALL_CATEGORIES:
             cfg = await cog.get_category_config_channel(ctx.guild.id, ctx.channel.id, cat)
@@ -84,6 +90,12 @@ class Settings(commands.Cog):
         embed = discord.Embed(
             title=f"⚙️ {ctx.guild.name}",
             color=discord.Color.green(),
+        )
+        naming_enabled = await cog.get_naming_enabled(ctx.guild.id)
+        embed.add_field(
+            name="Pokémon Naming",
+            value="✅ Enabled" if naming_enabled else "❌ Disabled",
+            inline=False,
         )
 
         for cat in ALL_CATEGORIES:

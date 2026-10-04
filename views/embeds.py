@@ -158,6 +158,8 @@ USAGE_EXAMPLES = {
     "toggle": [
         "{p}toggle shlock",
         "{p}toggle shlock --global",
+        "{p}toggle naming",
+        "{p}toggle naming --global",
         "{p}toggle lockdelay sh cl",
     ],
     "toggle lockdelay": [

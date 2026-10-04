@@ -479,19 +479,28 @@ class Recognize(commands.Cog):
         catch_cmd = f"@Pokétwo#8236 c {pokemon_name.lower()}"
         out_text += f"\n**Copy Commands:** `{catch_cmd}`\n```{catch_cmd}```"
 
-        try:
-            detection_msg = await message.reply(
-                out_text,
-                allowed_mentions=discord.AllowedMentions(roles=True, users=True)
-            )    
-        except discord.Forbidden:    
-            return
+        naming_config = self.bot.get_cog("AutoLockConfig")
+        naming_enabled = (
+            await naming_config.get_naming_enabled(message.guild.id, channel_id)
+            if naming_config and message.guild
+            else True
+        )
+        detection_msg = None
+        response_text = out_text if naming_enabled else pings
+        if response_text:
+            try:
+                detection_msg = await message.reply(
+                    response_text,
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=True)
+                )
+            except discord.Forbidden:
+                pass
 
         self.pending_verifications[channel_id] = {    
             "predicted": pokemon_name,    
             "confidence": confidence,    
             "image_url": image_url,    
-            "jump_url": detection_msg.jump_url    
+            "jump_url": detection_msg.jump_url if detection_msg else message.jump_url
         }
         if len(self.pending_verifications) > self.max_predictions_cache:    
             self.pending_verifications.popitem(last=False)    
