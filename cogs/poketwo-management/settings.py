@@ -25,10 +25,10 @@ class Settings(commands.Cog):
 
     @staticmethod
     def _summary_field(cfg: dict) -> str:
-        enabled = "✅ Enabled" if cfg.get("enabled", False) else "❌ Disabled"
+        lock_str = "Lock: ✅" if cfg.get("enabled", False) else "Lock: ❌"
         delay_str = f"{cfg.get('delay', DEFAULT_DELAY)}s" if cfg.get("delay_enabled", True) else "Off"
-        restricted = "✅ Yes" if cfg.get("restrict_unlockers", False) else "❌ No"
-        return f"{enabled}\n⏱️ {delay_str}\n🔐 Restrict: {restricted}"
+        restricted = "Restrict: ✅" if cfg.get("restrict_unlockers", False) else "Restrict: ❌"
+        return f"{lock_str}\n{delay_str}\n{restricted}"
 
     # --- .settings -----------------------------------------------------------
     # Just lists the two real commands (plain usage embed, no Example button).
@@ -101,7 +101,7 @@ class Settings(commands.Cog):
         for cat in ALL_CATEGORIES:
             cfg = await cog.get_category_config(ctx.guild.id, cat)
             wl_count = len(cfg.get("whitelist", []))
-            value = self._summary_field(cfg) + f"\n📋 Whitelist: {wl_count}"
+            value = self._summary_field(cfg) + f"\nWhitelist: {wl_count}"
             embed.add_field(name=_label(cat), value=value, inline=True)
 
         embed.set_footer(text="Edit with .c a or .set / .toggle --global")
