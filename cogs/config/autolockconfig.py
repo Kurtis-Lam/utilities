@@ -12,7 +12,7 @@ from views.autolockview import (
     ROLE_COMMAND_HINTS,
     RESTRICT_CATEGORIES,
 )
-from cogs.poketwo.lockcommon import (
+from cogs.poketwo_helper.lockcommon import (
     DEFAULT_DELAY,
     resolve_category as _resolve_category,
     display_name as _display_name,
