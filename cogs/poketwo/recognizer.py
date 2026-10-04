@@ -208,7 +208,14 @@ class Recognize(commands.Cog):
                 region = "paldea"    
 
         # 4. User Specific Targets (SH, CL, Reserves)
-        sh_uids = {int(uid) for uid, target in g_data.get("sh", {}).items() if target and target.lower() == pok_lower}    
+        sh_uids = {
+            int(uid)
+            for uid, target in g_data.get("sh", {}).items()
+            if any(
+                isinstance(name, str) and name.lower() == pok_lower
+                for name in (target if isinstance(target, list) else [target])
+            )
+        }
         cl_uids = {int(uid) for uid, cl_list in g_data.get("cl", {}).items() if isinstance(cl_list, list) and any(c.lower() == pok_lower for c in cl_list)}    
         re_uids = {int(uid) for uid, re_list in g_data.get("re", {}).items() if isinstance(re_list, list) and any(r.lower() == pok_lower for r in re_list)}
 
