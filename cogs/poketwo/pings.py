@@ -330,7 +330,7 @@ class ShinyHuntSelect(discord.ui.Select):
 class ShinyHuntView(BaseView):
     page_size = 25
 
-    def __init__(self, cog: "PokePings", author_id: int, variants: List[str]):
+    def __init__(self, cog: "PokePings", author_id: int, variants: list[str]):
         super().__init__(author_id=author_id, timeout=60)
         self.cog = cog
         self.variants = variants
@@ -342,7 +342,7 @@ class ShinyHuntView(BaseView):
         self.next_button.disabled = len(self.variants) <= self.page_size
 
     @property
-    def page_variants(self) -> List[str]:
+    def page_variants(self) -> list[str]:
         start = self.page * self.page_size
         return self.variants[start:start + self.page_size]
 
@@ -427,7 +427,7 @@ class PokePings(commands.Cog):
             upsert=True
         )
 
-    async def find_sh_variants(self, pokemon: str, *, exact: bool = False) -> List[str]:
+    async def find_sh_variants(self, pokemon: str, *, exact: bool = False) -> list[str]:
         """Return distinct pokevars names containing the query, or exactly matching it."""
         query = pokemon.strip()
         if not query:
@@ -472,7 +472,7 @@ class PokePings(commands.Cog):
         return unique
 
     @staticmethod
-    def _sh_confirmation_embeds(variants: List[str], title: str) -> List[discord.Embed]:
+    def _sh_confirmation_embeds(variants: list[str], title: str) -> list[discord.Embed]:
         """Split long variant lists across embeds without hitting Discord limits."""
         chunks = []
         current = []
