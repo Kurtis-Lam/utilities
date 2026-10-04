@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import certifi
 import motor.motor_asyncio
 
-from utils import safe_send
+from cogs.owner_cmds.utils import safe_send
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
