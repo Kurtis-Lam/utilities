@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import logging
@@ -14,12 +15,32 @@ from views.embeds import BRAND_COLOR, handle_command_error
 
 log = logging.getLogger(__name__)
 
-POKETWO_ID = 1250429544486273038
+POKETWO_ID = 716390085896962058
 CATCH_PATTERN = re.compile(
     r"Congratulations <@!?(\d+)>! You caught a Level (\d+) (.+?) "
     r"\((\d+(?:\.\d+)?)%\)!?"
 )
 CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:[^:>]+:\d+>")
+SHINY_PATTERN = re.compile(r"These colors seem unusual", re.IGNORECASE)
+GMAX_PATTERN = re.compile(r"Gigantamax Factor", re.IGNORECASE)
+CHAIN_PATTERN = re.compile(r"Shiny streak reset\.\s*\(\*{0,2}(\d+)\*{0,2}\)", re.IGNORECASE)
+
+# Detection kinds listed in priority order (also the order emojis/labels appear in).
+DETECTION_PRIORITY = ["shiny", "gmax", "high_iv", "low_iv", "rare", "regional"]
+DETECTION_STYLES = {
+    "shiny": ("✨", "Shiny"),
+    "gmax": ("💥", "Gigantamax"),
+    "high_iv": ("📈", "High IV"),
+    "low_iv": ("📉", "Low IV"),
+    "rare": ("💎", "Rare"),
+    "regional": ("🌍", "Regional"),
+}
+DETECTION_COLORS = {
+    "shiny": 0xF1C40F,  # Yellow
+    "gmax": 0xE74C3C,  # Red
+    "high_iv": 0x1ABC9C,  # Turquoise
+    "low_iv": 0x1ABC9C,  # Turquoise
+}
 
 
 def normalize_pokemon_name(name: str) -> str:
@@ -34,6 +55,11 @@ def normalize_key(name: str) -> str:
     without_accents = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
     cleaned = re.sub(r"[^\w\s-]", "", without_accents)
     return " ".join(cleaned.split()).lower()
+
+
+def shiny_slug(name: str) -> str:
+    """'Alolan Rattata' -> 'alolan_rattata' (file is shiny_{slug}.png)."""
+    return re.sub(r"[^a-z0-9]+", "_", normalize_key(name)).strip("_")
 
 
 def find_data_dir() -> Optional[Path]:
@@ -58,12 +84,39 @@ def load_pokemon_names(data_dir: Optional[Path], filename: str) -> frozenset[str
 
 
 def parse_catch(content: str):
-    """Returns (user_id, level, pokemon, iv) or None."""
+    """Parses a Poketwo catch message into a dict, or None if it isn't one."""
     match = CATCH_PATTERN.search(content)
     if not match:
         return None
-    pokemon = CUSTOM_EMOJI_PATTERN.sub("", match.group(3)).strip()
-    return int(match.group(1)), int(match.group(2)), pokemon, float(match.group(4))
+    chain = CHAIN_PATTERN.search(content)
+    return {
+        "user_id": int(match.group(1)),
+        "level": int(match.group(2)),
+        "pokemon": CUSTOM_EMOJI_PATTERN.sub("", match.group(3)).strip(),
+        "iv": float(match.group(4)),
+        "shiny": bool(SHINY_PATTERN.search(content)),
+        "gmax": bool(GMAX_PATTERN.search(content)),
+        "chain": int(chain.group(1)) if chain else None,
+    }
+
+
+def build_title(detections: list[str]) -> str:
+    """e.g. '🌍📈 Regional and High IV Catch Detected 🌍📈'."""
+    emojis = "".join(DETECTION_STYLES[d][0] for d in detections)
+    labels = [DETECTION_STYLES[d][1] for d in detections]
+    if len(labels) == 1:
+        joined = labels[0]
+    else:
+        joined = ", ".join(labels[:-1]) + f" and {labels[-1]}"
+    return f"{emojis} {joined} Catch Detected {emojis}"
+
+
+def pick_color(detections: list[str]) -> int:
+    """Color of the highest-priority detection (shiny > gmax > IV > rare/regional)."""
+    for kind in DETECTION_PRIORITY:
+        if kind in detections and kind in DETECTION_COLORS:
+            return DETECTION_COLORS[kind]
+    return BRAND_COLOR
 
 
 def build_status_embed(channel_id: Optional[str]) -> discord.Embed:
@@ -211,6 +264,7 @@ class Starboard(commands.Cog):
         self.bot = bot
         self.rare: frozenset[str] = frozenset()
         self.regional: frozenset[str] = frozenset()
+        self.shiny_dir: Optional[Path] = None
 
     @property
     def starboard_collection(self):
@@ -224,6 +278,7 @@ class Starboard(commands.Cog):
         data_dir = find_data_dir()
         self.rare = load_pokemon_names(data_dir, "rare.json")
         self.regional = load_pokemon_names(data_dir, "regional.json")
+        self.shiny_dir = (data_dir / "shinies") if data_dir else None
 
     async def cog_command_error(self, ctx, error):
         await handle_command_error(ctx, error)
@@ -242,8 +297,30 @@ class Starboard(commands.Cog):
                 return None
         return channel
 
-    async def _get_pokemon_image(self, pokemon: str) -> Optional[discord.File]:
-        """Fetches the Pokémon's image from the pokeimgs collection, like dex.py does."""
+    async def _get_shiny_image(self, names: list[str]) -> Optional[discord.File]:
+        """Loads data/pokes/shinies/shiny_{name}.png (e.g. shiny_alolan_rattata.png)."""
+        if self.shiny_dir is None:
+            return None
+        tried = set()
+        for name in names:
+            slug = shiny_slug(name)
+            if not slug or slug in tried:
+                continue
+            tried.add(slug)
+            path = self.shiny_dir / f"shiny_{slug}.png"
+            try:
+                if path.is_file():
+                    data = await asyncio.to_thread(path.read_bytes)
+                    return discord.File(fp=io.BytesIO(data), filename=path.name)
+            except Exception:
+                log.exception("Starboard: failed reading shiny image %s", path)
+        log.warning("Starboard: no shiny image for %s (looked in %s)", names, self.shiny_dir)
+        return None
+
+    async def _get_pokemon_image(
+        self, pokemon: str, shiny: bool = False
+    ) -> Optional[discord.File]:
+        """Fetches the Pokémon's image (shiny file if shiny, else pokeimgs like dex.py)."""
         names = [pokemon]
         dex = self.bot.get_cog("Dex")  # optional: resolves alt names via the Dex cog
         alt_index = getattr(dex, "alt_index", None) or {}
@@ -251,6 +328,12 @@ class Starboard(commands.Cog):
             target = alt_index.get(key)
             if target and target not in names:
                 names.append(target)
+
+        if shiny:
+            shiny_file = await self._get_shiny_image(names)
+            if shiny_file:
+                return shiny_file
+            # fall through to the normal image if no shiny image exists
 
         lookup_keys = []
         for name in names:
@@ -268,50 +351,61 @@ class Starboard(commands.Cog):
             log.exception("Starboard: image lookup failed for %s", pokemon)
         return None
 
-    def detect(self, pokemon: str, iv: float) -> list[str]:
-        name = normalize_pokemon_name(pokemon)
-        detections = []
-        if name in self.rare:
-            detections.append("💎 Rare Catch Detected 💎")
-        if name in self.regional:
-            detections.append("🌍 Regional Catch Detected 🌍")
+    def detect(self, catch: dict) -> list[str]:
+        """Returns the detection kinds that apply, in priority order."""
+        name = normalize_pokemon_name(catch["pokemon"])
+        iv = catch["iv"]
+        found = set()
+        if catch["shiny"]:
+            found.add("shiny")
+        if catch["gmax"]:
+            found.add("gmax")
         if iv > 90:
-            detections.append("✨ High IV Catch Detected ✨")
+            found.add("high_iv")
         elif iv < 10:
-            detections.append("⬇️ Low IV Catch Detected ⬇️")
-        return detections
+            found.add("low_iv")
+        if name in self.rare:
+            found.add("rare")
+        if name in self.regional:
+            found.add("regional")
+        return [kind for kind in DETECTION_PRIORITY if kind in found]
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild or message.author.id != POKETWO_ID:
             return
-        parsed = parse_catch(message.content)
-        if not parsed:
+        catch = parse_catch(message.content)
+        if not catch:
             return
 
-        user_id, level, pokemon, iv = parsed
-        detections = self.detect(pokemon, iv)
+        detections = self.detect(catch)
         if not detections:
             return
+        pokemon = catch["pokemon"]
 
         try:
             channel = await self._get_channel(message.guild.id)
             if channel is None:
                 return
 
+            lines = [
+                f"**User:** <@{catch['user_id']}>",
+                f"**Pokémon:** {pokemon}",
+                f"**Level:** {catch['level']}",
+                f"**IV:** {catch['iv']:g}%",
+            ]
+            if catch["chain"] is not None:
+                lines.append(f"**Chain:** {catch['chain']}")
             embed = discord.Embed(
-                title=" • ".join(detections),
+                title=build_title(detections),
                 description=(
-                    f"**User:** <@{user_id}>\n"
-                    f"**Pokémon:** {pokemon}\n"
-                    f"**Level:** {level}\n"
-                    f"**IV:** {iv:g}%\n\n"
-                    f"Caught <t:{int(message.created_at.timestamp())}:f>"
+                    "\n".join(lines)
+                    + f"\n\nCaught <t:{int(message.created_at.timestamp())}:f>"
                 ),
-                color=BRAND_COLOR,
+                color=pick_color(detections),
             )
 
-            file = await self._get_pokemon_image(pokemon)
+            file = await self._get_pokemon_image(pokemon, shiny=catch["shiny"])
             if file:
                 embed.set_thumbnail(url=f"attachment://{file.filename}")
             elif message.embeds:
