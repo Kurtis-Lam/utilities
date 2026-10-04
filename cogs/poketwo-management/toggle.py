@@ -42,8 +42,8 @@ class Toggle(commands.Cog):
     @commands.group(
         name="toggle",
         invoke_without_command=True,
-        usage="<lock...> [--global]",
-        description="Toggle locks, delays and restrictions.",
+        usage="<lock...|naming> [--global]",
+        description="Toggle locks, Pokémon naming, delays and restrictions.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -63,15 +63,29 @@ class Toggle(commands.Cog):
         if not cog:
             return
 
-        # Resolve all categories
-        cats, unknown = self._resolve_all(cog, locks)
+        naming_requested = any(token.lower() == "naming" for token in locks)
+        # Keep "naming" separate from autolock categories while allowing it to be
+        # toggled alongside lock categories in one command.
+        cats, unknown = self._resolve_all(
+            cog, [token for token in locks if token.lower() != "naming"]
+        )
+        if naming_requested:
+            naming_state = (
+                await cog.toggle_naming(ctx.guild.id)
+                if global_flag
+                else await cog.toggle_naming_channel(ctx.guild.id, ctx.channel.id)
+            )
+            status = "Enabled ✅" if naming_state else "Disabled ❌"
+            scope = "whole server" if global_flag else ctx.channel.mention
+            lines = [f"✨ **Pokémon naming**: **{status}** ({scope})"]
+        else:
+            lines = []
 
-        if not cats:
+        if not cats and not naming_requested:
             return await ctx.send(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"))
 
         scope = "whole server" if global_flag else ctx.channel.mention
 
-        lines = []
         for cat in cats:
             if global_flag:
                 # Toggle for the whole server (guild level)
@@ -83,7 +97,8 @@ class Toggle(commands.Cog):
             status = "Enabled ✅" if new_state else "Disabled ❌"
             lines.append(f"🔒 **{cog.display_name(cat)}**: **{status}** ({scope})")
 
-        embed = ok_embed("Lock Toggled", "\n".join(lines)[:4096])
+        title = "Settings Toggled" if naming_requested else "Lock Toggled"
+        embed = ok_embed(title, "\n".join(lines)[:4096])
         if unknown:
             embed.add_field(
                 name="⚠️ Unknown Lock(s)",

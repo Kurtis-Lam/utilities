@@ -132,6 +132,38 @@ class AutoLockConfig(commands.Cog):
         doc = await self.get_guild_config(guild_id)
         return doc.get(category, _default_category(category))
 
+    async def get_naming_enabled(self, guild_id: int, channel_id: int | None = None) -> bool:
+        """Return whether Pokémon naming is enabled, applying a channel override if present."""
+        doc = await self.get_guild_config(guild_id)
+        enabled = doc.get("naming_enabled", True)
+        if channel_id is not None:
+            channels = doc.get("channels")
+            channel_config = channels.get(str(channel_id)) if isinstance(channels, dict) else None
+            if isinstance(channel_config, dict) and isinstance(channel_config.get("naming_enabled"), bool):
+                enabled = channel_config["naming_enabled"]
+        return bool(enabled)
+
+    async def toggle_naming(self, guild_id: int) -> bool:
+        """Toggle the server-wide Pokémon naming default."""
+        doc = await self.get_guild_config(guild_id)
+        new_value = not doc.get("naming_enabled", True)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {"naming_enabled": new_value}},
+            upsert=True,
+        )
+        return new_value
+
+    async def toggle_naming_channel(self, guild_id: int, channel_id: int) -> bool:
+        """Toggle Pokémon naming for a channel, overriding the server default."""
+        new_value = not await self.get_naming_enabled(guild_id, channel_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"channels.{channel_id}.naming_enabled": new_value}},
+            upsert=True,
+        )
+        return new_value
+
     async def toggle_lock(self, guild_id: int, category: str) -> bool:
         cfg = await self.get_category_config(guild_id, category)
         new_val = not cfg.get("enabled", False)
