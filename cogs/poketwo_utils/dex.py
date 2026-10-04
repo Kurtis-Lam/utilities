@@ -1,6 +1,9 @@
+import asyncio
 import io
 import re
 import unicodedata
+from pathlib import Path
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -115,12 +118,78 @@ def build_alt_index(pokedex: dict) -> dict:
     return index
 
 
+def shiny_slug(name: str) -> str:
+    """'Alolan Rattata' -> 'alolan_rattata' (file is shiny_{slug}.png)."""
+    return re.sub(r"[^a-z0-9]+", "_", normalize_key(name)).strip("_")
+
+
+def find_shiny_dir() -> Optional[Path]:
+    """Locate data/pokes/shinies regardless of where the cog file lives."""
+    here = Path(__file__).resolve()
+    candidates = [parent / "data" / "pokes" / "shinies" for parent in here.parents]
+    candidates.append(Path.cwd() / "data" / "pokes" / "shinies")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+class ShinyView(discord.ui.View):
+    """Sparkles toggle: red = normal sprite, green = shiny sprite."""
+
+    def __init__(self, author_id: int, embed: discord.Embed, normal: Optional[tuple], shiny: tuple):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.embed = embed
+        self.normal = normal  # (filename, bytes) or None
+        self.shiny = shiny  # (filename, bytes)
+        self.showing_shiny = False
+        self.message: Optional[discord.Message] = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=err_embed("This button isn't yours. Run the command yourself."),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(emoji="✨", style=discord.ButtonStyle.danger)
+    async def sparkles(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.showing_shiny = not self.showing_shiny
+        button.style = (
+            discord.ButtonStyle.success if self.showing_shiny else discord.ButtonStyle.danger
+        )
+        current = self.shiny if self.showing_shiny else self.normal
+        if current:
+            filename, data = current
+            self.embed.set_thumbnail(url=f"attachment://{filename}")
+            attachments = [discord.File(fp=io.BytesIO(data), filename=filename)]
+        else:
+            self.embed.set_thumbnail(url=None)
+            attachments = []
+        await interaction.response.edit_message(
+            embed=self.embed, attachments=attachments, view=self
+        )
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 class Dex(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
         self.pokedex = {}
         self.alt_index = {}
+        self.shiny_dir: Optional[Path] = find_shiny_dir()
 
     async def cog_command_error(self, ctx: commands.Context, error):
         await handle_command_error(ctx, error)
@@ -230,10 +299,12 @@ class Dex(commands.Cog):
                 break
 
         file = None
+        normal_img = None
 
         if img_doc and "image" in img_doc:
             image_bytes = img_doc["image"]
             filename = f"{normalize_key(matched_name)}.png"
+            normal_img = (filename, image_bytes)
 
             image_stream = io.BytesIO(image_bytes)
             file = discord.File(fp=image_stream, filename=filename)
@@ -323,10 +394,38 @@ class Dex(commands.Cog):
             name="Hatch Time", value=data.get("hatch_time", "N/A"), inline=True
         )
 
+        # Shiny image (data/pokes/shinies/shiny_{name}.png) -> sparkles toggle button
+        shiny_img = await self._load_shiny_image(matched_name)
+        view = None
+        if shiny_img:
+            view = ShinyView(ctx.author.id, embed, normal_img, shiny_img)
+
+        kwargs = {"embed": embed}
         if file:
-            await ctx.reply(embed=embed, file=file)
-        else:
-            await ctx.reply(embed=embed)
+            kwargs["file"] = file
+        if view:
+            kwargs["view"] = view
+        msg = await ctx.reply(**kwargs)
+        if view:
+            view.message = msg
+
+    async def _load_shiny_image(self, matched_name: str) -> Optional[tuple]:
+        """Returns (filename, bytes) for the shiny sprite, or None if there isn't one."""
+        if self.shiny_dir is None:
+            self.shiny_dir = find_shiny_dir()
+        if self.shiny_dir is None:
+            return None
+        seen = set()
+        for name in (matched_name, normalize_key(matched_name)):
+            slug = shiny_slug(name)
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            path = self.shiny_dir / f"shiny_{slug}.png"
+            if path.is_file():
+                data = await asyncio.to_thread(path.read_bytes)
+                return (path.name, data)
+        return None
 
 
 async def setup(bot):
