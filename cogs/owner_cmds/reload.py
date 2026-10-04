@@ -2,7 +2,7 @@ import gc
 
 from discord.ext import commands
 
-from utils import safe_edit, safe_send
+from cogs.owner_cmds.utils import safe_edit, safe_send
 
 
 class Reload(commands.Cog):

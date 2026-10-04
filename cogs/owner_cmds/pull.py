@@ -2,7 +2,7 @@ import time
 
 from discord.ext import commands
 
-from utils import Progress, run_cmd, safe_edit, safe_send
+from cogs.owner_cmds.utils import Progress, run_cmd, safe_edit, safe_send
 
 
 class Pull(commands.Cog):

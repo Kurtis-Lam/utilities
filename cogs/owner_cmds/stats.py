@@ -7,7 +7,7 @@ import discord
 import psutil
 from discord.ext import commands
 
-from utils import get_dir_size
+from cogs.owner_cmds.utils import get_dir_size
 
 
 class Stats(commands.Cog):
