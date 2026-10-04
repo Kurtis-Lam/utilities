@@ -253,19 +253,25 @@ async def reload(ctx: commands.Context, cog_name: str = None):
     
     await msg.edit(content=final_msg)
 
-@bot.command()
+@bot.command(name="update")
 @commands.is_owner()
-async def update(ctx):
-    # 1. Pull latest code from GitHub
+async def update(ctx: commands.Context):
+    msg = await ctx.send("🔄 Pulling latest changes from GitHub...")
+
+    # 1. Pull latest code from Git
     result = subprocess.run(["git", "pull"], capture_output=True, text=True)
-    
-    # 2. Reload all loaded cogs/extensions dynamically
-    reloaded = []
-    for extension in list(bot.extensions):
-        await bot.reload_extension(extension)
-        reloaded.append(extension)
-        
-    await ctx.send(f"```\n{result.stdout}\n```\nReloaded cogs: {', '.join(reloaded)}")
+    if result.returncode != 0:
+        await msg.edit(content=f"❌ **Git Pull Failed:**\n```\n{result.stderr}\n```")
+        return
+
+    stdout = result.stdout.strip() or "Already up to date."
+    await msg.edit(content=f"```\n{stdout}\n```\n🚀 **Rebooting bot process...**")
+
+    # 2. Safely close active sessions and DB connections
+    await bot.close()
+
+    # 3. Seamlessly restart the Python process with new code
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 @reload.error
 async def reload_cogs_error(ctx: commands.Context, error: commands.CommandError):
