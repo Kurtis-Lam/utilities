@@ -401,6 +401,7 @@ class PokePings(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._alt_index = {}  # normalized alt name -> canonical Pokédex name
+        self._pokevars_cache = None
 
     @property
     def collection(self):
@@ -427,48 +428,49 @@ class PokePings(commands.Cog):
             upsert=True
         )
 
+    async def _get_pokevars(self) -> list[str]:
+        """Lazily fetches and caches the pokevars list from constdata."""
+        if self._pokevars_cache is not None:
+            return self._pokevars_cache
+        try:
+            doc = await self.constdata_collection.find_one({"_id": "pokevars"})
+            if doc and isinstance(doc.get("data"), list):
+                self._pokevars_cache = doc["data"]
+                return self._pokevars_cache
+        except Exception as e:
+            print(f"PokePings: failed to fetch pokevars: {e}")
+        return []
+
     async def find_sh_variants(self, pokemon: str, *, exact: bool = False) -> list[str]:
         """Return distinct pokevars names containing the query, or exactly matching it."""
         query = pokemon.strip()
         if not query:
             return []
 
-        pattern = re.escape(query)
-        if exact:
-            pattern = f"^{pattern}$"
-        pipeline = [
-            {"$match": {"_id": "pokevars"}},
-            {"$project": {
-                "matches": {
-                    "$filter": {
-                        "input": {"$ifNull": ["$data", []]},
-                        "as": "name",
-                        "cond": {
-                            "$regexMatch": {
-                                "input": {"$toString": "$$name"},
-                                "regex": pattern,
-                                "options": "i",
-                            }
-                        },
-                    }
-                }
-            }},
-        ]
+        # Resolve alt names first (e.g., 'ghos' -> 'gastly', 'flabebe' -> 'flabébé')
+        resolved = await self._resolve_alt_lower(query)
+        search_term = resolved if resolved else query
 
-        variants = []
-        cursor = self.constdata_collection.aggregate(pipeline)
-        async for doc in cursor:
-            variants = doc.get("matches", [])
-            break
+        norm_search = _strip_accents(unicodedata.normalize("NFKC", search_term)).casefold()
+
+        pokevars = await self._get_pokevars()
 
         unique, seen = [], set()
-        for name in variants:
+        for name in pokevars:
             if not isinstance(name, str):
                 continue
-            key = name.casefold()
-            if key not in seen:
-                unique.append(name)
-                seen.add(key)
+            norm_name = _strip_accents(unicodedata.normalize("NFKC", name)).casefold()
+
+            if exact:
+                is_match = (norm_name == norm_search)
+            else:
+                is_match = (norm_search in norm_name)
+
+            if is_match:
+                key = name.casefold()
+                if key not in seen:
+                    unique.append(name)
+                    seen.add(key)
         return unique
 
     @staticmethod
@@ -554,40 +556,35 @@ class PokePings(commands.Cog):
         alt_index = await self._get_alt_index()
 
         candidates: List[List[str]] = []
-        all_candidates = set()
         for original in requested:
-            cands = [original.lower()]
+            cands = [original.lower(), _strip_accents(original.lower())]
             for key in name_keys(original):
                 target = alt_index.get(key)
-                if target and target.lower() not in cands:
-                    cands.append(target.lower())
+                if target:
+                    t_low = target.lower()
+                    if t_low not in cands:
+                        cands.append(t_low)
+                    t_strip = _strip_accents(t_low)
+                    if t_strip not in cands:
+                        cands.append(t_strip)
             candidates.append(cands)
-            all_candidates.update(cands)
 
-        pipeline = [
-            {"$match": {"_id": "pokevars"}},
-            {"$project": {
-                "matched": {
-                    "$filter": {
-                        "input": "$data",
-                        "as": "poke",
-                        "cond": {"$in": [{"$toLower": "$$poke"}, list(all_candidates)]}
-                    }
-                }
-            }}
-        ]
+        pokevars = await self._get_pokevars()
 
-        db_matched = []
-        cursor = self.constdata_collection.aggregate(pipeline)
-        async for doc in cursor:
-            db_matched = doc.get("matched", [])
-            break
-
-        lookup = {m.lower(): m for m in db_matched}
+        lookup = {}
+        for m in pokevars:
+            if isinstance(m, str):
+                m_low = m.lower()
+                lookup[m_low] = m
+                lookup[_strip_accents(m_low)] = m
 
         matched, invalid, seen = [], [], set()
         for original, cands in zip(requested, candidates):
-            hit = next((lookup[c] for c in cands if c in lookup), None)
+            hit = None
+            for c in cands:
+                if c in lookup:
+                    hit = lookup[c]
+                    break
             if hit is None:
                 invalid.append(original.lower())
                 continue
