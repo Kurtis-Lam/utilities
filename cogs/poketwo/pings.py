@@ -6,7 +6,7 @@ from typing import List, Tuple, Optional
 import discord
 from discord.ext import commands
 
-from views.common import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed, warning_embed
+from views.common import BaseView, EMBED_COLOR, error_embed, info_embed, make_embed, success_embed, warning_embed
 from views.embeds import handle_command_error, send_usage
 
 # --- Navigation View Integration ----------------------------------------------
@@ -293,6 +293,108 @@ class RegionPingView(discord.ui.View):
         return embed
 
 
+# --- Shiny Hunt Variant Selector ----------------------------------------------
+
+class ShinyHuntSelect(discord.ui.Select):
+    def __init__(self, view: "ShinyHuntView"):
+        self.sh_view = view
+        super().__init__(
+            placeholder="Choose the Pokémon variants to ping for...",
+            min_values=1,
+            max_values=min(view.page_size, len(view.variants)),
+            options=[],
+        )
+        self.update_options()
+
+    def update_options(self):
+        page_variants = self.sh_view.page_variants
+        self.options = [
+            discord.SelectOption(
+                label=name,
+                value=name,
+                default=name in self.sh_view.selected,
+            )
+            for name in page_variants
+        ]
+        self.max_values = len(page_variants)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.sh_view
+        page_names = set(view.page_variants)
+        view.selected.difference_update(page_names)
+        view.selected.update(self.values)
+        self.update_options()
+        await interaction.response.edit_message(embed=view.make_embed(), view=view)
+
+
+class ShinyHuntView(BaseView):
+    page_size = 25
+
+    def __init__(self, cog: "PokePings", author_id: int, variants: List[str]):
+        super().__init__(author_id=author_id, timeout=60)
+        self.cog = cog
+        self.variants = variants
+        self.selected = set()
+        self.page = 0
+        self.selector = ShinyHuntSelect(self)
+        self.add_item(self.selector)
+        self.previous_button.disabled = True
+        self.next_button.disabled = len(self.variants) <= self.page_size
+
+    @property
+    def page_variants(self) -> List[str]:
+        start = self.page * self.page_size
+        return self.variants[start:start + self.page_size]
+
+    def make_embed(self) -> discord.Embed:
+        pages = (len(self.variants) + self.page_size - 1) // self.page_size
+        embed = make_embed(
+            title="✨ Choose Shiny Hunt Variants",
+            description=(
+                f"Select one or more variants, then confirm. "
+                f"({len(self.selected)} selected)\n"
+                f"Page {self.page + 1}/{pages}"
+            ),
+        )
+        return embed
+
+    def _change_page(self, offset: int):
+        self.page += offset
+        self.selector.update_options()
+        self.previous_button.disabled = self.page == 0
+        self.next_button.disabled = (self.page + 1) * self.page_size >= len(self.variants)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._change_page(-1)
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._change_page(1)
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, row=1)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected:
+            await interaction.response.send_message(
+                embed=warning_embed("Select at least one Pokémon variant first."),
+                ephemeral=True,
+            )
+            return
+
+        variants = [name for name in self.variants if name in self.selected]
+        await self.cog.set_ping_data(
+            str(interaction.guild_id), "sh", str(interaction.user.id), variants
+        )
+        self.disable_all()
+        embeds = self.cog._sh_confirmation_embeds(variants, "✨ Shiny Hunt Pings Updated")
+        await interaction.response.edit_message(embeds=embeds[:10], view=None)
+        self.stop()
+        for start in range(10, len(embeds), 10):
+            await interaction.followup.send(embeds=embeds[start:start + 10])
+
+
 # --- Cog Definition ---
 
 class PokePings(commands.Cog):
@@ -324,6 +426,74 @@ class PokePings(commands.Cog):
             {"$set": {f"{ping_type}.{user_id}": value}},
             upsert=True
         )
+
+    async def find_sh_variants(self, pokemon: str, *, exact: bool = False) -> List[str]:
+        """Return distinct pokevars names containing the query, or exactly matching it."""
+        query = pokemon.strip()
+        if not query:
+            return []
+
+        pattern = re.escape(query)
+        if exact:
+            pattern = f"^{pattern}$"
+        pipeline = [
+            {"$match": {"_id": "pokevars"}},
+            {"$project": {
+                "matches": {
+                    "$filter": {
+                        "input": {"$ifNull": ["$data", []]},
+                        "as": "name",
+                        "cond": {
+                            "$regexMatch": {
+                                "input": {"$toString": "$$name"},
+                                "regex": pattern,
+                                "options": "i",
+                            }
+                        },
+                    }
+                }
+            }},
+        ]
+
+        variants = []
+        cursor = self.constdata_collection.aggregate(pipeline)
+        async for doc in cursor:
+            variants = doc.get("matches", [])
+            break
+
+        unique, seen = [], set()
+        for name in variants:
+            if not isinstance(name, str):
+                continue
+            key = name.casefold()
+            if key not in seen:
+                unique.append(name)
+                seen.add(key)
+        return unique
+
+    @staticmethod
+    def _sh_confirmation_embeds(variants: List[str], title: str) -> List[discord.Embed]:
+        """Split long variant lists across embeds without hitting Discord limits."""
+        chunks = []
+        current = []
+        current_length = 0
+        for name in variants:
+            line = f"• {name}"
+            if current and current_length + len(line) + 1 > 3500:
+                chunks.append("\n".join(current))
+                current = []
+                current_length = 0
+            current.append(line)
+            current_length += len(line) + 1
+        if current:
+            chunks.append("\n".join(current))
+        return [
+            make_embed(
+                title=title if index == 0 else f"{title} (continued)",
+                description=chunk,
+            )
+            for index, chunk in enumerate(chunks)
+        ]
 
     async def get_guild_role(self, guild_id: str, role_key: str) -> Optional[str]:
         doc = await self._get_guild_doc(guild_id)
@@ -481,9 +651,14 @@ class PokePings(commands.Cog):
             current_sh = await self.get_ping_data(g_id, "sh", u_id)
             desc_lines = []
             if current_sh:
-                desc_lines.append(f"✨ Current target: **{current_sh}**\n")
+                current_targets = current_sh if isinstance(current_sh, list) else [current_sh]
+                desc_lines.append(
+                    f"✨ Current targets: **{', '.join(current_targets)}**\n"
+                )
             desc_lines.extend([
-                f"• `{p}sh <pokemon>` — Set target",
+                f"• `{p}sh <pokemon>` — Choose matching variants",
+                f"• `{p}sh all <pokemon>` — Subscribe to all matching variants",
+                f"• `{p}sh only <pokemon>` — Subscribe to the exact Pokémon only",
                 f"• `{p}sh reset` — Clear"
             ])
             embed = discord.Embed(
@@ -499,19 +674,42 @@ class PokePings(commands.Cog):
             await ctx.reply(embed=make_embed(description="🧹 Cleared."), mention_author=False)
             return
 
-        matched_names, _ = await self.parse_pokemon_list(pokemon)
-        if not matched_names:
-            await ctx.reply(embed=error_embed("Pokémon does not exist."), mention_author=False)
+        mode = "select"
+        query = pokemon.strip()
+        parts = query.split(maxsplit=1)
+        if parts and parts[0].casefold() in {"all", "only"}:
+            mode = parts[0].casefold()
+            query = parts[1].strip() if len(parts) > 1 else ""
+
+        variants = await self.find_sh_variants(query, exact=(mode == "only"))
+        if not variants:
+            await ctx.reply(
+                embed=error_embed(f"No Pokémon found matching `{query}`."),
+                mention_author=False,
+            )
             return
 
-        matched_name = matched_names[0]
-        await self.set_ping_data(g_id, "sh", u_id, matched_name)
+        if mode == "all":
+            await self.set_ping_data(g_id, "sh", u_id, variants)
+            embeds = self._sh_confirmation_embeds(variants, "✨ Shiny Hunt Pings Added")
+            await ctx.reply(embeds=embeds[:10], mention_author=False)
+            for start in range(10, len(embeds), 10):
+                await ctx.send(embeds=embeds[start:start + 10])
+            return
 
-        description = f"✨ Target set to **{matched_name}**."
-        typed = pokemon.split(",")[0].strip()
-        if typed.lower() != matched_name.lower():
-            description += f"\n-# `{typed[:50]}` = {matched_name}"
-        await ctx.reply(embed=make_embed(description=description), mention_author=False)
+        if mode == "only" or len(variants) == 1:
+            await self.set_ping_data(g_id, "sh", u_id, variants)
+            description = (
+                f"✨ Only **{variants[0]}** was added to your Shiny Hunt pings."
+                if mode == "only"
+                else f"✨ Target set to **{variants[0]}**."
+            )
+            await ctx.reply(embed=make_embed(description=description), mention_author=False)
+            return
+
+        view = ShinyHuntView(self, ctx.author.id, variants)
+        message = await ctx.reply(embed=view.make_embed(), view=view, mention_author=False)
+        view.message = message
 
     # --- Collection List Commands ---
 
