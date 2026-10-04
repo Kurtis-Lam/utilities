@@ -61,7 +61,7 @@ class Utilities(commands.Bot):
         self.cogs_dict = {
             "cmds": ["ai", "categories", "channels", "members", "messages", "ping", "roles", "utilities"],
             "config": ["base"],
-            "poketwo": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer"],
+            "poketwo_helper": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer"],
             "poketwo-management": ["set", "settings", "toggle"],
             "poketwo-utils": ["dex", "extract", "hintsolver"]
         }
