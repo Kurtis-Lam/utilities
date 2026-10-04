@@ -219,15 +219,21 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
         tokens = token_str.split()
         fmt_tokens = []
         has_guild = False
+        has_resolved = False
+        all_ids = bool(tokens) and all(tok.isdigit() for tok in tokens)
+
         for tok in tokens:
             raw_id, entity_type, name = resolve_id_info(tok, guild)
             if entity_type == "guild":
                 has_guild = True
             if name:
+                has_resolved = True
                 fmt_tokens.append(f"{raw_id} [{name}]")
             else:
                 fmt_tokens.append(raw_id)
-        return ", ".join(fmt_tokens), has_guild
+
+        sep = ", " if (has_resolved or all_ids) else " "
+        return sep.join(fmt_tokens), has_guild
 
     # 1) Key-Value style targets ("chid=123, pokes=abc")
     if "=" in target or ":" in target:
