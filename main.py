@@ -2,11 +2,13 @@ import asyncio
 import aiohttp
 import discord
 import gc
-import os
 import json
+import os
 import platform
-import sys
 import psutil
+import subprocess
+import sys
+
 from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
@@ -250,6 +252,20 @@ async def reload(ctx: commands.Context, cog_name: str = None):
         final_msg += f"\n❌ **Failed ({len(failed)}):**\n" + "\n".join(failed)
     
     await msg.edit(content=final_msg)
+
+@bot.command()
+@commands.is_owner()
+async def update(ctx):
+    # 1. Pull latest code from GitHub
+    result = subprocess.run(["git", "pull"], capture_output=True, text=True)
+    
+    # 2. Reload all loaded cogs/extensions dynamically
+    reloaded = []
+    for extension in list(bot.extensions):
+        await bot.reload_extension(extension)
+        reloaded.append(extension)
+        
+    await ctx.send(f"```\n{result.stdout}\n```\nReloaded cogs: {', '.join(reloaded)}")
 
 @reload.error
 async def reload_cogs_error(ctx: commands.Context, error: commands.CommandError):
