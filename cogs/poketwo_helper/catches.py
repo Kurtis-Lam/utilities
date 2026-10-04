@@ -9,7 +9,7 @@ from pymongo import ASCENDING, DESCENDING, UpdateOne
 from views.common import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed
 from views.embeds import handle_command_error, send_usage
 
-POKETWO_ID = 1250429544486273038
+POKETWO_ID = 716390085896962058
 HKT = timezone(timedelta(hours=8))
 
 
