@@ -1,9 +1,5 @@
 import asyncio
-import json
-import os
-import re
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Optional
 
 import discord
@@ -11,29 +7,11 @@ from discord.ext import commands
 from pymongo import ASCENDING, DESCENDING, UpdateOne
 
 from views.common import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed
-from views.embeds import BRAND_COLOR, handle_command_error, send_usage
+from views.embeds import handle_command_error, send_usage
 
-POKETWO_ID = 716390085896962058
+POKETWO_ID = 1250429544486273038
 HKT = timezone(timedelta(hours=8))
-CATCH_PATTERN = re.compile(
-    r"Congratulations <@!?(\d+)>! You caught a Level (\d+) (.+?) "
-    r"\((\d+(?:\.\d+)?)%\)!?"
-)
-CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:[^:>]+:\d+>")
-DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "pokes"
 
-
-def normalize_pokemon_name(name: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", name.lower())
-
-
-def load_pokemon_names(filename: str) -> frozenset[str]:
-    with (DATA_DIR / filename).open(encoding="utf-8") as file:
-        return frozenset(normalize_pokemon_name(name) for name in json.load(file))
-
-
-RARE_POKEMON = load_pokemon_names("rare.json")
-REGIONAL_POKEMON = load_pokemon_names("regional.json")
 
 TIMEFRAME_CONFIG = {
     "daily": {
@@ -137,10 +115,6 @@ class Catches(commands.Cog):
     def links_collection(self):
         return self.db["guild_links"]
 
-    @property
-    def starboard_collection(self):
-        return self.db["starboard_channels"]
-
     async def cog_load(self):
         """Warms up connection and asynchronously builds indexes."""
         try:
@@ -198,66 +172,6 @@ class Catches(commands.Cog):
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 pass
         await ctx.send(embed=embed, delete_after=1.0)
-
-    async def _post_starboard(self, message: discord.Message, user_id: int) -> None:
-        match = CATCH_PATTERN.search(message.content)
-        if not match:
-            return
-
-        level = int(match.group(2))
-        pokemon = CUSTOM_EMOJI_PATTERN.sub("", match.group(3)).strip()
-        iv = float(match.group(4))
-        normalized_name = normalize_pokemon_name(pokemon)
-
-        detections = []
-        if normalized_name in RARE_POKEMON:
-            detections.append("💎 Rare Catch Detected 💎")
-        if normalized_name in REGIONAL_POKEMON:
-            detections.append("🌍 Regional Catch Detected 🌍")
-        if iv > 90:
-            detections.append("✨ High IV Catch Detected ✨")
-        elif iv < 10:
-            detections.append("⬇️ Low IV Catch Detected ⬇️")
-        if not detections:
-            return
-
-        config = await self.starboard_collection.find_one(
-            {"guild_id": str(message.guild.id)}
-        )
-        if not config or not config.get("channel_id"):
-            return
-
-        channel_id = int(config["channel_id"])
-        channel = self.bot.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(channel_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
-                print(f"Could not fetch starboard channel {channel_id}: {error}")
-                return
-
-        embed = discord.Embed(
-            title=" • ".join(detections),
-            description=(
-                f"**User:** <@{user_id}>\n"
-                f"**Pokémon:** {pokemon}\n"
-                f"**Level:** {level}\n"
-                f"**IV:** {iv:g}%\n\n"
-                f"Caught <t:{int(message.created_at.timestamp())}:f>"
-            ),
-            color=BRAND_COLOR,
-        )
-        if message.embeds:
-            catch_embed = message.embeds[0]
-            image_url = catch_embed.thumbnail.url or catch_embed.image.url
-            if image_url:
-                embed.set_thumbnail(url=image_url)
-
-        jump_view = discord.ui.View(timeout=None)
-        jump_view.add_item(
-            discord.ui.Button(label="Jump to Message", url=message.jump_url)
-        )
-        await channel.send(embed=embed, view=jump_view)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -324,60 +238,6 @@ class Catches(commands.Cog):
         ]
 
         await self.collection.bulk_write(operations)
-        await self._post_starboard(message, caught_user.id)
-
-    @commands.hybrid_group(
-        name="starboard",
-        invoke_without_command=True,
-        description="View or set the notable-catch starboard channel.",
-    )
-    @commands.guild_only()
-    async def starboard(
-        self,
-        ctx: commands.Context,
-        channel: Optional[discord.TextChannel] = commands.parameter(
-            default=None, description="Channel for notable catch announcements."
-        ),
-    ):
-        if channel is not None:
-            if not ctx.author.guild_permissions.administrator:
-                return await ctx.send(
-                    embed=error_embed("Only administrators can set the starboard channel.")
-                )
-            await self.starboard_collection.update_one(
-                {"guild_id": str(ctx.guild.id)},
-                {"$set": {"channel_id": str(channel.id)}},
-                upsert=True,
-            )
-            return await ctx.send(
-                embed=success_embed(f"Starboard channel set to {channel.mention}.")
-            )
-
-        config = await self.starboard_collection.find_one(
-            {"guild_id": str(ctx.guild.id)}
-        )
-        channel_id = config.get("channel_id") if config else None
-        if channel_id:
-            message = f"Notable catches are posted in <#{channel_id}>."
-        else:
-            message = "No starboard channel is configured. An admin can use `.starboard #channel`."
-        await ctx.send(embed=info_embed(message))
-
-    @starboard.command(
-        name="reset",
-        description="Remove the configured notable-catch starboard channel.",
-    )
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def starboard_reset(self, ctx: commands.Context):
-        result = await self.starboard_collection.delete_one(
-            {"guild_id": str(ctx.guild.id)}
-        )
-        if result.deleted_count:
-            message = "Starboard channel configuration removed."
-        else:
-            message = "No starboard channel is configured."
-        await ctx.send(embed=success_embed(message))
 
     @commands.hybrid_command(
         name="catcheslink",
