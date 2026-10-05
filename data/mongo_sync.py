@@ -3,7 +3,7 @@ Unified MongoDB sync tool for Pokémon data.
 
 Run it, then pick:
   1) an action  -> push (local -> MongoDB) or pull (MongoDB -> local)
-  2) a dataset  -> pokedex, pokevars, alt, pokeimgs, or all
+  2) a dataset  -> pokedex, pokevars, alt, pokeimgs, shinies, or all
 
 You can also skip the menus:
     python mongo_sync.py push pokedex
@@ -12,7 +12,9 @@ You can also skip the menus:
 
 import asyncio
 import json
+import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +42,15 @@ class ImageSet:
     name: str
     directory: Path
     collection: str
+    shiny: bool = False  # shinies share the pokeimgs collection, with ids like "shiny pikachu"
+
+
+SHINY_ID_RE = re.compile(r"^shiny ")
+
+
+def scope_filter(ds: "ImageSet") -> dict:
+    """Mongo filter selecting only this image set's documents within a shared collection."""
+    return {"_id": SHINY_ID_RE} if ds.shiny else {"_id": {"$not": SHINY_ID_RE}}
 
 
 DATASETS = {
@@ -47,6 +58,7 @@ DATASETS = {
     "pokevars": JsonDoc("pokevars", Path("data/pokevars.json"), "constdata", "pokevars"),
     "alt": JsonDoc("alt", Path("data/alt.json"), "constdata", "alt"),
     "pokeimgs": ImageSet("pokeimgs", Path("data/pokeimgs"), "pokeimgs"),
+    "shinies": ImageSet("shinies", Path("data/pokeimgs/shinies"), "pokeimgs", shiny=True),
 }
 
 
@@ -73,6 +85,14 @@ def unwrap(content):
     if isinstance(content, dict) and set(content.keys()) == {"_id", "data"}:
         return content["data"]
     return content
+
+
+def image_id(name: str) -> str:
+    """Canonical pokeimgs id: lowercase, é -> e, Nidoran symbols -> -m / -f (matches the bot's lookup)."""
+    text = unicodedata.normalize("NFC", name).replace("♂", "-m").replace("♀", "-f")
+    nfd = unicodedata.normalize("NFD", text)
+    stripped = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+    return " ".join(unicodedata.normalize("NFC", stripped).lower().split())
 
 
 def confirm(prompt: str) -> bool:
@@ -129,8 +149,8 @@ async def push_images(ds: ImageSet, db):
         return
 
     if not confirm(
-        f"⚠️ [{ds.name}] This DELETES everything in '{DB_NAME}.{ds.collection}' "
-        f"and uploads {len(img_files)} images. Continue?"
+        f"⚠️ [{ds.name}] This DELETES all {'shiny' if ds.shiny else 'non-shiny'} "
+        f"images in '{DB_NAME}.{ds.collection}' and uploads {len(img_files)} images. Continue?"
     ):
         print(f"⏭️ [{ds.name}] Skipped.")
         return
@@ -138,11 +158,11 @@ async def push_images(ds: ImageSet, db):
     collection = db[ds.collection]
 
     print(f"🗑️ [{ds.name}] Deleting existing documents...")
-    deleted = await collection.delete_many({})
+    deleted = await collection.delete_many(scope_filter(ds))
     print(f"✅ [{ds.name}] Removed {deleted.deleted_count} document(s).")
 
     documents = [
-        {"_id": p.stem.strip().lower(), "image": p.read_bytes()} for p in img_files
+        {"_id": image_id(p.stem), "image": p.read_bytes()} for p in img_files
     ]
 
     print(f"🚀 [{ds.name}] Uploading {len(documents)} images...")
@@ -155,7 +175,7 @@ async def pull_images(ds: ImageSet, db):
     ds.directory.mkdir(parents=True, exist_ok=True)
 
     count = 0
-    async for doc in db[ds.collection].find({}):
+    async for doc in db[ds.collection].find(scope_filter(ds)):
         image = doc.get("image")
         if image is None:
             continue
