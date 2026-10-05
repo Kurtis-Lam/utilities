@@ -1,4 +1,3 @@
-import asyncio
 import io
 import json
 import logging
@@ -57,9 +56,31 @@ def normalize_key(name: str) -> str:
     return " ".join(cleaned.split()).lower()
 
 
-def shiny_slug(name: str) -> str:
-    """'Alolan Rattata' -> 'alolan_rattata' (file is shiny_{slug}.png)."""
-    return re.sub(r"[^a-z0-9]+", "_", normalize_key(name)).strip("_")
+def image_id(name: str) -> str:
+    """
+    Canonical pokeimgs id / filename stem: lowercase, accents -> plain letters (é -> e),
+    Nidoran symbols -> -m / -f. Same rule is used by rename_shinies.py and mongo_sync.py.
+    """
+    if not name:
+        return ""
+    text = unicodedata.normalize("NFC", name).replace("♂", "-m").replace("♀", "-f")
+    nfd = unicodedata.normalize("NFD", text)
+    stripped = "".join(c for c in nfd if unicodedata.category(c) != "Mn")  # also drops U+FE0F
+    return " ".join(unicodedata.normalize("NFC", stripped).lower().split())
+
+
+def image_ids(name: str) -> list:
+    """Ordered, de-duplicated candidate pokeimgs ids for a Pokémon name (best match first)."""
+    variants = [name, name.replace("’", "'"), name.replace("’", "").replace("'", "")]
+    out = []
+    for variant in variants:
+        for key in (image_id(variant), variant.lower()):
+            if key and key not in out:
+                out.append(key)
+    legacy = normalize_key(name)
+    if legacy and legacy not in out and "♂" not in name and "♀" not in name:
+        out.append(legacy)
+    return out
 
 
 def find_data_dir() -> Optional[Path]:
@@ -264,7 +285,6 @@ class Starboard(commands.Cog):
         self.bot = bot
         self.rare: frozenset[str] = frozenset()
         self.regional: frozenset[str] = frozenset()
-        self.shiny_dir: Optional[Path] = None
 
     @property
     def starboard_collection(self):
@@ -278,7 +298,6 @@ class Starboard(commands.Cog):
         data_dir = find_data_dir()
         self.rare = load_pokemon_names(data_dir, "rare.json")
         self.regional = load_pokemon_names(data_dir, "regional.json")
-        self.shiny_dir = (data_dir / "shinies") if data_dir else None
 
     async def cog_command_error(self, ctx, error):
         await handle_command_error(ctx, error)
@@ -298,23 +317,21 @@ class Starboard(commands.Cog):
         return channel
 
     async def _get_shiny_image(self, names: list[str]) -> Optional[discord.File]:
-        """Loads data/pokes/shinies/shiny_{name}.png (e.g. shiny_alolan_rattata.png)."""
-        if self.shiny_dir is None:
-            return None
-        tried = set()
+        """Loads the shiny sprite from pokeimgs, stored under ids like "shiny pikachu"."""
+        keys = []
         for name in names:
-            slug = shiny_slug(name)
-            if not slug or slug in tried:
-                continue
-            tried.add(slug)
-            path = self.shiny_dir / f"shiny_{slug}.png"
-            try:
-                if path.is_file():
-                    data = await asyncio.to_thread(path.read_bytes)
-                    return discord.File(fp=io.BytesIO(data), filename=path.name)
-            except Exception:
-                log.exception("Starboard: failed reading shiny image %s", path)
-        log.warning("Starboard: no shiny image for %s (looked in %s)", names, self.shiny_dir)
+            for key in image_ids(name):
+                if f"shiny {key}" not in keys:
+                    keys.append(f"shiny {key}")
+        try:
+            for key in keys:
+                doc = await self.img_collection.find_one({"_id": key})
+                if doc and "image" in doc:
+                    filename = "shiny_" + re.sub(r"\W+", "_", normalize_key(names[-1])) + ".png"
+                    return discord.File(fp=io.BytesIO(bytes(doc["image"])), filename=filename)
+        except Exception:
+            log.exception("Starboard: shiny image lookup failed for %s", names)
+        log.warning("Starboard: no shiny image for %s", names)
         return None
 
     async def _get_pokemon_image(
@@ -337,8 +354,8 @@ class Starboard(commands.Cog):
 
         lookup_keys = []
         for name in names:
-            for key in (name.lower(), normalize_key(name)):
-                if key and key not in lookup_keys:
+            for key in image_ids(name):
+                if key not in lookup_keys:
                     lookup_keys.append(key)
 
         try:
