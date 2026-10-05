@@ -1,8 +1,6 @@
-import asyncio
 import io
 import re
 import unicodedata
-from pathlib import Path
 from typing import Optional
 
 import discord
@@ -50,6 +48,33 @@ def normalize_key(name: str) -> str:
     without_accents = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
     cleaned = re.sub(r"[^\w\s-]", "", without_accents)
     return " ".join(cleaned.split()).lower()
+
+
+def image_id(name: str) -> str:
+    """
+    Canonical pokeimgs id / filename stem: lowercase, accents -> plain letters (é -> e),
+    Nidoran symbols -> -m / -f. Same rule is used by rename_shinies.py and mongo_sync.py.
+    """
+    if not name:
+        return ""
+    text = unicodedata.normalize("NFC", name).replace("♂", "-m").replace("♀", "-f")
+    nfd = unicodedata.normalize("NFD", text)
+    stripped = "".join(c for c in nfd if unicodedata.category(c) != "Mn")  # also drops U+FE0F
+    return " ".join(unicodedata.normalize("NFC", stripped).lower().split())
+
+
+def image_ids(name: str) -> list:
+    """Ordered, de-duplicated candidate pokeimgs ids for a Pokémon name (best match first)."""
+    variants = [name, name.replace("’", "'"), name.replace("’", "").replace("'", "")]
+    out = []
+    for variant in variants:
+        for key in (image_id(variant), variant.lower()):
+            if key and key not in out:
+                out.append(key)
+    legacy = normalize_key(name)
+    if legacy and legacy not in out and "♂" not in name and "♀" not in name:
+        out.append(legacy)
+    return out
 
 
 def _strip_accents(text: str) -> str:
@@ -118,22 +143,6 @@ def build_alt_index(pokedex: dict) -> dict:
     return index
 
 
-def shiny_slug(name: str) -> str:
-    """'Alolan Rattata' -> 'alolan_rattata' (file is shiny_{slug}.png)."""
-    return re.sub(r"[^a-z0-9]+", "_", normalize_key(name)).strip("_")
-
-
-def find_shiny_dir() -> Optional[Path]:
-    """Locate data/pokes/shinies regardless of where the cog file lives."""
-    here = Path(__file__).resolve()
-    candidates = [parent / "data" / "pokes" / "shinies" for parent in here.parents]
-    candidates.append(Path.cwd() / "data" / "pokes" / "shinies")
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
-    return None
-
-
 class ShinyView(discord.ui.View):
     """Sparkles toggle: red = normal sprite, green = shiny sprite."""
 
@@ -189,7 +198,6 @@ class Dex(commands.Cog):
         self.bot = bot
         self.pokedex = {}
         self.alt_index = {}
-        self.shiny_dir: Optional[Path] = find_shiny_dir()
 
     async def cog_command_error(self, ctx: commands.Context, error):
         await handle_command_error(ctx, error)
@@ -288,7 +296,7 @@ class Dex(commands.Cog):
         )
 
         # Explicit image lookup key (maps "MissingNo." or "missingno" -> "missingno")
-        img_lookup_keys = [matched_name.lower(), normalize_key(matched_name)]
+        img_lookup_keys = image_ids(matched_name)
         if normalize_key(matched_name) == "missingno":
             img_lookup_keys.insert(0, "missingno")
 
@@ -394,7 +402,7 @@ class Dex(commands.Cog):
             name="Hatch Time", value=data.get("hatch_time", "N/A"), inline=True
         )
 
-        # Shiny image (data/pokes/shinies/shiny_{name}.png) -> sparkles toggle button
+        # Shiny image (pokeimgs doc "shiny <name>") -> sparkles toggle button
         shiny_img = await self._load_shiny_image(matched_name)
         view = None
         if shiny_img:
@@ -410,21 +418,13 @@ class Dex(commands.Cog):
             view.message = msg
 
     async def _load_shiny_image(self, matched_name: str) -> Optional[tuple]:
-        """Returns (filename, bytes) for the shiny sprite, or None if there isn't one."""
-        if self.shiny_dir is None:
-            self.shiny_dir = find_shiny_dir()
-        if self.shiny_dir is None:
-            return None
-        seen = set()
-        for name in (matched_name, normalize_key(matched_name)):
-            slug = shiny_slug(name)
-            if not slug or slug in seen:
-                continue
-            seen.add(slug)
-            path = self.shiny_dir / f"shiny_{slug}.png"
-            if path.is_file():
-                data = await asyncio.to_thread(path.read_bytes)
-                return (path.name, data)
+        """Returns (filename, bytes) for the shiny sprite from pokeimgs ("shiny <name>"), or None."""
+        keys = [f"shiny {key}" for key in image_ids(matched_name)]
+        for key in keys:
+            doc = await self.img_collection.find_one({"_id": key})
+            if doc and "image" in doc:
+                filename = f"shiny_{normalize_key(matched_name).replace(' ', '_')}.png"
+                return (filename, bytes(doc["image"]))
         return None
 
 
