@@ -13,6 +13,7 @@ recognizer/traindata/
 firebase_key.json
 config.json
 key_usage.json
-claude_skills.txt
+opencode.json
 
+claude_skills.txt
 keys.txt
