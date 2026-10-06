@@ -54,6 +54,10 @@ class Recognize(commands.Cog):
         return self.bot.get_cog("AutoLock")    
 
     @property
+    def timer_cog(self):
+        return self.bot.get_cog("Timer")
+
+    @property
     def afk_cog(self):    
         return self.bot.get_cog("SetAFK")    
 
@@ -515,6 +519,19 @@ class Recognize(commands.Cog):
             )
             self._background_tasks.add(task1)    
             task1.add_done_callback(self._background_tasks.discard)    
+
+        if self.timer_cog and activated_categories and message.guild:
+            timer_task = asyncio.create_task(
+                self.timer_cog.start_timer(
+                    channel=message.channel,
+                    guild=message.guild,
+                    pokemon_name=format_name(pokemon_name),
+                    activated_categories=activated_categories,
+                    category_users=category_users,
+                )
+            )
+            self._background_tasks.add(timer_task)
+            timer_task.add_done_callback(self._background_tasks.discard)
 
 
 async def setup(bot):    
