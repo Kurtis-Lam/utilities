@@ -20,10 +20,10 @@ from views.common import (
 # --- Small helpers --------------------------------------------------------------
 
 def fmt_placeholder(val) -> str:
-    s = str(val) if val is not None and str(val) != "" else "None"
-    if len(s) > 45:
-        s = s[:42] + "..."
-    return f"Current: {s} • leave blank to keep"
+    s = " ".join(str(val).split()) if val is not None and str(val) != "" else "None"
+    if len(s) > 73:
+        s = s[:70] + "..."
+    return f"Current: {s} • blank = keep"
 
 
 async def _guild_only(interaction: discord.Interaction) -> bool:
@@ -266,98 +266,107 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
         )
 
 
+def _code(val, limit: int = 300) -> str:
+    s = str(val) if val not in (None, "") else "None"
+    s = s.replace("`", "'")
+    return f"`{s[:limit - 3] + '...' if len(s) > limit else s}`"
+
+
 class DynamicConfigEditModal(ui.Modal):
-    def __init__(self, config_idx: int, cfg: dict, parent_view: "SequentialEditView"):
+    """One input per variable the config has. Blank = keep the current value."""
+
+    def __init__(self, config_idx: int, cfg: dict, fields: list, parent_view: "SequentialEditView"):
         mode = cfg.get("mode", "").lower()
         super().__init__(title=f"Edit Config #{config_idx} · {mode.upper()}"[:45])
 
         self.config_idx = config_idx
-        self.cfg = cfg
-        self.parent_view = parent_view
         self.mode = mode
-        self.details = config.get_config_details(cfg)
+        self.parent_view = parent_view
         self.inputs: dict[str, ui.TextInput] = {}
 
-        def add(key: str, label: str, current, *, paragraph: bool = False):
+        for f in fields:
             field = ui.TextInput(
-                label=label,
-                placeholder=fmt_placeholder(current),
-                style=discord.TextStyle.paragraph if paragraph else discord.TextStyle.short,
+                label=f.label[:45],
+                placeholder=fmt_placeholder(f.value),
+                style=discord.TextStyle.paragraph if f.paragraph else discord.TextStyle.short,
                 required=False,
             )
-            self.inputs[key] = field
+            self.inputs[f.key] = field
             self.add_item(field)
-
-        add("accIndex", "Account Number", self.details.get("accIndex", 1))
-
-        if mode in ["autocatch", "dotcatch", "commaedit"]:
-            add("chid", "Channel ID(s)", self.details.get("chid"))
-
-        elif mode == "periodicmsg":
-            add("chid", "Channel ID", self.details.get("chid"))
-            add("message", "Message", self.details.get("message"), paragraph=True)
-            add("time1", "Start Delay (Time 1)", self.details.get("time1"))
-            add("time2", "Interval (Time 2)", self.details.get("time2"))
-
-        elif mode == "spam":
-            add("chid", "Target / Channel ID", self.details.get("chid") or self.details.get("target"))
-
-        else:
-            add("target", "Target / Arguments", self.details.get("target"))
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        updated_fields = {}
+        guild_id = str(interaction.guild_id)
+        configs = await config.get_guild_configs(guild_id)
+        idx_in_list = self.config_idx - 1
+        if not (0 <= idx_in_list < len(configs)):
+            return await interaction.followup.send(
+                embed=error_embed(f"Config #{self.config_idx} no longer exists."), ephemeral=True
+            )
+
+        cfg = configs[idx_in_list]
+        accounts = (await config.get_global_data()).get("accounts", [])
+        current = {f.key: f.value for f in config.get_editable_fields(cfg, accounts)}
+
+        new = dict(current)
         for key, text_input in self.inputs.items():
             val = text_input.value.strip()
             if val:
-                if key == "accIndex":
-                    updated_fields["accIndex"] = int(val) if val.isdigit() else self.details.get("accIndex", 1)
-                else:
-                    updated_fields[key] = val
-            else:
-                if key == "accIndex":
-                    updated_fields["accIndex"] = self.details.get("accIndex", 1)
-                else:
-                    updated_fields[key] = self.details.get(key, "")
+                new[key] = val
 
-        # Preserve existing pokemons and datafile values for autocatch/dotcatch/commaedit modes
-        if self.mode in ["autocatch", "dotcatch", "commaedit"]:
-            updated_fields["pokemons"] = self.details.get("pokemons", "")
-            updated_fields["datafile"] = self.details.get("datafile", "")
+        # validation
+        acc_number = None
+        if new.get("accIndex") != current.get("accIndex"):
+            val = new["accIndex"]
+            if not (val.isdigit() and 1 <= int(val) <= len(accounts)):
+                return await interaction.followup.send(
+                    embed=error_embed(f"Account must be a number from 1 to {len(accounts)}."), ephemeral=True
+                )
+            acc_number = int(val)
+        if self.mode == "periodicmsg" and new.get("time2") and not new.get("time1"):
+            return await interaction.followup.send(
+                embed=error_embed("Time 2 needs a Time 1 (start delay) too."), ephemeral=True
+            )
 
-        new_target, new_xnon = config.build_target_string_for_mode(self.mode, updated_fields)
-
-        guild_id = str(interaction.guild_id)
-        configs = await config.get_guild_configs(guild_id)
-
-        idx_in_list = self.config_idx - 1
-        if 0 <= idx_in_list < len(configs):
-            configs[idx_in_list]["accIndex"] = updated_fields.get("accIndex", 1)
-            configs[idx_in_list]["target"] = new_target
-            configs[idx_in_list]["xnon"] = new_xnon
-
+        changed = new != current
+        if changed:
+            cfg["target"] = config.build_target_from_values(self.mode, new)
+            if acc_number is not None:
+                cfg["accIndex"] = acc_number
+                if "token" in cfg:
+                    cfg["token"] = accounts[acc_number - 1]
             await config.save_guild_configs(guild_id, configs)
-            await config.refresh_config_embed(interaction)
+            await config.refresh_config_embed(interaction, override_page="modes", message=self.parent_view.panel)
 
-        await self.parent_view.advance(interaction, self.config_idx)
+        await self.parent_view.advance(interaction, self.config_idx, changed)
 
 
-def _edit_step_embed(indices: list[int], step: int, mode: str, saved: int | None = None) -> discord.Embed:
-    info = config.MODE_PARAMS_INFO.get(mode, {"required": [], "optional": []})
-    lead = f"✅ Config **#{saved}** saved.\n\n" if saved else ""
+async def _build_step_embed(
+    guild_id: str, indices: list[int], step: int, prefix: str = ""
+) -> discord.Embed:
+    """Shows the config about to be edited: how many variables it has and each current value."""
+    cfg_idx = indices[step]
+    configs = await config.get_guild_configs(guild_id)
+
+    if not (1 <= cfg_idx <= len(configs)):
+        embed = make_embed("✏️ Edit Configuration", f"{prefix}Config **#{cfg_idx}** no longer exists.")
+        embed.add_field(name="Progress", value=f"Step {step + 1} of {len(indices)}", inline=True)
+        return embed
+
+    cfg = configs[cfg_idx - 1]
+    accounts = (await config.get_global_data()).get("accounts", [])
+    fields = config.get_editable_fields(cfg, accounts)
+    mode = cfg.get("mode", "unknown")
+
+    lines = [f"**{f.label}:** {_code(f.value)}" for f in fields]
     embed = make_embed(
         "✏️ Edit Configuration",
-        f"{lead}Up next: config **#{indices[step]}** · mode `{mode}`",
+        f"{prefix}Config **#{cfg_idx}** · mode `{mode}` · **{len(fields)}** variable(s)\n\n"
+        + "\n".join(lines),
     )
     embed.add_field(name="Progress", value=f"Step {step + 1} of {len(indices)}", inline=True)
-    embed.add_field(
-        name="Parameters",
-        value=f"{len(info['required'])} required · {len(info['optional'])} optional",
-        inline=True,
-    )
-    embed.set_footer(text="Press the button to inspect and edit lock parameters (delay, interval, message, channel).")
+    embed.set_footer(text="Press the button, then fill in only what you want to change. Blank keeps the current value.")
     return embed
 
 
@@ -368,11 +377,13 @@ class SequentialEditView(EmbedLayout):
         guild_id: str,
         current_step: int = 0,
         embed: discord.Embed | None = None,
+        panel: discord.Message | None = None,
     ):
         super().__init__(embed, timeout=180)
         self.indices = indices
         self.guild_id = guild_id
         self.current_step = current_step
+        self.panel = panel  # the main config panel message, refreshed after each save
         self.finished = False
         self.update_button()
 
@@ -402,18 +413,15 @@ class SequentialEditView(EmbedLayout):
     def rows(self):
         return [] if self.finished else [self.buttons]
 
-    async def _mode_of(self, cfg_idx: int) -> str:
-        configs = await config.get_guild_configs(self.guild_id)
-        if 1 <= cfg_idx <= len(configs):
-            return configs[cfg_idx - 1].get("mode", "unknown")
-        return "unknown"
-
     async def on_button_click(self, interaction: discord.Interaction):
         configs = await config.get_guild_configs(self.guild_id)
         cfg_idx = self.indices[self.current_step]
 
         if 1 <= cfg_idx <= len(configs):
-            await interaction.response.send_modal(DynamicConfigEditModal(cfg_idx, configs[cfg_idx - 1], self))
+            cfg = configs[cfg_idx - 1]
+            accounts = (await config.get_global_data()).get("accounts", [])
+            fields = config.get_editable_fields(cfg, accounts)
+            await interaction.response.send_modal(DynamicConfigEditModal(cfg_idx, cfg, fields, self))
         else:
             await interaction.response.send_message(
                 embed=error_embed(f"Config #{cfg_idx} no longer exists."), ephemeral=True
@@ -422,12 +430,14 @@ class SequentialEditView(EmbedLayout):
     async def on_skip(self, interaction: discord.Interaction):
         skipped = self.indices[self.current_step]
         next_step = self.current_step + 1
-        mode = await self._mode_of(self.indices[next_step])
-        embed = _edit_step_embed(self.indices, next_step, mode)
-        embed.description = f"⏭️ Skipped config **#{skipped}**.\n\n" + embed.description
+        embed = await _build_step_embed(
+            self.guild_id, self.indices, next_step, prefix=f"⏭️ Skipped config **#{skipped}**.\n\n"
+        )
         self.superseded = True
         await interaction.response.edit_message(
-            view=SequentialEditView(self.indices, self.guild_id, current_step=next_step, embed=embed),
+            view=SequentialEditView(
+                self.indices, self.guild_id, current_step=next_step, embed=embed, panel=self.panel
+            ),
         )
 
     async def on_cancel(self, interaction: discord.Interaction):
@@ -435,23 +445,24 @@ class SequentialEditView(EmbedLayout):
         self.finished = True
         await self.push(interaction, info_embed("Editing cancelled."))
 
-    async def advance(self, interaction: discord.Interaction, completed_idx: int):
+    async def advance(self, interaction: discord.Interaction, completed_idx: int, changed: bool = True):
+        note = (
+            f"✅ Config **#{completed_idx}** saved.\n\n"
+            if changed else f"↩️ Config **#{completed_idx}** unchanged.\n\n"
+        )
         next_step = self.current_step + 1
         if next_step < len(self.indices):
-            mode = await self._mode_of(self.indices[next_step])
+            embed = await _build_step_embed(self.guild_id, self.indices, next_step, prefix=note)
             await interaction.followup.send(
                 view=SequentialEditView(
-                    self.indices,
-                    self.guild_id,
-                    current_step=next_step,
-                    embed=_edit_step_embed(self.indices, next_step, mode, saved=completed_idx),
+                    self.indices, self.guild_id, current_step=next_step, embed=embed, panel=self.panel
                 ),
                 ephemeral=True,
             )
         else:
             done = ", ".join(f"#{i}" for i in self.indices)
             await interaction.followup.send(
-                embed=success_embed(f"All done! Updated configuration(s): {done}"), ephemeral=True
+                embed=success_embed(f"{note}All done! Went through configuration(s): {done}"), ephemeral=True
             )
 
 
@@ -484,9 +495,9 @@ class PromptEditConfigModal(ui.Modal, title="Edit Configuration"):
                 ephemeral=True,
             )
 
-        first_mode = configs[indices[0] - 1].get("mode", "").lower()
+        embed = await _build_step_embed(guild_id, indices, 0)
         await interaction.response.send_message(
-            view=SequentialEditView(indices, guild_id, embed=_edit_step_embed(indices, 0, first_mode)),
+            view=SequentialEditView(indices, guild_id, embed=embed, panel=interaction.message),
             ephemeral=True,
         )
 

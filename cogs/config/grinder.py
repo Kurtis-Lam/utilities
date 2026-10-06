@@ -2,7 +2,7 @@ import asyncio
 import base64
 import re
 import time
-from typing import Optional
+from typing import NamedTuple, Optional
 import discord
 from discord.ext import commands
 import firebase_admin
@@ -381,6 +381,95 @@ def build_target_string_for_mode(mode: str, fields: dict) -> tuple[str, bool]:
         return target, False
 
 
+# --- HELPERS FOR PER-VARIABLE CONFIG EDITING ---
+MAX_EDIT_FIELDS = 5  # Discord modals hold at most 5 inputs
+CATCH_MODES = ("autocatch", "dotcatch", "commaedit")
+
+
+class EditField(NamedTuple):
+    key: str
+    label: str
+    value: str
+    paragraph: bool = False
+
+
+def _split_catch_target(target: str) -> dict:
+    """Raw split of 'chid, pokemons, datafile' (no name lookups, safe to write back)."""
+    parts = [p.strip() for p in target.split(",") if p.strip()]
+    chid = parts[0] if parts else ""
+    rest = parts[1:]
+    datafile = ""
+    if rest:
+        tokens = rest[-1].split()
+        tail = []
+        while tokens and tokens[-1].lower().endswith(".json"):
+            tail.insert(0, tokens.pop())
+        if tail:
+            datafile = " ".join(tail)
+            rest[-1] = " ".join(tokens)
+            rest = [p for p in rest if p]
+        elif len(rest) >= 2:
+            datafile = rest.pop()
+    return {"chid": chid, "pokemons": ", ".join(rest), "datafile": datafile}
+
+
+def get_editable_fields(cfg: dict, accounts: list) -> list[EditField]:
+    """The variables a config actually has, in order, with their current raw values."""
+    mode = str(cfg.get("mode", "") or "").lower()
+    target = str(cfg.get("target", "") or "").strip()
+    acc = _cfg_acc_index(cfg, accounts)
+    fields = [EditField("accIndex", "Account Number", str(acc) if acc else "")]
+
+    if mode in CATCH_MODES:
+        p = _split_catch_target(target)
+        fields.append(EditField("chid", "Channel / Guild ID", p["chid"]))
+        if mode == "autocatch" or p["pokemons"]:
+            fields.append(EditField("pokemons", "Pokemons (comma separated)", p["pokemons"]))
+        if mode == "autocatch" or p["datafile"]:
+            fields.append(EditField("datafile", "Datafile(s)", p["datafile"]))
+
+    elif mode == "periodicmsg":
+        sep = ";" if ";" in target else ","
+        parts = [p.strip() for p in target.split(sep)]
+        parts += [""] * (4 - len(parts))
+        fields += [
+            EditField("chid", "Channel ID", parts[0]),
+            EditField("message", "Message", parts[1], paragraph=True),
+            EditField("time1", "Start Delay (Time 1)", parts[2]),
+            EditField("time2", "Interval (Time 2)", parts[3]),
+        ]
+
+    elif mode == "spam":
+        fields.append(EditField("target", "Target / Channel ID", target))
+
+    else:
+        parts = [p.strip() for p in re.split(r"[,;]", target) if p.strip()]
+        if len(parts) > MAX_EDIT_FIELDS - 1:
+            keep = MAX_EDIT_FIELDS - 2
+            parts = parts[:keep] + [", ".join(parts[keep:])]
+        if not parts:
+            parts = [""]
+        for i, part in enumerate(parts, 1):
+            fields.append(EditField(f"arg{i}", f"Argument {i}", part))
+
+    return fields[:MAX_EDIT_FIELDS]
+
+
+def build_target_from_values(mode: str, values: dict) -> str:
+    """Rebuild the stored target string from per-variable values."""
+    mode = mode.lower()
+    if mode in CATCH_MODES:
+        v = dict(values)
+        v["chid"] = re.sub(r"[,\s]+", " ", str(v.get("chid", ""))).strip()
+        files = [f for f in re.split(r"[,\s]+", str(v.get("datafile", ""))) if f]
+        v["datafile"] = " ".join(f if f.lower().endswith(".json") else f"{f}.json" for f in files)
+        return build_target_string_for_mode(mode, v)[0]
+    if mode in ("periodicmsg", "spam"):
+        return build_target_string_for_mode(mode, values)[0]
+    arg_keys = sorted(k for k in values if k.startswith("arg"))
+    return ", ".join(str(values[k]).strip() for k in arg_keys if str(values[k]).strip())
+
+
 # --- HELPER: DECODE DISCORD USER ID FROM TOKEN ---
 def get_user_id_from_token(token: str):
     if not token or not isinstance(token, str):
@@ -733,8 +822,8 @@ async def build_detector_bots_embed(guild: discord.Guild, bots: list):
 
 
 # --- HELPER TO REFRESH CONFIG EMBEDS LIVE ---
-async def refresh_config_embed(interaction: discord.Interaction, override_page: str = None):
-    message = interaction.message
+async def refresh_config_embed(interaction: discord.Interaction, override_page: str = None, message=None):
+    message = message or interaction.message
     if not (message and interaction.guild):
         return
 
@@ -965,74 +1054,6 @@ class GrinderCog(commands.Cog):
     ):
         """Remove a mode configuration by its index."""
         await grindconfig_remove(ctx, index)
-
-    @commands.command(name="edit")
-    @commands.is_owner()
-    async def edit(
-        self,
-        ctx: commands.Context,
-        user: discord.User = commands.parameter(description="Member (mention or ID)."),
-        *,
-        filenames: str = commands.parameter(description="Datafile name(s); .json is optional."),
-    ):
-        """Set datafile(s) for a member's autocatch configs."""
-        if not ctx.guild:
-            await ctx.send(embed=error_embed("Server only."))
-            return
-
-        g_data = await get_global_data()
-        accounts = g_data.get("accounts", [])
-
-        user_tokens = [
-            token for token in accounts
-            if get_user_id_from_token(token) == user.id
-        ]
-
-        if not user_tokens:
-            await ctx.send(embed=error_embed(f"No accounts for {user.mention}."))
-            return
-
-        guild_id = str(ctx.guild.id)
-        configs = await get_guild_configs(guild_id)
-
-        if not configs:
-            await ctx.send(embed=error_embed("No configs in this server."))
-            return
-
-        raw_files = [f.strip() for f in filenames.replace(',', ' ').split() if f.strip()]
-        if not raw_files:
-            await send_usage(ctx, note="Give a datafile name.")
-            return
-
-        combined_files = " ".join([
-            f if f.lower().endswith(".json") else f"{f}.json"
-            for f in raw_files
-        ])
-
-        updated_count = 0
-        for cfg in configs:
-            cfg_tok = cfg.get("token")
-            if not cfg_tok and "accIndex" in cfg:
-                acc_idx = cfg["accIndex"]
-                if 1 <= acc_idx <= len(accounts):
-                    cfg_tok = accounts[acc_idx - 1]
-
-            if cfg.get("mode", "").lower() == "autocatch" and cfg_tok in user_tokens:
-                details = get_config_details(cfg)
-                details["datafile"] = combined_files
-                new_target, _ = build_target_string_for_mode("autocatch", details)
-                cfg["target"] = new_target
-                updated_count += 1
-
-        if updated_count > 0:
-            await save_guild_configs(guild_id, configs)
-            await ctx.send(embed=success_embed(
-                f"Updated {updated_count} autocatch config(s) for {user.mention}: `{combined_files}`."
-            ))
-        else:
-            await ctx.send(embed=error_embed(
-                f"{user.mention} has no autocatch configs here."
-            ))
 
     @commands.command(name="pause", aliases=["p"])
     @commands.is_owner()
