@@ -113,7 +113,19 @@ BUSY_DELETE_AFTER_SECONDS = 5
 MAX_TOOL_ITERATIONS = 32       # limit for multi-step file edits
 TOOL_CALL_MAX_TOKENS = 4096    # budget for reasoning/tools
 CHAT_MAX_TOKENS = 1024
-REQUEST_TIMEOUT_SECONDS = 30   # Increased to 30s to allow free models sufficient time
+REQUEST_TIMEOUT_SECONDS = 25   # per attempt; a model that stalls is skipped instead of waited on
+MODEL_ATTEMPTS = 2             # tries per model for transient (429-upstream / 5xx) errors
+
+# Models are tried in this order. Override in config.json with e.g.
+#   "AI_CHATBOT_FALLBACK_MODELS": ["openrouter/free", "some/paid-model", "other/model:free"]
+# Put a cheap PAID model last (or first) for reliability - your keys have credits.
+# Unknown / removed model IDs (404) are skipped automatically.
+FALLBACK_MODELS = list(config.get("AI_CHATBOT_FALLBACK_MODELS") or [
+    "openrouter/free",
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3-super-120b-a12b:free"
+])
 
 SUBTASK_MAX_ITERATIONS = 6
 SUBTASK_MAX_TOKENS = 1024
@@ -145,6 +157,33 @@ def save_key_usage(usage_dict: dict):
             json.dump(data, f, indent=2)
     except Exception:
         pass
+
+
+def _is_timeout_error(err: str) -> bool:
+    return "didn't respond within" in err.lower()
+
+
+def _is_key_side_error(err: str) -> bool:
+    """Errors that a DIFFERENT API KEY can fix (bad key, no credits, per-key limit)."""
+    e = err.lower()
+    if any(f"({c})" in err for c in ("401", "402", "403")):
+        return True
+    # 429 that is NOT an upstream/provider-wide limit = this key's own limit.
+    if "(429)" in err and "upstream" not in e and "provider returned error" not in e:
+        return True
+    return False
+
+
+def _is_model_side_error(err: str) -> bool:
+    """Errors a different MODEL can fix (overloaded, upstream rate limit, 5xx, timeout)."""
+    e = err.lower()
+    return (
+        _is_timeout_error(err)
+        or "upstream" in e
+        or "provider returned error" in e
+        or "(429)" in err
+        or any(f"({c})" in err for c in ("500", "502", "503", "504", "529"))
+    )
 
 
 def split_message(text: str, limit: int = 2000) -> list[str]:
@@ -685,6 +724,7 @@ class AIChat(commands.Cog):
         tools: list | None,
         max_tokens: int,
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> dict:
         self._record_key_use(key)
         headers = {
@@ -694,13 +734,11 @@ class AIChat(commands.Cog):
             "X-Title": "Utilities Discord Bot Assistant",
         }
         
-        # Uses lightweight, high-availability free models as fallbacks
+        # One model per request. Fallback between models is handled in
+        # _call_openrouter_with_rotation, because OpenRouter's server-side
+        # "models" fallback never triggers when our client times out first.
         payload = {
-            "models": [
-                self.current_model,
-                "google/gemini-2.0-flash-lite-001:free",
-                "meta-llama/llama-3.1-8b-instruct:free",
-            ],
+            "model": model or self.current_model,
             "messages": messages,
             "max_tokens": max_tokens,
         }
@@ -744,52 +782,84 @@ class AIChat(commands.Cog):
         start_key: str | None = None,
         reasoning_effort: str | None = None,
     ) -> dict:
+        """Call OpenRouter, rotating KEYS only for key-side errors and rotating
+        MODELS for model-side errors (timeouts, upstream 429, 5xx).
+
+        Switching keys cannot fix an overloaded / upstream-rate-limited model,
+        and every failed attempt burns daily quota on that key, so we don't.
+        """
         api_keys = list(self.api_keys)  # snapshot: keys can be edited live via `.ai info`
+        n_keys = len(api_keys)
         start_key = start_key or api_keys[0]
         start_idx = api_keys.index(start_key) if start_key in api_keys else 0
-        n_keys = len(api_keys)
 
-        # Explicit client errors that switching keys can never fix.
-        NON_RETRYABLE_CODES = ("400", "404")
-
-        # Try keys with remaining quota first (in round-robin order starting at
-        # start_idx), then fall back to quota-exhausted keys as a last resort.
+        # Keys with remaining quota first (round-robin from start_idx), then the rest.
         ordered = [(start_idx + offset) % n_keys for offset in range(n_keys)]
-        attempt_order = [i for i in ordered if self._key_has_quota(api_keys[i])]
-        attempt_order += [i for i in ordered if i not in attempt_order]
+        key_order = [i for i in ordered if self._key_has_quota(api_keys[i])]
+        key_order += [i for i in ordered if i not in key_order]
 
-        last_error = None
-        for attempt_num, key_idx in enumerate(attempt_order):
-            key = api_keys[key_idx]
-            is_last_attempt = attempt_num == len(attempt_order) - 1
+        # Preferred model first, then the fallbacks (deduplicated, order kept).
+        models: list[str] = []
+        for m in [self.current_model, *FALLBACK_MODELS]:
+            if m and m not in models:
+                models.append(m)
 
-            if not self._key_has_quota(key) and not is_last_attempt:
-                print(
-                    f"[Key Rotation] Key #{key_idx + 1} is at its daily limit "
-                    f"({self.key_usage_today[key]}/{self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)}); skipping."
-                )
-                continue
+        key_pos = 0          # index into key_order
+        dead_keys = 0        # keys that failed with a key-side error
+        last_error: RuntimeError | None = None
 
-            try:
-                data = await self._call_openrouter(key, messages, tools, max_tokens, reasoning_effort)
-                self.primary_key = key
-                return data
-            except RuntimeError as e:
-                last_error = e
-                err_str = str(e)
-                is_non_retryable = any(code in err_str for code in NON_RETRYABLE_CODES)
-                retryable = not is_non_retryable
+        for model in models:
+            model_attempts = 0
+            while model_attempts < MODEL_ATTEMPTS:
+                key_idx = key_order[key_pos % len(key_order)]
+                key = api_keys[key_idx]
 
-                if retryable and not is_last_attempt:
-                    next_key_idx = attempt_order[attempt_num + 1]
-                    print(
-                        f"[Key Rotation] Key #{key_idx + 1} failed ({err_str}). "
-                        f"Switching to key #{next_key_idx + 1}..."
+                try:
+                    data = await self._call_openrouter(
+                        key, messages, tools, max_tokens, reasoning_effort, model=model
                     )
-                    continue
-                raise e
+                    self.primary_key = key
+                    return data
+                except RuntimeError as e:
+                    last_error = e
+                    err = str(e)
 
-        raise last_error or RuntimeError("No OpenRouter API keys are configured.")
+                    # 1) Problem with this key -> try the next key, same model.
+                    if _is_key_side_error(err):
+                        dead_keys += 1
+                        if dead_keys >= len(key_order):
+                            raise
+                        key_pos += 1
+                        print(
+                            f"[Key Rotation] Key #{key_idx + 1} rejected ({err[:160]}). "
+                            f"Switching to key #{key_order[key_pos % len(key_order)] + 1}..."
+                        )
+                        continue
+
+                    # 2) Model doesn't exist / was removed -> skip it.
+                    if "(404)" in err:
+                        print(f"[Model Fallback] {model} unavailable (404); skipping.")
+                        break
+
+                    # 3) Stalled model -> don't wait again, move on immediately.
+                    if _is_timeout_error(err):
+                        print(f"[Model Fallback] {model} timed out; trying next model...")
+                        break
+
+                    # 4) Overloaded / upstream rate limit / 5xx -> one short retry, then next model.
+                    if _is_model_side_error(err):
+                        model_attempts += 1
+                        print(f"[Model Fallback] {model} busy ({err[:160]}).")
+                        if model_attempts < MODEL_ATTEMPTS:
+                            await asyncio.sleep(1.5)
+                        continue
+
+                    # 5) Anything else (e.g. 400 bad request) can't be fixed by retrying.
+                    raise
+
+        raise last_error or RuntimeError(
+            "All AI models are busy right now. Please try again in a minute."
+        )
 
     # -- prompt / tool definitions ------------------------------------------
 
