@@ -49,8 +49,8 @@ class Pull(commands.Cog):
                 return
             await prog.ok("Fetched from origin")
 
-            # 3. Make sure tracking is set (this is what caused the original error)
-            await prog.start("Checking branch tracking...")
+            # 3. Make sure tracking is set and check commits behind
+            await prog.start("Checking branch tracking & status...")
             rc, _, _ = await run_cmd("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", timeout=30)
             if rc == 0:
                 await prog.ok("Branch tracking OK")
@@ -63,10 +63,18 @@ class Pull(commands.Cog):
                 else:
                     await prog.warn("Couldn't set tracking, pulling explicitly instead")
 
+            # Check how many commits behind local is compared to upstream
+            rc, behind_str, _ = await run_cmd("git", "rev-list", "--count", f"HEAD..origin/{branch}", timeout=30)
+            commits_behind = int(behind_str.strip()) if rc == 0 and behind_str.strip().isdigit() else 0
+
+            # Get the latest commit message from remote
+            rc, commit_msg, _ = await run_cmd("git", "log", "-1", "--format=%s", f"origin/{branch}", timeout=30)
+            latest_commit_msg = commit_msg.strip() if rc == 0 else "No commit message found"
+
             # 4. Update the working tree
             if mode.lower() == "hard":
                 # Mirror GitHub exactly: discards local changes to tracked files
-                await prog.start(f"Resetting to `origin/{branch}` (discarding local changes)...")
+                await prog.start(f"Resetting to `origin/{branch}` ({commits_behind} commit(s) behind)...")
                 rc, out, err = await run_cmd("git", "reset", "--hard", f"origin/{branch}", timeout=60)
                 if rc != 0:
                     await prog.fail("Hard reset failed", err or out)
@@ -86,7 +94,7 @@ class Pull(commands.Cog):
                     await prog.ok("Stashed local changes (recover with `git stash pop`)")
 
                 # Explicit remote + branch, so it works with or without tracking
-                await prog.start("Pulling latest changes...")
+                await prog.start(f"Pulling {commits_behind} commit(s) behind...")
                 rc, out, err = await run_cmd("git", "pull", "--ff-only", "origin", branch, timeout=180)
                 if rc != 0:
                     await prog.fail(
@@ -100,7 +108,7 @@ class Pull(commands.Cog):
             if old_commit == new_commit and not force:
                 await prog.ok("Already up to date, no restart needed")
                 return
-            await prog.ok(f"Pulled `{old_commit}` → `{new_commit}`")
+            await prog.ok(f"Pulled `{old_commit}` → `{new_commit}` ({commits_behind} commit(s) behind)\n📝 Latest commit: *{latest_commit_msg}*")
 
             # 5. Save message info to MongoDB
             await prog.start("Saving restart state to MongoDB...")
@@ -112,6 +120,8 @@ class Pull(commands.Cog):
                 "guild_id": ctx.guild.id if ctx.guild else None,
                 "old_commit": old_commit,
                 "new_commit": new_commit,
+                "commits_behind": commits_behind,
+                "latest_commit_msg": latest_commit_msg,
                 "branch": branch,
                 "started_at": started_at,
                 "progress": "\n".join(preview),
