@@ -38,7 +38,7 @@ def _label(category: str) -> str:
 
 @config_group.command(
     name="autolock",
-    aliases=["a", "al"],
+    aliases=["al"],
     description="Configure autolocks.",
 )
 @commands.has_permissions(administrator=True)
