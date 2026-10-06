@@ -44,7 +44,6 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     config = json.load(f)
 
 PROJECT_ROOT = os.path.dirname(CONFIG_PATH)
-USAGE_FILE_PATH = os.path.join(PROJECT_ROOT, "key_usage.json")
 
 BOT_PREFIX = config.get("PREFIX", "!")
 OWNER_IDS = set(config.get("OWNER_IDS", []))
@@ -79,25 +78,11 @@ else:
     KEY_ACCOUNT_IDS = [f"key{i + 1}" for i in range(len(OPENROUTER_API_KEYS))]
 
 # --- Per-key daily request limits ---------------------------------------
-# OpenRouter's free-model daily cap is 50 requests/day per key by default,
-# or 1000 requests/day once that key's account has ever purchased >= $10 of
-# credits. Configure this per key in config.json, e.g.:
-#   "AI_CHATBOT_KEY_DAILY_LIMITS": [1000, 50, 50]
-# A single number applies to every key. If omitted, every key defaults to 50.
-DEFAULT_FREE_DAILY_LIMIT = 50
-
-_raw_key_limits = config.get("AI_CHATBOT_KEY_DAILY_LIMITS")
-if _raw_key_limits is not None:
-    if isinstance(_raw_key_limits, (int, float)):
-        _raw_key_limits = [int(_raw_key_limits)] * len(OPENROUTER_API_KEYS)
-    if len(_raw_key_limits) != len(OPENROUTER_API_KEYS):
-        raise ValueError(
-            "'AI_CHATBOT_KEY_DAILY_LIMITS' must have exactly one entry per key in "
-            "'AI_CHATBOT_KEYS' (same order, same length), or be a single number."
-        )
-    KEY_DAILY_LIMITS = [int(x) for x in _raw_key_limits]
-else:
-    KEY_DAILY_LIMITS = [DEFAULT_FREE_DAILY_LIMIT] * len(OPENROUTER_API_KEYS)
+# Nothing to configure: each key's real free-model quota (50/day, or 1000/day
+# once the account has bought >= $10 of credits) is fetched live from
+# OpenRouter's /key endpoint and cached briefly.
+QUOTA_CACHE_TTL_SECONDS = 60       # how long a fetched quota is trusted
+QUOTA_FETCH_TIMEOUT_SECONDS = 5    # per-key timeout for the quota lookup
 
 # MongoDB location of the per-server AI channel whitelist (same DB as dex.py).
 AI_DB_NAME = "utilities"
@@ -132,32 +117,8 @@ SUBTASK_MAX_TOKENS = 1024
 
 
 # ---------------------------------------------------------------------------
-# Persistent Key Usage Helpers
+# Error classification helpers
 # ---------------------------------------------------------------------------
-
-def load_key_usage() -> defaultdict:
-    if os.path.exists(USAGE_FILE_PATH):
-        try:
-            with open(USAGE_FILE_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if data.get("date") == datetime.now(timezone.utc).date().isoformat():
-                    return defaultdict(int, data.get("usage", {}))
-        except Exception:
-            pass
-    return defaultdict(int)
-
-
-def save_key_usage(usage_dict: dict):
-    try:
-        data = {
-            "date": datetime.now(timezone.utc).date().isoformat(),
-            "usage": dict(usage_dict),
-        }
-        with open(USAGE_FILE_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
-
 
 def _is_timeout_error(err: str) -> bool:
     return "didn't respond within" in err.lower()
@@ -406,7 +367,6 @@ class AIChat(commands.Cog):
         self._worker_key_cycle_idx = 0
 
         self.key_account_id: dict[str, str] = dict(zip(self.api_keys, KEY_ACCOUNT_IDS))
-        self.key_daily_limit: dict[str, int] = dict(zip(self.api_keys, KEY_DAILY_LIMITS))
 
         self.current_model = "openrouter/free"
         # Memory is keyed by (channel_id, user_id): every user gets their own
@@ -420,8 +380,9 @@ class AIChat(commands.Cog):
         self._active_users: set[int] = set()
         self._bg_tasks: set[asyncio.Task] = set()
 
-        self.last_usage_reset_date = datetime.now(timezone.utc).date()
-        self.key_usage_today = load_key_usage()
+        # key -> (fetched_at, used, limit): live free-model quota from OpenRouter.
+        # (None, None) means "couldn't find out", which is treated as "has quota".
+        self.key_quota_cache: dict[str, tuple[float, int | None, int | None]] = {}
         self.key_rate_limit_snapshot: dict[str, dict] = {}
         self.session: aiohttp.ClientSession | None = None
 
@@ -518,7 +479,7 @@ class AIChat(commands.Cog):
         return make_embed(title="🤖 AI Configuration", description=description)
 
     # -- API key management (used by `.ai info` / AIInfoView) -----------------------
-    # Keys live in config.json (AI_CHATBOT_KEYS / _KEY_ACCOUNTS / _KEY_DAILY_LIMITS).
+    # Keys live in config.json (AI_CHATBOT_KEYS / AI_CHATBOT_KEY_ACCOUNTS).
     # Every change is written to disk first and only then applied in memory, so a
     # failed write never leaves the running bot out of sync with the file.
     # User-facing problems are raised as ValueError; anything else is unexpected.
@@ -540,13 +501,13 @@ class AIChat(commands.Cog):
             raise ValueError(f"Account names can be at most {cls.MAX_ACCOUNT_NAME_LENGTH} characters.")
         return name
 
-    def _write_key_config(self, keys: list[str], accounts: list[str], limits: list[int]) -> None:
+    def _write_key_config(self, keys: list[str], accounts: list[str]) -> None:
         """Rewrites the key fields in config.json (re-read first so other fields are never clobbered)."""
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         data["AI_CHATBOT_KEYS"] = keys
         data["AI_CHATBOT_KEY_ACCOUNTS"] = accounts
-        data["AI_CHATBOT_KEY_DAILY_LIMITS"] = limits
+        data.pop("AI_CHATBOT_KEY_DAILY_LIMITS", None)  # obsolete: limits are fetched live now
 
         tmp_path = CONFIG_PATH + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -569,31 +530,27 @@ class AIChat(commands.Cog):
         self,
         keys: list[str],
         accounts: list[str],
-        limits: list[int],
         renamed: dict[str, str] | None = None,
     ) -> None:
-        await asyncio.to_thread(self._write_key_config, keys, accounts, limits)
+        await asyncio.to_thread(self._write_key_config, keys, accounts)
 
         primary = (renamed or {}).get(self.primary_key, self.primary_key)
         self.api_keys = keys
         self.key_account_id = dict(zip(keys, accounts))
-        self.key_daily_limit = dict(zip(keys, limits))
         self.primary_key = primary if primary in keys else keys[0]
         self.worker_keys = keys[1:] if len(keys) > 1 else keys
         self._worker_key_cycle_idx = 0
 
-        # Forget usage / rate-limit data of keys that no longer exist.
-        for stale in [k for k in self.key_usage_today if k not in self.key_account_id]:
-            del self.key_usage_today[stale]
+        # Forget quota / rate-limit data of keys that no longer exist.
+        for stale in [k for k in self.key_quota_cache if k not in self.key_account_id]:
+            del self.key_quota_cache[stale]
         for stale in [k for k in self.key_rate_limit_snapshot if k not in self.key_account_id]:
             del self.key_rate_limit_snapshot[stale]
-        save_key_usage(self.key_usage_today)
 
-    def _current_key_rows(self) -> tuple[list[str], list[str], list[int]]:
+    def _current_key_rows(self) -> tuple[list[str], list[str]]:
         keys = list(self.api_keys)
         accounts = [self.key_account_id[k] for k in keys]
-        limits = [self.key_daily_limit.get(k, DEFAULT_FREE_DAILY_LIMIT) for k in keys]
-        return keys, accounts, limits
+        return keys, accounts
 
     async def add_api_key(self, key: str, account: str) -> int:
         """Adds a key to the pool. Returns its position (1-based)."""
@@ -608,11 +565,10 @@ class AIChat(commands.Cog):
         async with self._key_lock:
             if key in self.api_keys:
                 raise ValueError("That key is already in the pool.")
-            keys, accounts, limits = self._current_key_rows()
+            keys, accounts = self._current_key_rows()
             keys.append(key)
             accounts.append(account)
-            limits.append(DEFAULT_FREE_DAILY_LIMIT)
-            await self._commit_keys(keys, accounts, limits)
+            await self._commit_keys(keys, accounts)
             return len(keys)
 
     async def edit_api_key(self, key: str, new_key: str, new_account: str) -> list[str]:
@@ -627,7 +583,7 @@ class AIChat(commands.Cog):
             if key not in self.api_keys:
                 raise ValueError("That key no longer exists in the pool.")
             idx = self.api_keys.index(key)
-            keys, accounts, limits = self._current_key_rows()
+            keys, accounts = self._current_key_rows()
             changed: list[str] = []
 
             if new_key and new_key != key:
@@ -642,7 +598,7 @@ class AIChat(commands.Cog):
 
             if not changed:
                 return []
-            await self._commit_keys(keys, accounts, limits, renamed={key: keys[idx]})
+            await self._commit_keys(keys, accounts, renamed={key: keys[idx]})
             return changed
 
     async def delete_api_key(self, key: str) -> str:
@@ -655,8 +611,7 @@ class AIChat(commands.Cog):
             account = self.key_account_id.get(key, "unknown")
             keep = [k for k in self.api_keys if k != key]
             accounts = [self.key_account_id[k] for k in keep]
-            limits = [self.key_daily_limit.get(k, DEFAULT_FREE_DAILY_LIMIT) for k in keep]
-            await self._commit_keys(keep, accounts, limits)
+            await self._commit_keys(keep, accounts)
             return account
 
     async def cog_unload(self):
@@ -667,22 +622,46 @@ class AIChat(commands.Cog):
         if not await handle_common_error(ctx, error):
             raise error
 
-    def _check_daily_reset(self):
-        today = datetime.now(timezone.utc).date()
-        if today != self.last_usage_reset_date:
-            self.key_usage_today.clear()
-            self.last_usage_reset_date = today
-            save_key_usage(self.key_usage_today)
+    # -- live quota (fetched from OpenRouter, cached briefly) -------------------
 
-    def _record_key_use(self, key: str):
-        self._check_daily_reset()
-        self.key_usage_today[key] += 1
-        save_key_usage(self.key_usage_today)
+    async def _fetch_key_quota(self, key: str) -> tuple[int | None, int | None]:
+        """Returns (used, limit) of a key's free-model daily requests, or (None, None) if unknown."""
+        cached = self.key_quota_cache.get(key)
+        if cached and time.time() - cached[0] < QUOTA_CACHE_TTL_SECONDS:
+            return cached[1], cached[2]
 
-    def _key_has_quota(self, key: str) -> bool:
-        self._check_daily_reset()
-        limit = self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)
-        return self.key_usage_today[key] < limit
+        used = limit = None
+        try:
+            if self.session and not self.session.closed:
+                async with self.session.get(
+                    self.key_info_url,
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=aiohttp.ClientTimeout(total=QUOTA_FETCH_TIMEOUT_SECONDS),
+                ) as resp:
+                    if resp.status == 200:
+                        data = (await resp.json()).get("data") or {}
+                        fmdr = data.get("free_model_daily_requests") or {}
+                        used_raw, limit_raw = fmdr.get("used"), fmdr.get("limit")
+                        if used_raw is not None and limit_raw is not None:
+                            used, limit = int(used_raw), int(limit_raw)
+        except Exception:
+            used = limit = None
+
+        # Failures are cached too, so a flaky /key endpoint can't slow down every message.
+        self.key_quota_cache[key] = (time.time(), used, limit)
+        return used, limit
+
+    async def _key_has_quota(self, key: str) -> bool:
+        used, limit = await self._fetch_key_quota(key)
+        if used is None or limit is None:
+            return True  # unknown -> let OpenRouter decide; key rotation handles real 429s
+        return used < limit
+
+    def _bump_cached_usage(self, key: str) -> None:
+        """Counts a request we're about to send against the cached quota, so the cache stays fresh between lookups."""
+        cached = self.key_quota_cache.get(key)
+        if cached and cached[1] is not None:
+            self.key_quota_cache[key] = (cached[0], cached[1] + 1, cached[2])
 
     def _record_rate_limit_headers(self, key: str, headers) -> None:
         limit = headers.get("x-ratelimit-limit")
@@ -726,7 +705,7 @@ class AIChat(commands.Cog):
         reasoning_effort: str | None = None,
         model: str | None = None,
     ) -> dict:
-        self._record_key_use(key)
+        self._bump_cached_usage(key)
         headers = {
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
@@ -795,7 +774,8 @@ class AIChat(commands.Cog):
 
         # Keys with remaining quota first (round-robin from start_idx), then the rest.
         ordered = [(start_idx + offset) % n_keys for offset in range(n_keys)]
-        key_order = [i for i in ordered if self._key_has_quota(api_keys[i])]
+        has_quota = await asyncio.gather(*(self._key_has_quota(k) for k in api_keys))
+        key_order = [i for i in ordered if has_quota[i]]
         key_order += [i for i in ordered if i not in key_order]
 
         # Preferred model first, then the fallbacks (deduplicated, order kept).
@@ -1522,7 +1502,6 @@ class AIChat(commands.Cog):
 
     async def build_info_embed(self) -> discord.Embed:
         """Model status + live daily usage grouped by OpenRouter account (used by `.ai info`)."""
-        self._check_daily_reset()
         timeout = aiohttp.ClientTimeout(total=15)
 
         keys = list(self.api_keys)  # snapshot: the pool can be edited while we fetch
@@ -1574,14 +1553,10 @@ class AIChat(commands.Cog):
                 total_usage_live += fmdr.get("used") or 0
                 total_limit_live += fmdr.get("limit") or 0
             else:
-                # Fall back to the locally-tracked count/configured limit
-                # only for keys OpenRouter didn't return live data for.
                 unavailable_keys += 1
-                total_usage_live += self.key_usage_today[key]
-                total_limit_live += self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)
 
         usage_note = (
-            f" (`{unavailable_keys}` key(s) unreachable — using local estimate for those)"
+            f" (`{unavailable_keys}` key(s) unreachable — not counted)"
             if unavailable_keys else ""
         )
         embed.add_field(
