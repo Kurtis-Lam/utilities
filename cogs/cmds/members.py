@@ -9,7 +9,7 @@ from discord.ext import commands
 
 # Import ConfirmView from views/common.py
 from views.common import confirm
-from views.embeds import handle_common_error, ok_embed, err_embed, warn_embed, info_embed
+from views.embeds import handle_common_error, ok_embed, err_embed, warn_embed, info_embed, BRAND_COLOR
 from views.navigate import PaginatorView
 
 MAX_REASON_LENGTH = 500
@@ -74,6 +74,92 @@ class Members(commands.Cog):
         amount, unit = int(match.group(1)), match.group(2)
         multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
         return amount * multipliers[unit]
+
+    # ------------------------------------------------------------------
+    # User Info (.whois)
+    # ------------------------------------------------------------------
+
+    @commands.hybrid_command(
+        name="whois",
+        aliases=["userinfo", "ui"],
+        with_app_command=True,
+        description="Displays information about a server member or user."
+    )
+    @app_commands.describe(target="The member or user ID to look up.")
+    @commands.guild_only()
+    async def whois(
+        self,
+        ctx: commands.Context,
+        target: typing.Union[discord.Member, discord.User] = None,
+    ):
+        if target is None:
+            target = ctx.author
+
+        if isinstance(target, int):
+            member = ctx.guild.get_member(target)
+            if member:
+                target = member
+            else:
+                try:
+                    target = await self.bot.fetch_user(target)
+                except discord.NotFound:
+                    return await ctx.reply(
+                        embed=err_embed("User Not Found", "No user found with that ID."),
+                        mention_author=False
+                    )
+                except discord.HTTPException as e:
+                    return await ctx.reply(
+                        embed=err_embed("Error", f"Failed to fetch user: `{e}`"),
+                        mention_author=False
+                    )
+
+        embed = discord.Embed(
+            title=target.name,
+            color=BRAND_COLOR,
+        )
+
+        avatar_url = target.avatar.url if target.avatar else target.default_avatar.url
+        embed.set_thumbnail(url=avatar_url)
+
+        embed.add_field(name="User ID", value=f"`{target.id}`", inline=True)
+        embed.add_field(name="Display Name", value=f"{target.display_name}", inline=True)
+
+        created_ts = int(target.created_at.timestamp())
+        embed.add_field(
+            name="Account Created At",
+            value=f"<t:{created_ts}:F> (<t:{created_ts}:R>)",
+            inline=False,
+        )
+
+        if isinstance(target, discord.Member):
+            if target.joined_at:
+                joined_ts = int(target.joined_at.timestamp())
+                joined_val = f"<t:{joined_ts}:F> (<t:{joined_ts}:R>)"
+            else:
+                joined_val = "Unknown"
+
+            embed.add_field(
+                name="Joined Server At",
+                value=joined_val,
+                inline=False,
+            )
+
+            roles = [role.mention for role in reversed(target.roles) if not role.is_default()]
+            roles_str = ", ".join(roles) if roles else "None"
+
+            embed.add_field(
+                name=f"Roles [{len(roles)}]",
+                value=roles_str[:1024],
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Joined Server At",
+                value="Not a member of this server",
+                inline=False,
+            )
+
+        await ctx.reply(embed=embed, mention_author=False)
 
     # ------------------------------------------------------------------
     # Mute role (stored per server in MongoDB, set with .muterole)
