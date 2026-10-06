@@ -1066,7 +1066,7 @@ class AIChat(commands.Cog):
         embed.add_field(
             name="⚙️ Admin",
             value=(
-                f"`{p}ai config` (buttons: add / remove / clear)\n"
+                f"`{p}ai config`\n"
                 f"`{p}ai enable` / `{p}ai disable` (this channel)\n"
                 f"`{p}ai add|a <#channel> [...]`\n"
                 f"`{p}ai remove|r <#channel> [...]`"
