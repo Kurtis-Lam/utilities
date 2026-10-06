@@ -12,7 +12,6 @@ recognizer/traindata/
 
 firebase_key.json
 config.json
-key_usage.json
 opencode.json
 
 claude_skills.txt
