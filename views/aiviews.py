@@ -1,9 +1,12 @@
 """
-Views for `.ai config`: Add / Remove / Clear buttons for the AI channel whitelist.
+Views for the AI cog.
 
-The view is deliberately thin: all database work lives in the AIChat cog
-(`add_ai_channels`, `remove_ai_channels`, `clear_ai_channels`,
-`build_config_embed`), so this file only handles the UI.
+* `.ai config` (server administrators): Add / Remove / Clear buttons for the AI channel whitelist.
+* `.ai info`   (bot owner only): Add / Edit / Delete buttons for the OpenRouter API key pool.
+
+The views are deliberately thin: all database / config work lives in the AIChat cog
+(`add_ai_channels`, `add_api_key`, `edit_api_key`, `delete_api_key`, ...),
+so this file only handles the UI. The cog raises ValueError for user-facing problems.
 """
 import re
 from typing import Optional
@@ -187,3 +190,264 @@ class AIConfigView(BaseLayout):
             return
         text = f"🗑️ Cleared **{count}** AI channel(s)." if count else "⚠️ There are no AI channels to clear."
         await self._refresh(interaction, text)
+
+
+# ===========================================================================
+# `.ai info` — API key management (bot owner only)
+# ===========================================================================
+
+def _error_embed(text: str) -> discord.Embed:
+    return discord.Embed(description=f"❌ {text}", color=discord.Color.red())
+
+
+class AddKeyModal(discord.ui.Modal):
+    def __init__(self, info_view: "AIInfoView"):
+        super().__init__(title="Add API key")
+        self.info_view = info_view
+        self.key_input = discord.ui.TextInput(
+            label="OpenRouter API key",
+            placeholder="sk-or-v1-...",
+            required=True,
+            max_length=200,
+        )
+        self.account_input = discord.ui.TextInput(
+            label="Account name",
+            placeholder="Keys with the same account name are grouped together",
+            required=True,
+            max_length=50,
+        )
+        self.add_item(self.key_input)
+        self.add_item(self.account_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        cog = self.info_view.cog
+        try:
+            position = await cog.add_api_key(str(self.key_input.value), str(self.account_input.value))
+        except ValueError as e:
+            await interaction.followup.send(embed=_error_embed(str(e)), ephemeral=True)
+            return
+        except Exception as e:
+            print(f"AIInfoView: error adding key: {e}")
+            await interaction.followup.send(embed=_error_embed("Couldn't save the key (check console logs)."), ephemeral=True)
+            return
+
+        account = cog._clean_account_name(str(self.account_input.value))
+        await interaction.followup.send(
+            embed=discord.Embed(description=f"✅ Added **Key #{position}** to account **{account}**.", color=BRAND_COLOR),
+            ephemeral=True,
+        )
+        await self.info_view.refresh_message()
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        print(f"AddKeyModal error: {error}")
+        send = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+        await send(embed=_error_embed("Something went wrong. Please try again."), ephemeral=True)
+
+
+class EditKeyModal(discord.ui.Modal):
+    """Both fields are optional: leaving one blank keeps its current value."""
+
+    def __init__(self, info_view: "AIInfoView", key: str, position: int, account: str):
+        super().__init__(title=f"Edit Key #{position}")
+        self.info_view = info_view
+        self.key = key
+        self.position = position
+        self.key_input = discord.ui.TextInput(
+            label="New API key (blank = keep current)",
+            placeholder=f"Current key ends in ...{key[-4:]}",
+            required=False,
+            max_length=200,
+        )
+        self.account_input = discord.ui.TextInput(
+            label="New account name (blank = keep current)",
+            placeholder=f"Current: {account}"[:100],
+            required=False,
+            max_length=50,
+        )
+        self.add_item(self.key_input)
+        self.add_item(self.account_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        cog = self.info_view.cog
+        try:
+            changed = await cog.edit_api_key(self.key, str(self.key_input.value), str(self.account_input.value))
+        except ValueError as e:
+            await interaction.followup.send(embed=_error_embed(str(e)), ephemeral=True)
+            return
+        except Exception as e:
+            print(f"AIInfoView: error editing key: {e}")
+            await interaction.followup.send(embed=_error_embed("Couldn't save the changes (check console logs)."), ephemeral=True)
+            return
+
+        if not changed:
+            await interaction.followup.send(
+                embed=discord.Embed(description="⚠️ Nothing was changed.", color=BRAND_COLOR), ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            embed=discord.Embed(
+                description=f"✅ Updated {' and '.join(changed)} for **Key #{self.position}**.", color=BRAND_COLOR
+            ),
+            ephemeral=True,
+        )
+        await self.info_view.refresh_message()
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        print(f"EditKeyModal error: {error}")
+        send = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+        await send(embed=_error_embed("Something went wrong. Please try again."), ephemeral=True)
+
+
+class ConfirmDeleteView(discord.ui.View):
+    def __init__(self, info_view: "AIInfoView", key: str, position: int, account: str):
+        super().__init__(timeout=30)
+        self.info_view = info_view
+        self.key = key
+        self.position = position
+        self.account = account
+
+    @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="⏳ Deleting key...", view=None)
+        try:
+            await self.info_view.cog.delete_api_key(self.key)
+        except ValueError as e:
+            await interaction.edit_original_response(content=f"❌ {e}")
+            return
+        except Exception as e:
+            print(f"AIInfoView: error deleting key: {e}")
+            await interaction.edit_original_response(content="❌ Couldn't delete the key (check console logs).")
+            return
+
+        await interaction.edit_original_response(
+            content=f"✅ Deleted **Key #{self.position}** (account **{self.account}**, ended in `...{self.key[-4:]}`)."
+        )
+        await self.info_view.refresh_message()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled.", view=None)
+
+
+class KeyPickerView(discord.ui.View):
+    """Ephemeral dropdown to choose which key to edit or delete. Keys are never shown in full."""
+
+    MAX_OPTIONS = 25  # Discord's select-menu limit
+
+    def __init__(self, info_view: "AIInfoView", action: str):
+        super().__init__(timeout=60)
+        self.info_view = info_view
+        self.action = action
+        cog = info_view.cog
+        self.keys = list(cog.api_keys)[: self.MAX_OPTIONS]
+
+        options = []
+        for i, key in enumerate(self.keys):
+            account = cog.key_account_id.get(key, "unknown")
+            primary = " (primary)" if key == cog.primary_key else ""
+            options.append(
+                discord.SelectOption(
+                    label=f"Key #{i + 1} — {account}"[:100],
+                    description=f"Ends in ...{key[-4:]}{primary}"[:100],
+                    value=str(i),
+                )
+            )
+        self.select = discord.ui.Select(
+            placeholder=f"Choose a key to {action}...", options=options, min_values=1, max_values=1
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        index = int(self.select.values[0])
+        key = self.keys[index]
+        cog = self.info_view.cog
+        if key not in cog.api_keys:
+            await interaction.response.edit_message(content="❌ That key no longer exists.", view=None)
+            return
+        account = cog.key_account_id.get(key, "unknown")
+        position = index + 1
+
+        if self.action == "edit":
+            await interaction.response.send_modal(EditKeyModal(self.info_view, key, position, account))
+        else:
+            await interaction.response.edit_message(
+                content=(
+                    f"⚠️ Delete **Key #{position}** (account **{account}**, ends in `...{key[-4:]}`)?\n"
+                    "This can't be undone."
+                ),
+                view=ConfirmDeleteView(self.info_view, key, position, account),
+            )
+
+
+class AIInfoView(BaseLayout):
+    """Add / Edit / Delete / Refresh buttons shown inside the `.ai info` container (bot owner only)."""
+
+    def __init__(self, cog, author_id: int, embed: discord.Embed, timeout: float = 180.0):
+        super().__init__(author_id=author_id, timeout=timeout)
+        self.cog = cog
+        self.add_button = discord.ui.Button(label="Add Key", emoji="➕", style=discord.ButtonStyle.success)
+        self.edit_button = discord.ui.Button(label="Edit Key", emoji="✏️", style=discord.ButtonStyle.primary)
+        self.delete_button = discord.ui.Button(label="Delete Key", emoji="🗑️", style=discord.ButtonStyle.danger)
+        self.refresh_button = discord.ui.Button(label="Refresh", emoji="🔄", style=discord.ButtonStyle.secondary)
+        self.add_button.callback = self._on_add
+        self.edit_button.callback = self._on_edit
+        self.delete_button.callback = self._on_delete
+        self.refresh_button.callback = self._on_refresh
+        self.render(embed)
+
+    def render(self, embed: discord.Embed) -> None:
+        self.clear_items()
+        self.add_item(
+            container_from_embed(
+                embed,
+                discord.ui.ActionRow(self.add_button, self.edit_button, self.delete_button, self.refresh_button),
+            )
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await super().interaction_check(interaction):
+            return False
+        if not await self.cog.is_owner_user(interaction.user):
+            await interaction.response.send_message(
+                embed=discord.Embed(description="🚫 Only the bot owner can manage API keys.", color=discord.Color.red()),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def refresh_message(self) -> None:
+        """Rebuilds the info embed (live usage included) and redraws the main message in place."""
+        message = getattr(self, "message", None)
+        if message is None:
+            return
+        try:
+            self.render(await self.cog.build_info_embed())
+            await message.edit(view=self)
+        except Exception as e:
+            print(f"AIInfoView: failed to refresh info message: {e}")
+
+    # -- buttons ------------------------------------------------------------
+
+    async def _on_add(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddKeyModal(self))
+
+    async def _open_picker(self, interaction: discord.Interaction, action: str):
+        await interaction.response.send_message(
+            f"Which key do you want to {action}?", view=KeyPickerView(self, action), ephemeral=True
+        )
+
+    async def _on_edit(self, interaction: discord.Interaction):
+        await self._open_picker(interaction, "edit")
+
+    async def _on_delete(self, interaction: discord.Interaction):
+        await self._open_picker(interaction, "delete")
+
+    async def _on_refresh(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await self.refresh_message()

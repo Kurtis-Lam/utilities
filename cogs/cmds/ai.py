@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import traceback
@@ -12,7 +13,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from views.aiviews import AIConfigView
+from views.aiviews import AIConfigView, AIInfoView
 from views.common import ConfirmLayout
 from views.embeds import (
     BRAND_COLOR,
@@ -359,7 +360,8 @@ class AIChat(commands.Cog):
         self.openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
         self.key_info_url = "https://openrouter.ai/api/v1/key"
 
-        self.api_keys = OPENROUTER_API_KEYS
+        self.api_keys = list(OPENROUTER_API_KEYS)
+        self._key_lock = asyncio.Lock()  # serialises add / edit / delete of API keys
         self.primary_key = self.api_keys[0]
         self.worker_keys = self.api_keys[1:] if len(self.api_keys) > 1 else self.api_keys
         self._worker_key_cycle_idx = 0
@@ -475,6 +477,148 @@ class AIChat(commands.Cog):
         else:
             description = "Not enabled in any channel yet."
         return make_embed(title="🤖 AI Configuration", description=description)
+
+    # -- API key management (used by `.ai info` / AIInfoView) -----------------------
+    # Keys live in config.json (AI_CHATBOT_KEYS / _KEY_ACCOUNTS / _KEY_DAILY_LIMITS).
+    # Every change is written to disk first and only then applied in memory, so a
+    # failed write never leaves the running bot out of sync with the file.
+    # User-facing problems are raised as ValueError; anything else is unexpected.
+
+    MAX_ACCOUNT_NAME_LENGTH = 50
+
+    async def is_owner_user(self, user) -> bool:
+        return (await self.bot.is_owner(user)) or user.id in OWNER_IDS
+
+    @staticmethod
+    def _validate_key_format(key: str) -> None:
+        if len(key) < 10 or any(c.isspace() for c in key):
+            raise ValueError("That doesn't look like a valid API key.")
+
+    @classmethod
+    def _clean_account_name(cls, raw: str) -> str:
+        name = " ".join((raw or "").split())
+        if len(name) > cls.MAX_ACCOUNT_NAME_LENGTH:
+            raise ValueError(f"Account names can be at most {cls.MAX_ACCOUNT_NAME_LENGTH} characters.")
+        return name
+
+    def _write_key_config(self, keys: list[str], accounts: list[str], limits: list[int]) -> None:
+        """Rewrites the key fields in config.json (re-read first so other fields are never clobbered)."""
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["AI_CHATBOT_KEYS"] = keys
+        data["AI_CHATBOT_KEY_ACCOUNTS"] = accounts
+        data["AI_CHATBOT_KEY_DAILY_LIMITS"] = limits
+
+        tmp_path = CONFIG_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+            f.write("\n")
+        try:
+            shutil.copymode(CONFIG_PATH, tmp_path)
+            os.replace(tmp_path, CONFIG_PATH)
+        except OSError:
+            # e.g. config.json is a single-file Docker bind mount: replace isn't allowed, write in place.
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+                f.write("\n")
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    async def _commit_keys(
+        self,
+        keys: list[str],
+        accounts: list[str],
+        limits: list[int],
+        renamed: dict[str, str] | None = None,
+    ) -> None:
+        await asyncio.to_thread(self._write_key_config, keys, accounts, limits)
+
+        primary = (renamed or {}).get(self.primary_key, self.primary_key)
+        self.api_keys = keys
+        self.key_account_id = dict(zip(keys, accounts))
+        self.key_daily_limit = dict(zip(keys, limits))
+        self.primary_key = primary if primary in keys else keys[0]
+        self.worker_keys = keys[1:] if len(keys) > 1 else keys
+        self._worker_key_cycle_idx = 0
+
+        # Forget usage / rate-limit data of keys that no longer exist.
+        for stale in [k for k in self.key_usage_today if k not in self.key_account_id]:
+            del self.key_usage_today[stale]
+        for stale in [k for k in self.key_rate_limit_snapshot if k not in self.key_account_id]:
+            del self.key_rate_limit_snapshot[stale]
+        save_key_usage(self.key_usage_today)
+
+    def _current_key_rows(self) -> tuple[list[str], list[str], list[int]]:
+        keys = list(self.api_keys)
+        accounts = [self.key_account_id[k] for k in keys]
+        limits = [self.key_daily_limit.get(k, DEFAULT_FREE_DAILY_LIMIT) for k in keys]
+        return keys, accounts, limits
+
+    async def add_api_key(self, key: str, account: str) -> int:
+        """Adds a key to the pool. Returns its position (1-based)."""
+        key = (key or "").strip()
+        account = self._clean_account_name(account)
+        if not key:
+            raise ValueError("The API key can't be empty.")
+        self._validate_key_format(key)
+        if not account:
+            raise ValueError("The account name can't be empty.")
+
+        async with self._key_lock:
+            if key in self.api_keys:
+                raise ValueError("That key is already in the pool.")
+            keys, accounts, limits = self._current_key_rows()
+            keys.append(key)
+            accounts.append(account)
+            limits.append(DEFAULT_FREE_DAILY_LIMIT)
+            await self._commit_keys(keys, accounts, limits)
+            return len(keys)
+
+    async def edit_api_key(self, key: str, new_key: str, new_account: str) -> list[str]:
+        """
+        Edits one key. Blank `new_key` / `new_account` leave that field unchanged.
+        Returns what actually changed (empty list = nothing changed).
+        """
+        new_key = (new_key or "").strip()
+        new_account = self._clean_account_name(new_account)
+
+        async with self._key_lock:
+            if key not in self.api_keys:
+                raise ValueError("That key no longer exists in the pool.")
+            idx = self.api_keys.index(key)
+            keys, accounts, limits = self._current_key_rows()
+            changed: list[str] = []
+
+            if new_key and new_key != key:
+                self._validate_key_format(new_key)
+                if new_key in self.api_keys:
+                    raise ValueError("That key is already in the pool.")
+                keys[idx] = new_key
+                changed.append("API key")
+            if new_account and new_account != accounts[idx]:
+                accounts[idx] = new_account
+                changed.append("account name")
+
+            if not changed:
+                return []
+            await self._commit_keys(keys, accounts, limits, renamed={key: keys[idx]})
+            return changed
+
+    async def delete_api_key(self, key: str) -> str:
+        """Removes a key from the pool. Returns the account name it belonged to."""
+        async with self._key_lock:
+            if key not in self.api_keys:
+                raise ValueError("That key no longer exists in the pool.")
+            if len(self.api_keys) <= 1:
+                raise ValueError("You can't delete the last key. Add another one first.")
+            account = self.key_account_id.get(key, "unknown")
+            keep = [k for k in self.api_keys if k != key]
+            accounts = [self.key_account_id[k] for k in keep]
+            limits = [self.key_daily_limit.get(k, DEFAULT_FREE_DAILY_LIMIT) for k in keep]
+            await self._commit_keys(keep, accounts, limits)
+            return account
 
     async def cog_unload(self):
         if self.session and not self.session.closed:
@@ -600,9 +744,10 @@ class AIChat(commands.Cog):
         start_key: str | None = None,
         reasoning_effort: str | None = None,
     ) -> dict:
-        start_key = start_key or self.api_keys[0]
-        start_idx = self.api_keys.index(start_key) if start_key in self.api_keys else 0
-        n_keys = len(self.api_keys)
+        api_keys = list(self.api_keys)  # snapshot: keys can be edited live via `.ai info`
+        start_key = start_key or api_keys[0]
+        start_idx = api_keys.index(start_key) if start_key in api_keys else 0
+        n_keys = len(api_keys)
 
         # Explicit client errors that switching keys can never fix.
         NON_RETRYABLE_CODES = ("400", "404")
@@ -610,12 +755,12 @@ class AIChat(commands.Cog):
         # Try keys with remaining quota first (in round-robin order starting at
         # start_idx), then fall back to quota-exhausted keys as a last resort.
         ordered = [(start_idx + offset) % n_keys for offset in range(n_keys)]
-        attempt_order = [i for i in ordered if self._key_has_quota(self.api_keys[i])]
+        attempt_order = [i for i in ordered if self._key_has_quota(api_keys[i])]
         attempt_order += [i for i in ordered if i not in attempt_order]
 
         last_error = None
         for attempt_num, key_idx in enumerate(attempt_order):
-            key = self.api_keys[key_idx]
+            key = api_keys[key_idx]
             is_last_attempt = attempt_num == len(attempt_order) - 1
 
             if not self._key_has_quota(key) and not is_last_attempt:
@@ -1036,7 +1181,7 @@ class AIChat(commands.Cog):
             result.append(ch)
         return result
 
-    async def _require_admin(self, ctx: commands.Context) -> bool:
+    async def _require_admin(self, ctx: commands.Context, action: str = "add or remove AI channels") -> bool:
         """Sends an error and returns False unless this is a server and the author is an administrator."""
         if ctx.guild is None:
             await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"), mention_author=False)
@@ -1044,7 +1189,7 @@ class AIChat(commands.Cog):
         if not ctx.author.guild_permissions.administrator:
             await ctx.reply(embed=err_embed(
                 "Missing Permissions",
-                "Only **server administrators** can add or remove AI channels.",
+                f"Only **server administrators** can {action}.",
                 emoji="🚫",
             ), mention_author=False)
             return False
@@ -1082,18 +1227,15 @@ class AIChat(commands.Cog):
 
     @ai_group.command(
         name="config",
-        description="See which channels the AI chatbot is enabled in (administrators get Add / Remove / Clear buttons).",
+        description="Choose which channels the AI chatbot is enabled in (administrators only).",
     )
     async def ai_config(self, ctx: commands.Context):
-        if ctx.guild is None:
-            return await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"), mention_author=False)
+        if not await self._require_admin(ctx, "configure the AI chatbot"):
+            return
 
         embed = await self.build_config_embed(ctx.guild)
-        if ctx.author.guild_permissions.administrator:
-            view = AIConfigView(self, ctx.author.id, ctx.guild, embed)
-            view.message = await ctx.reply(view=view, mention_author=False)
-        else:
-            await ctx.reply(embed=embed, mention_author=False)
+        view = AIConfigView(self, ctx.author.id, ctx.guild, embed)
+        view.message = await ctx.reply(view=view, mention_author=False)
 
     @ai_group.command(name="enable", description="Enable the AI chatbot in the current channel (administrators only).")
     async def ai_enable(self, ctx: commands.Context):
@@ -1308,126 +1450,126 @@ class AIChat(commands.Cog):
         view = PaginatorView(pages, user_id=ctx.author.id)
         view.message = await ctx.reply(embed=pages[0], view=view, mention_author=False)
 
-    @ai_group.command(name="info", help="Owner only: displays model status, and daily usage grouped by OpenRouter account.")
-    @is_bot_owner()
-    async def ai_info(self, ctx: commands.Context):
+    async def build_info_embed(self) -> discord.Embed:
+        """Model status + live daily usage grouped by OpenRouter account (used by `.ai info`)."""
         self._check_daily_reset()
         timeout = aiohttp.ClientTimeout(total=15)
 
+        keys = list(self.api_keys)  # snapshot: the pool can be edited while we fetch
+        primary = self.primary_key
         account_groups: dict[str, list[int]] = defaultdict(list)
-        for idx, key in enumerate(self.api_keys):
-            account_groups[self.key_account_id[key]].append(idx)
-
-        total_accounts = len(account_groups)
+        for idx, key in enumerate(keys):
+            account_groups[self.key_account_id.get(key, "unknown")].append(idx)
 
         embed = discord.Embed(title="🤖 AI Key Pool & Usage Status", color=BRAND_COLOR)
         embed.add_field(name="Active Model", value=f"`{self.current_model}`", inline=False)
         embed.add_field(
             name="Configured Key Pool",
-            value=f"`{len(self.api_keys)}` total API key(s) across `{total_accounts}` account(s)",
+            value=f"`{len(keys)}` total API key(s) across `{len(account_groups)}` account(s)",
             inline=False,
         )
 
         session = self.session if self.session and not self.session.closed else aiohttp.ClientSession(timeout=timeout)
         close_session = session != self.session
 
+        async def fetch_one(key: str) -> dict:
+            try:
+                async with session.get(
+                    self.key_info_url, headers={"Authorization": f"Bearer {key}"}, timeout=timeout
+                ) as resp:
+                    if resp.status == 200:
+                        res = await resp.json()
+                        return res.get("data") or {}
+                    return {"_error": f"HTTP {resp.status}"}
+            except Exception as e:
+                return {"_error": str(e)}
+
         try:
-            # Fetch each key's real quota from OpenRouter first — the daily
-            # limit varies per account (e.g. 50 vs 1000 once $10+ has been
-            # spent), so totals below are summed from live data rather than
-            # assumed/configured defaults.
-            key_info: dict[str, dict] = {}
-            for key in self.api_keys:
-                headers = {"Authorization": f"Bearer {key}"}
-                try:
-                    async with session.get(self.key_info_url, headers=headers) as resp:
-                        if resp.status == 200:
-                            res = await resp.json()
-                            key_info[key] = res.get("data", {})
-                        else:
-                            key_info[key] = {"_error": f"HTTP {resp.status}"}
-                except Exception as e:
-                    key_info[key] = {"_error": str(e)}
-
-            total_usage_live = 0
-            total_limit_live = 0
-            unavailable_keys = 0
-            for key in self.api_keys:
-                info = key_info[key]
-                fmdr = info.get("free_model_daily_requests") if "_error" not in info else None
-                if fmdr and fmdr.get("limit") is not None:
-                    total_usage_live += fmdr.get("used") or 0
-                    total_limit_live += fmdr.get("limit") or 0
-                else:
-                    # Fall back to the locally-tracked count/configured limit
-                    # only for keys OpenRouter didn't return live data for.
-                    unavailable_keys += 1
-                    total_usage_live += self.key_usage_today[key]
-                    total_limit_live += self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)
-
-            usage_note = (
-                f" (`{unavailable_keys}` key(s) unreachable — using local estimate for those)"
-                if unavailable_keys else ""
-            )
-            embed.add_field(
-                name="Total Daily Usage",
-                value=f"`{total_usage_live} / {total_limit_live}` requests used today across all keys{usage_note}",
-                inline=False,
-            )
-
-            for acct_id, indices in account_groups.items():
-                fmdr = None
-                for i in indices:
-                    info = key_info[self.api_keys[i]]
-                    if "_error" not in info and info.get("free_model_daily_requests"):
-                        fmdr = info["free_model_daily_requests"]
-                        break
-
-                now_utc = datetime.now(timezone.utc)
-                next_reset = datetime.combine(
-                    now_utc.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
-                )
-                reset_ts = int(next_reset.timestamp())
-
-                if fmdr is not None:
-                    used = fmdr.get("used")
-                    limit = fmdr.get("limit")
-                    live_quota_line = (
-                        f"**Quota:** `{used} / {limit}` — "
-                        f"resets <t:{reset_ts}:R>"
-                    )
-                else:
-                    live_quota_line = (
-                        "**Live Quota (from OpenRouter):** unavailable right now"
-                    )
-
-                lines = [live_quota_line]
-
-                key_items = []
-                for i in indices:
-                    key = self.api_keys[i]
-                    data = key_info[key]
-                    role_tag = " 🟢 Primary" if key == self.primary_key else ""
-
-                    if "_error" in data:
-                        key_items.append(f"• Key #{i + 1}{role_tag} — ❌ {data['_error']}")
-                    else:
-                        label = data.get("label", "Unnamed Key")
-                        key_items.append(f"• Key #{i + 1}{role_tag} — `{label}`")
-
-                for i in range(0, len(key_items), 2):
-                    lines.append(" | ".join(key_items[i:i + 2]))
-
-                embed.add_field(
-                    name=f"📦 Account: {acct_id}  ({len(indices)} key{'s' if len(indices) != 1 else ''})",
-                    value="\n".join(lines),
-                    inline=False,
-                )
+            # Fetch each key's real quota from OpenRouter (concurrently) — the daily
+            # limit varies per account (e.g. 50 vs 1000 once $10+ has been spent),
+            # so totals are summed from live data rather than configured defaults.
+            results = await asyncio.gather(*(fetch_one(k) for k in keys))
+            key_info: dict[str, dict] = dict(zip(keys, results))
         finally:
             if close_session:
                 await session.close()
 
-        await ctx.reply(embed=embed, mention_author=False)
+        total_usage_live = 0
+        total_limit_live = 0
+        unavailable_keys = 0
+        for key in keys:
+            info = key_info[key]
+            fmdr = info.get("free_model_daily_requests") if "_error" not in info else None
+            if fmdr and fmdr.get("limit") is not None:
+                total_usage_live += fmdr.get("used") or 0
+                total_limit_live += fmdr.get("limit") or 0
+            else:
+                # Fall back to the locally-tracked count/configured limit
+                # only for keys OpenRouter didn't return live data for.
+                unavailable_keys += 1
+                total_usage_live += self.key_usage_today[key]
+                total_limit_live += self.key_daily_limit.get(key, DEFAULT_FREE_DAILY_LIMIT)
+
+        usage_note = (
+            f" (`{unavailable_keys}` key(s) unreachable — using local estimate for those)"
+            if unavailable_keys else ""
+        )
+        embed.add_field(
+            name="Total Daily Usage",
+            value=f"`{total_usage_live} / {total_limit_live}` requests used today across all keys{usage_note}",
+            inline=False,
+        )
+
+        now_utc = datetime.now(timezone.utc)
+        next_reset = datetime.combine(
+            now_utc.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        )
+        reset_ts = int(next_reset.timestamp())
+
+        for acct_id, indices in account_groups.items():
+            fmdr = None
+            for i in indices:
+                info = key_info[keys[i]]
+                if "_error" not in info and info.get("free_model_daily_requests"):
+                    fmdr = info["free_model_daily_requests"]
+                    break
+
+            if fmdr is not None:
+                live_quota_line = f"**Quota:** `{fmdr.get('used')} / {fmdr.get('limit')}` — resets <t:{reset_ts}:R>"
+            else:
+                live_quota_line = "**Live Quota (from OpenRouter):** unavailable right now"
+
+            lines = [live_quota_line]
+
+            key_items = []
+            for i in indices:
+                data = key_info[keys[i]]
+                role_tag = " 🟢 Primary" if keys[i] == primary else ""
+                if "_error" in data:
+                    key_items.append(f"• Key #{i + 1}{role_tag} — ❌ {data['_error']}")
+                else:
+                    key_items.append(f"• Key #{i + 1}{role_tag} — `{data.get('label', 'Unnamed Key')}`")
+
+            for i in range(0, len(key_items), 2):
+                lines.append(" | ".join(key_items[i:i + 2]))
+
+            embed.add_field(
+                name=f"📦 Account: {acct_id}  ({len(indices)} key{'s' if len(indices) != 1 else ''})",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        return embed
+
+    @ai_group.command(
+        name="info",
+        help="Owner only: view model status and daily usage, and add / edit / delete OpenRouter API keys.",
+    )
+    @is_bot_owner()
+    async def ai_info(self, ctx: commands.Context):
+        embed = await self.build_info_embed()
+        view = AIInfoView(self, ctx.author.id, embed)
+        view.message = await ctx.reply(view=view, mention_author=False)
 
     # -- main listener -------------------------------------------------------
 
