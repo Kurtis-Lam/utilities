@@ -164,6 +164,142 @@ class Messages(commands.Cog):
         except discord.HTTPException:
             return False
 
+    def _format_time_diff(self, delta_ms: float) -> str:
+        """Formats time difference nicely in ms, seconds, minutes, hours, or days."""
+        if delta_ms < 1000:
+            return f"{int(delta_ms)}ms"
+        
+        seconds = delta_ms / 1000.0
+        if seconds < 60:
+            return f"{seconds:.2f}s"
+        
+        minutes = seconds / 60.0
+        if minutes < 60:
+            m = int(minutes)
+            s = int(seconds % 60)
+            return f"{m}m {s}s"
+        
+        hours = minutes / 60.0
+        if hours < 24:
+            h = int(hours)
+            m = int(minutes % 60)
+            return f"{h}h {m}m"
+        
+        days = hours / 24.0
+        d = int(days)
+        h = int(hours % 24)
+        return f"{d}d {h}h"
+
+    @commands.hybrid_command(
+        name="timediff", 
+        aliases=["tdiff", "td"], 
+        description="Calculates the time difference between two messages."
+    )
+    @app_commands.describe(
+        msg1_ref="First message ID or link.",
+        msg2_ref="Second message ID or link."
+    )
+    async def timediff(
+        self, 
+        ctx, 
+        msg1_ref: typing.Optional[str] = commands.parameter(default=None, description="First message ID or link."),
+        msg2_ref: typing.Optional[str] = commands.parameter(default=None, description="Second message ID or link.")
+    ):
+        msg1 = None
+        msg2 = None
+
+        has_reply = bool(ctx.message and ctx.message.reference and ctx.message.reference.message_id)
+
+        # Helper check function for interactive responses
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        # Case 1: Provided both message arguments
+        if msg1_ref and msg2_ref:
+            msg1 = await self._fetch_target_message(ctx, msg1_ref)
+            msg2 = await self._fetch_target_message(ctx, msg2_ref)
+
+        # Case 2: Only 1 argument provided
+        elif msg1_ref:
+            if has_reply:
+                try:
+                    ref = ctx.message.reference
+                    ref_ch = ctx.guild.get_channel(ref.channel_id) or ctx.channel
+                    msg1 = await ref_ch.fetch_message(ref.message_id)
+                except (discord.NotFound, discord.HTTPException):
+                    msg1 = None
+                msg2 = await self._fetch_target_message(ctx, msg1_ref)
+            else:
+                msg1 = await self._fetch_target_message(ctx, msg1_ref)
+                if msg1:
+                    prompt = await ctx.reply("Please reply to or type the **second** message ID / link.", mention_author=False)
+                    try:
+                        reply_msg = await self.bot.wait_for("message", check=check, timeout=30.0)
+                        ref_id = reply_msg.reference.message_id if reply_msg.reference else None
+                        input_target = str(ref_id) if ref_id else reply_msg.content.strip()
+                        msg2 = await self._fetch_target_message(ctx, input_target)
+                    except asyncio.TimeoutError:
+                        return await prompt.edit(embed=err_embed("Timed Out", "You took too long to provide the second message."))
+
+        # Case 3: No arguments provided
+        else:
+            if has_reply:
+                try:
+                    ref = ctx.message.reference
+                    ref_ch = ctx.guild.get_channel(ref.channel_id) or ctx.channel
+                    msg1 = await ref_ch.fetch_message(ref.message_id)
+                except (discord.NotFound, discord.HTTPException):
+                    msg1 = None
+
+                if msg1:
+                    prompt = await ctx.reply("Please reply to or type the **second** message ID / link.", mention_author=False)
+                    try:
+                        reply_msg = await self.bot.wait_for("message", check=check, timeout=30.0)
+                        ref_id = reply_msg.reference.message_id if reply_msg.reference else None
+                        input_target = str(ref_id) if ref_id else reply_msg.content.strip()
+                        msg2 = await self._fetch_target_message(ctx, input_target)
+                    except asyncio.TimeoutError:
+                        return await prompt.edit(embed=err_embed("Timed Out", "You took too long to provide the second message."))
+            else:
+                prompt1 = await ctx.reply("Please type the **first** message ID / link, or reply to a message with anything.", mention_author=False)
+                try:
+                    reply1 = await self.bot.wait_for("message", check=check, timeout=30.0)
+                    ref_id1 = reply1.reference.message_id if reply1.reference else None
+                    input_target1 = str(ref_id1) if ref_id1 else reply1.content.strip()
+                    msg1 = await self._fetch_target_message(ctx, input_target1)
+                except asyncio.TimeoutError:
+                    return await prompt1.edit(embed=err_embed("Timed Out", "You took too long to provide the first message."))
+
+                if msg1:
+                    prompt2 = await ctx.reply("Please type the **second** message ID / link, or reply to a message with anything.", mention_author=False)
+                    try:
+                        reply2 = await self.bot.wait_for("message", check=check, timeout=30.0)
+                        ref_id2 = reply2.reference.message_id if reply2.reference else None
+                        input_target2 = str(ref_id2) if ref_id2 else reply2.content.strip()
+                        msg2 = await self._fetch_target_message(ctx, input_target2)
+                    except asyncio.TimeoutError:
+                        return await prompt2.edit(embed=err_embed("Timed Out", "You took too long to provide the second message."))
+
+        if not msg1:
+            return await ctx.reply(embed=err_embed("First Message Not Found", "Could not find the first message specified."), mention_author=False)
+        if not msg2:
+            return await ctx.reply(embed=err_embed("Second Message Not Found", "Could not find the second message specified."), mention_author=False)
+
+        # Calculate difference using discord created_at timestamps (UTC datetime)
+        diff_seconds = abs((msg2.created_at - msg1.created_at).total_seconds())
+        diff_ms = diff_seconds * 1000.0
+        formatted_diff = self._format_time_diff(diff_ms)
+
+        # Order jump links chronologically
+        first_msg, second_msg = (msg1, msg2) if msg1.created_at <= msg2.created_at else (msg2, msg1)
+
+        embed = info_embed(
+            title="Time Difference",
+            description=f"`{formatted_diff}` between [Message 1]({first_msg.jump_url}) and [Message 2]({second_msg.jump_url})",
+            emoji="⏱️"
+        )
+        await ctx.reply(embed=embed, mention_author=False)
+
     @commands.hybrid_command(name="forward", aliases=["fwd"], description="Forwards a message to a channel (reply to a message or provide message ID and channel).")
     @app_commands.describe(
         target_or_msg="Target channel (if replying) OR message ID/link to forward.",
