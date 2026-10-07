@@ -1670,9 +1670,14 @@ class AIChat(commands.Cog):
 
     async def _send_result(self, message: discord.Message, text: str):
         """Sends the final answer as #0414c7 embed(s). Only the result is shown."""
+        timestamp = int(time.time())
+        model_name = self.current_model
+        footer_text = f"Generated <t:{timestamp}:R>, and model: {model_name}"
+
         chunks = split_message(text, EMBED_DESCRIPTION_LIMIT)
         for i, chunk in enumerate(chunks):
             embed = discord.Embed(description=chunk, color=BRAND_COLOR)
+            embed.set_footer(text=footer_text)
             if i == 0:
                 await message.reply(embed=embed)
             else:
