@@ -11,7 +11,7 @@ from firebase_admin import credentials, db
 from views.common import ConfirmLayout, error_embed, first_text, make_embed, success_embed
 from views.embeds import handle_command_error, send_usage
 from views.grinderview import ConfigView
-from .base import config_group
+from .baseconfigs import config_group
 
 # --- CONSTANTS ---
 VALID_MODES = ["autocatch", "spam", "dotcatch", "commaedit", "periodicmsg"]

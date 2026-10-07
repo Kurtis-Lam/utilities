@@ -3,7 +3,7 @@ import re
 import discord
 from discord.ext import commands
 
-from views.autolockview import (
+from views.autolock_views import (
     build_main_page,
     CATEGORY_LABELS,
     ALL_CATEGORIES,
@@ -19,7 +19,7 @@ from cogs.poketwo_helper.lockcommon import (
 )
 from views.common import error_embed
 from views.embeds import handle_command_error
-from .base import config_group
+from .baseconfigs import config_group
 
 
 def _default_category(category: str) -> dict:

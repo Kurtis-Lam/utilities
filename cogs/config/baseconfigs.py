@@ -23,9 +23,9 @@ async def config_group_error(ctx: commands.Context, error: Exception):
 
 
 async def setup(bot: commands.Bot):
-    await bot.load_extension("cogs.config.autolockconfig")
-    await bot.load_extension("cogs.config.grinder")
-    await bot.load_extension("cogs.config.joins")
-    await bot.load_extension("cogs.config.timer")
+    await bot.load_extension("cogs.config.autolock_config")
+    await bot.load_extension("cogs.config.grinder_config")
+    await bot.load_extension("cogs.config.joins_config")
+    await bot.load_extension("cogs.config.timer_config")
 
     bot.add_command(config_group)

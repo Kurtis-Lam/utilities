@@ -1,3 +1,8 @@
+########################################################################
+# ORIGINAL IMPLEMENTATION OF AUTOLOCKING SYSTEM FOR POKETWO BOT SPAWNS #
+#    NO LONGER USED AFTER THE IMPLEMENTATION OF OUR OWN RECOGNIZER     #
+# ######################################################################
+
 import asyncio
 import discord
 from discord.ext import commands
@@ -5,7 +10,7 @@ from discord.ext import commands
 from views.common import error_embed, make_embed
 from views.embeds import handle_command_error
 from views.spawnsview import SpawnsConfigView
-from .base import config_group
+from .baseconfigs import config_group
 
 POKETWO_ID = 716390085896962058
 SENSOR_IDS = {874910942490677270, 854233015475109888, 1250429544486273038}

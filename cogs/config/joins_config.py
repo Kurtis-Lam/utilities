@@ -4,7 +4,7 @@ from discord.ext import commands
 from views.common import error_embed
 from views.embeds import handle_command_error
 from views.joinsview import WelcomeConfigView
-from .base import config_group
+from .baseconfigs import config_group
 
 
 # Attached to config_group at module level without 'self'

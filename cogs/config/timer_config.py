@@ -16,7 +16,7 @@ from views.timerview import (
     TIMER_NAMES,
     build_main_page,
 )
-from .base import config_group
+from .baseconfigs import config_group
 
 POKETWO_ID = 716390085896962058
 
