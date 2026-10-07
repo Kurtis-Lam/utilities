@@ -13,7 +13,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from views.aiviews import AIConfigView, AIInfoView
+from views.ai_views import AIConfigView, AIInfoView
 from views.common import ConfirmLayout
 from views.embeds import (
     BRAND_COLOR,

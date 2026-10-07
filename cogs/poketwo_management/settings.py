@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 
 from cogs.poketwo_helper.lockcommon import DEFAULT_DELAY
-from views.autolockview import ALL_CATEGORIES, CATEGORY_LABELS
+from views.autolock_views import ALL_CATEGORIES, CATEGORY_LABELS
 from views.embeds import commands_usage_embed, err_embed, handle_command_error
 
 

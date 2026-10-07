@@ -2,7 +2,7 @@ import asyncio
 
 import discord
 
-from views.autolockview import _parse_whitelist_items
+from views.autolock_views import _parse_whitelist_items
 from views.common import EmbedLayout, error_embed, success_embed
 
 # --- Shared UI constants ------------------------------------------------------
