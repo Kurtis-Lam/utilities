@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 
-from views.common import EMBED_COLOR, error_embed, warning_embed
+from views.common_views import EMBED_COLOR, error_embed, warning_embed
 from views.embeds import handle_command_error
 
 # Requires discord.py >= 2.6 (Components V2: LayoutView, Container, Section, ...)

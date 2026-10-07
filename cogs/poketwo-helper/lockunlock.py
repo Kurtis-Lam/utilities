@@ -5,7 +5,7 @@ import time
 import discord
 from discord.ext import commands
 
-from cogs.poketwo_helper.lockcommon import (
+from cogs.poketwo-helper.lockcommon import (
     POKETWO_ID,
     UNLOCK_COLOR,
     WARN_COLOR,

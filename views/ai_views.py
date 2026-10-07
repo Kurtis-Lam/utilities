@@ -11,7 +11,7 @@ from typing import Optional
 
 import discord
 
-from views.common import BaseLayout, container_from_embed
+from views.common_views import BaseLayout, container_from_embed
 from views.embeds import BRAND_COLOR
 
 _MENTION_RE = re.compile(r"^<#(\d+)>$")

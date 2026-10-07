@@ -4,7 +4,7 @@ import discord
 from discord import ui
 
 from cogs.config import grinder_config as config
-from views.common import (
+from views.common_views import (
     ConfirmLayout,
     EmbedLayout,
     error_embed,

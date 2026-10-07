@@ -8,9 +8,9 @@ from discord.ext import commands
 import firebase_admin
 from firebase_admin import credentials, db
 
-from views.common import ConfirmLayout, error_embed, first_text, make_embed, success_embed
+from views.common_views import ConfirmLayout, error_embed, first_text, make_embed, success_embed
 from views.embeds import handle_command_error, send_usage
-from views.grinderview import ConfigView
+from views.grinder_views import ConfigView
 from .baseconfigs import config_group
 
 # --- CONSTANTS ---

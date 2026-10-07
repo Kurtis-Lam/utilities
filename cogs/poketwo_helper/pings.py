@@ -6,7 +6,7 @@ from typing import List, Tuple, Optional
 import discord
 from discord.ext import commands
 
-from views.common import BaseView, EMBED_COLOR, error_embed, info_embed, make_embed, success_embed, warning_embed
+from views.common_views import BaseView, EMBED_COLOR, error_embed, info_embed, make_embed, success_embed, warning_embed
 from views.embeds import handle_command_error, send_usage
 
 # --- Navigation View Integration ----------------------------------------------

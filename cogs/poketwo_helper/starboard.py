@@ -9,7 +9,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from views.common import error_embed, success_embed
+from views.common_views import error_embed, success_embed
 from views.embeds import BRAND_COLOR, handle_command_error
 
 log = logging.getLogger(__name__)

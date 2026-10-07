@@ -17,7 +17,7 @@ from cogs.poketwo_helper.lockcommon import (
     resolve_category as _resolve_category,
     display_name as _display_name,
 )
-from views.common import error_embed
+from views.common_views import error_embed
 from views.embeds import handle_command_error
 from .baseconfigs import config_group
 

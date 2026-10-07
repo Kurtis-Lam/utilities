@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands
 from pymongo import ASCENDING, DESCENDING, UpdateOne
 
-from views.common import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed
+from views.common_views import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed
 from views.embeds import handle_command_error, send_usage
 
 POKETWO_ID = 716390085896962058

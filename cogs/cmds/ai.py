@@ -14,7 +14,7 @@ import discord
 from discord.ext import commands
 
 from views.ai_views import AIConfigView, AIInfoView
-from views.common import ConfirmLayout
+from views.common_views import ConfirmLayout
 from views.embeds import (
     BRAND_COLOR,
     err_embed,

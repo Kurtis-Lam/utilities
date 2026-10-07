@@ -2,7 +2,7 @@ import re
 
 import discord
 
-from views.common import (
+from views.common_views import (
     EmbedLayout,
     error_embed,
     success_embed,

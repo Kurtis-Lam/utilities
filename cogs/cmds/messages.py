@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 # Import ConfirmView from views/common.py
-from views.common import ConfirmView
+from views.common_views import ConfirmView
 from views.embeds import ok_embed, err_embed, info_embed, handle_common_error, send_usage
 
 

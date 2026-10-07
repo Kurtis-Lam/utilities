@@ -1,6 +1,6 @@
 import discord
 
-from views.common import BaseView
+from views.common_views import BaseView
 
 MAX_OPTIONS = 25  # Discord's hard limit for a select menu
 

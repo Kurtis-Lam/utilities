@@ -10,7 +10,7 @@ import aiohttp
 import discord    
 from discord.ext import commands    
 
-from views.common import EMBED_COLOR, error_embed
+from views.common_views import EMBED_COLOR, error_embed
 from views.embeds import handle_command_error, send_usage
 
 from .recognize import extract_pokemon_from_text, format_name    

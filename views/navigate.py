@@ -1,7 +1,7 @@
 import discord
 
 try:
-    from views.common import warning_embed
+    from views.common_views import warning_embed
 except ImportError:
     def warning_embed(description: str) -> discord.Embed:
         return discord.Embed(title="⚠️ Warning", description=description, color=discord.Color.gold())

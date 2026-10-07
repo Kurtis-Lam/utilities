@@ -1,9 +1,9 @@
 import discord
 from discord.ext import commands
 
-from views.common import error_embed
+from views.common_views import error_embed
 from views.embeds import handle_command_error
-from views.joinsview import WelcomeConfigView
+from views.joins_views import WelcomeConfigView
 from .baseconfigs import config_group
 
 

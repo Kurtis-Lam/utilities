@@ -4,7 +4,7 @@ import time
 
 import discord
 
-from views.common import one_line_embed
+from views.common_views import one_line_embed
 
 POKETWO_ID = 716390085896962058
 

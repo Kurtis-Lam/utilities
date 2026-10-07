@@ -20,7 +20,7 @@ import typing
 import discord
 from discord.ext import commands
 
-from views.common import BaseLayout, container_from_embed, one_line_embed
+from views.common_views import BaseLayout, container_from_embed, one_line_embed
 
 BRAND_COLOR = discord.Color(0x0414C7)
 SUCCESS_COLOR = discord.Color.green()

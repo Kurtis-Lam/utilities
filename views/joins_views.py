@@ -1,7 +1,7 @@
 import discord
 from discord.ui import Button, ChannelSelect, Modal, RoleSelect, TextInput
 
-from views.common import EmbedLayout, make_embed, success_embed
+from views.common_views import EmbedLayout, make_embed, success_embed
 
 TOTAL_PAGES = 3
 PLACEHOLDER_HELP = "{mention}  {username}  {display_name}  {server}  {membercount}"

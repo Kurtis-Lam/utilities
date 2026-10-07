@@ -6,8 +6,8 @@ from discord import app_commands
 from discord.ext import commands
 
 # Imports from views directory
-from views.categoriesview import CategorySelectView
-from views.common import confirm
+from views.categories_views import CategorySelectView
+from views.common_views import confirm
 from views.embeds import handle_common_error, send_usage
 from views.prompts import ask, is_skip, one_line
 

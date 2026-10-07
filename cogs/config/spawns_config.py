@@ -7,9 +7,9 @@ import asyncio
 import discord
 from discord.ext import commands
 
-from views.common import error_embed, make_embed
+from views.common_views import error_embed, make_embed
 from views.embeds import handle_command_error
-from views.spawnsview import SpawnsConfigView
+from views.spawns_views import SpawnsConfigView
 from .baseconfigs import config_group
 
 POKETWO_ID = 716390085896962058
