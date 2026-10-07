@@ -77,34 +77,24 @@ if _raw_key_accounts:
 else:
     KEY_ACCOUNT_IDS = [f"key{i + 1}" for i in range(len(OPENROUTER_API_KEYS))]
 
-# --- Per-key daily request limits ---------------------------------------
-# Nothing to configure: each key's real free-model quota (50/day, or 1000/day
-# once the account has bought >= $10 of credits) is fetched live from
-# OpenRouter's /key endpoint and cached briefly.
-QUOTA_CACHE_TTL_SECONDS = 60       # how long a fetched quota is trusted
-QUOTA_FETCH_TIMEOUT_SECONDS = 5    # per-key timeout for the quota lookup
+QUOTA_CACHE_TTL_SECONDS = 60
+QUOTA_FETCH_TIMEOUT_SECONDS = 5
 
-# MongoDB location of the per-server AI channel whitelist (same DB as dex.py).
 AI_DB_NAME = "utilities"
 AI_CHANNELS_COLLECTION = "aichannels"
 
-# Memory: messages kept per (channel, user), and characters per page of `.ai memory`.
 MAX_MEMORY_MESSAGES = 10
 MEMORY_PAGE_CHAR_LIMIT = 1500
 
 BUSY_REACTION = "⏳"
 BUSY_DELETE_AFTER_SECONDS = 5
 
-MAX_TOOL_ITERATIONS = 32       # limit for multi-step file edits
-TOOL_CALL_MAX_TOKENS = 4096    # budget for reasoning/tools
+MAX_TOOL_ITERATIONS = 32
+TOOL_CALL_MAX_TOKENS = 4096
 CHAT_MAX_TOKENS = 1024
-REQUEST_TIMEOUT_SECONDS = 25   # per attempt; a model that stalls is skipped instead of waited on
-MODEL_ATTEMPTS = 2             # tries per model for transient (429-upstream / 5xx) errors
+REQUEST_TIMEOUT_SECONDS = 25
+MODEL_ATTEMPTS = 2
 
-# Models are tried in this order. Override in config.json with e.g.
-#   "AI_CHATBOT_FALLBACK_MODELS": ["openrouter/free", "some/paid-model", "other/model:free"]
-# Put a cheap PAID model last (or first) for reliability - your keys have credits.
-# Unknown / removed model IDs (404) are skipped automatically.
 FALLBACK_MODELS = list(config.get("AI_CHATBOT_FALLBACK_MODELS") or [
     "openrouter/free",
     "google/gemma-4-26b-a4b-it:free",
@@ -125,18 +115,15 @@ def _is_timeout_error(err: str) -> bool:
 
 
 def _is_key_side_error(err: str) -> bool:
-    """Errors that a DIFFERENT API KEY can fix (bad key, no credits, per-key limit)."""
     e = err.lower()
     if any(f"({c})" in err for c in ("401", "402", "403")):
         return True
-    # 429 that is NOT an upstream/provider-wide limit = this key's own limit.
     if "(429)" in err and "upstream" not in e and "provider returned error" not in e:
         return True
     return False
 
 
 def _is_model_side_error(err: str) -> bool:
-    """Errors a different MODEL can fix (overloaded, upstream rate limit, 5xx, timeout)."""
     e = err.lower()
     return (
         _is_timeout_error(err)
@@ -168,12 +155,6 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
     return chunks
 
 
-# Some free/fallback models (e.g. DeepSeek-style) don't use a separate
-# "reasoning"/"thinking" field — they embed their chain-of-thought directly
-# inline in `content` using tags like <think>...</think>. Left alone, that
-# text leaks straight into the final Discord reply and makes the bot look
-# like it "keeps talking" after it's actually done. This strips any such
-# tags out of a content string and returns (thinking_text, cleaned_text).
 _THINK_TAG_RE = re.compile(r"<(think|thinking|reasoning)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
 
 
@@ -189,10 +170,6 @@ def extract_inline_thinking(content: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # LaTeX clean-up
 # ---------------------------------------------------------------------------
-# Discord can't render LaTeX, so models that answer with $$\frac{a}{b}$$ and
-# friends produce unreadable text. The system prompt tells the model not to do
-# that, and strip_latex() is the safety net: it finds math segments and turns
-# them into readable plain text with Unicode symbols.
 
 _LATEX_SYMBOLS = {
     "times": "×", "cdot": "·", "div": "÷", "approx": "≈", "pm": "±", "mp": "∓",
@@ -208,16 +185,14 @@ _LATEX_SYMBOLS = {
 }
 
 _SUPERSCRIPT = str.maketrans("0123456789+-=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ")
-_SUBSCRIPT = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+_SUBSCRIPT = str.maketrans("0123456789+-=()", "₀₁₂₃⁴⁵⁶₇₈₉₊₋₌₍₎")
 _SUPERSCRIPT_OK = set("0123456789+-=()n")
 _SUBSCRIPT_OK = set("0123456789+-=()")
 
 _LATEX_PATTERNS = [
-    re.compile(r"\$\$(.+?)\$\$", re.DOTALL),                # $$ ... $$
-    re.compile(r"\\\[(.+?)\\\]", re.DOTALL),                # \[ ... \]
-    re.compile(r"\\\((.+?)\\\)", re.DOTALL),                # \( ... \)
-    # Inline $ ... $ — only when it looks like math (contains \ ^ _ { } or =),
-    # so ordinary text like "costs $5 and $10" is left alone.
+    re.compile(r"\$\$(.+?)\$\$", re.DOTALL),
+    re.compile(r"\\\[(.+?)\\\]", re.DOTALL),
+    re.compile(r"\\\((.+?)\\\)", re.DOTALL),
     re.compile(r"(?<![\\$\w])\$(?![\s$])([^$\n]*?[\\^_{}=][^$\n]*?)(?<![\s$])\$(?![\w$])"),
 ]
 
@@ -249,7 +224,6 @@ def _latex_to_text(expr: str) -> str:
     for esc in ("%", "$", "&", "#", "_"):
         s = s.replace("\\" + esc, esc)
 
-    # Commands that take {arguments}. Innermost-first, repeated until stable.
     for _ in range(12):
         prev = s
         s = re.sub(r"\\[dt]?frac\{([^{}]*)\}\{([^{}]*)\}",
@@ -265,7 +239,6 @@ def _latex_to_text(expr: str) -> str:
     s = re.sub(r"\^(-?[0-9n])", lambda m: _latex_sup(re.match(r"(.*)", m.group(1))), s)
     s = re.sub(r"_\{([^{}]*)\}", _latex_sub, s)
 
-    # Named symbols (\times, \approx, ...). Unknown commands keep their name (\sin -> sin).
     s = re.sub(r"\\([A-Za-z]+)", lambda m: _LATEX_SYMBOLS.get(m.group(1), m.group(1)), s)
 
     s = s.replace("{", "").replace("}", "")
@@ -274,7 +247,6 @@ def _latex_to_text(expr: str) -> str:
 
 
 def strip_latex(text: str) -> str:
-    """Replaces LaTeX math segments in `text` with readable plain text."""
     if not text or ("\\" not in text and "$" not in text):
         return text
     for pattern in _LATEX_PATTERNS:
@@ -284,8 +256,7 @@ def strip_latex(text: str) -> str:
     return text
 
 
-# Embed descriptions can hold 4096 chars; stay a little under it.
-EMBED_DESCRIPTION_LIMIT = 4000
+EMBED_DESCRIPTION_LIMIT = 3800
 
 
 def format_duration(seconds: float) -> str:
@@ -297,13 +268,6 @@ def format_duration(seconds: float) -> str:
 
 
 class ThinkingStatus:
-    """
-    Shows a single #0414c7 embed while the AI works:
-      - while running:  "Thinking..." + a live Discord relative timestamp (<t:...:R>)
-      - when finished:  "Thought for N seconds" + a Discord timestamp of when it finished
-    The model's reasoning / tool-call steps are never displayed.
-    """
-
     def __init__(self, source_message: discord.Message):
         self.source = source_message
         self.status_msg: discord.Message | None = None
@@ -344,8 +308,6 @@ class ThinkingStatus:
 
 
 def is_bot_owner():
-    """Owner-only check: Discord application owner OR an id listed in config OWNER_IDS."""
-
     async def predicate(ctx: commands.Context) -> bool:
         if await ctx.bot.is_owner(ctx.author) or ctx.author.id in OWNER_IDS:
             return True
@@ -361,7 +323,7 @@ class AIChat(commands.Cog):
         self.key_info_url = "https://openrouter.ai/api/v1/key"
 
         self.api_keys = list(OPENROUTER_API_KEYS)
-        self._key_lock = asyncio.Lock()  # serialises add / edit / delete of API keys
+        self._key_lock = asyncio.Lock()
         self.primary_key = self.api_keys[0]
         self.worker_keys = self.api_keys[1:] if len(self.api_keys) > 1 else self.api_keys
         self._worker_key_cycle_idx = 0
@@ -369,24 +331,17 @@ class AIChat(commands.Cog):
         self.key_account_id: dict[str, str] = dict(zip(self.api_keys, KEY_ACCOUNT_IDS))
 
         self.current_model = "openrouter/free"
-        # Memory is keyed by (channel_id, user_id): every user gets their own
-        # memory in every channel, and resetting only touches one such slot.
         self.history: dict[tuple[int, int], list] = defaultdict(list)
         self.max_history = MAX_MEMORY_MESSAGES
 
-        # guild_id -> set of whitelisted channel ids (mirror of MongoDB).
         self.ai_channels: dict[int, set[int]] = {}
-        # Users with a request currently in flight (one request at a time).
         self._active_users: set[int] = set()
         self._bg_tasks: set[asyncio.Task] = set()
 
-        # key -> (fetched_at, used, limit): live free-model quota from OpenRouter.
-        # (None, None) means "couldn't find out", which is treated as "has quota".
         self.key_quota_cache: dict[str, tuple[float, int | None, int | None]] = {}
         self.key_rate_limit_snapshot: dict[str, dict] = {}
         self.session: aiohttp.ClientSession | None = None
 
-    # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
     @property
     def mongo_client(self):
         return self.bot.mongo_client
@@ -404,7 +359,6 @@ class AIChat(commands.Cog):
             print(f"AI Cog: MongoDB warmup or AI channel loading failed: {e}")
 
     async def load_ai_channels(self):
-        """Loads every server's whitelisted AI channels from MongoDB into memory."""
         loaded: dict[int, set[int]] = {}
         async for doc in self.channels_collection.find({}):
             try:
@@ -414,7 +368,6 @@ class AIChat(commands.Cog):
         self.ai_channels = loaded
 
     async def _fetch_guild_channels(self, guild_id: int) -> list[int]:
-        """Reads one server's whitelist straight from MongoDB (source of truth) and refreshes the cache."""
         doc = await self.channels_collection.find_one({"_id": guild_id})
         ids = [int(c) for c in doc.get("channels", [])] if doc else []
         self.ai_channels[guild_id] = set(ids)
@@ -424,10 +377,7 @@ class AIChat(commands.Cog):
         guild = getattr(channel, "guild", None)
         return bool(guild) and channel.id in self.ai_channels.get(guild.id, ())
 
-    # -- AI channel whitelist helpers (used by commands and by AIConfigView) --------
-
     async def add_ai_channels(self, guild_id: int, ids: list[int]) -> tuple[list[int], list[int]]:
-        """Whitelists channels. Returns (newly_added, already_enabled)."""
         existing = set(await self._fetch_guild_channels(guild_id))
         to_add = [i for i in ids if i not in existing]
         already = [i for i in ids if i in existing]
@@ -441,7 +391,6 @@ class AIChat(commands.Cog):
         return to_add, already
 
     async def remove_ai_channels(self, guild_id: int, ids: list[int]) -> tuple[list[int], list[int]]:
-        """Un-whitelists channels. Returns (removed, wasnt_enabled)."""
         existing = set(await self._fetch_guild_channels(guild_id))
         to_remove = [i for i in ids if i in existing]
         missing = [i for i in ids if i not in existing]
@@ -454,7 +403,6 @@ class AIChat(commands.Cog):
         return to_remove, missing
 
     async def clear_ai_channels(self, guild_id: int) -> int:
-        """Removes every AI channel for a server. Returns how many were removed."""
         existing = await self._fetch_guild_channels(guild_id)
         if existing:
             await self.channels_collection.update_one(
@@ -468,7 +416,6 @@ class AIChat(commands.Cog):
             channel_ids = await self._fetch_guild_channels(guild.id)
         except Exception as e:
             print(f"AI Cog: failed to fetch AI channels for guild {guild.id}: {e}")
-            # Fall back to the in-memory copy so the command still works.
             channel_ids = sorted(self.ai_channels.get(guild.id, set()))
 
         if channel_ids:
@@ -477,12 +424,6 @@ class AIChat(commands.Cog):
         else:
             description = "Not enabled in any channel yet."
         return make_embed(title="🤖 AI Configuration", description=description)
-
-    # -- API key management (used by `.ai info` / AIInfoView) -----------------------
-    # Keys live in config.json (AI_CHATBOT_KEYS / AI_CHATBOT_KEY_ACCOUNTS).
-    # Every change is written to disk first and only then applied in memory, so a
-    # failed write never leaves the running bot out of sync with the file.
-    # User-facing problems are raised as ValueError; anything else is unexpected.
 
     MAX_ACCOUNT_NAME_LENGTH = 50
 
@@ -502,12 +443,11 @@ class AIChat(commands.Cog):
         return name
 
     def _write_key_config(self, keys: list[str], accounts: list[str]) -> None:
-        """Rewrites the key fields in config.json (re-read first so other fields are never clobbered)."""
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         data["AI_CHATBOT_KEYS"] = keys
         data["AI_CHATBOT_KEY_ACCOUNTS"] = accounts
-        data.pop("AI_CHATBOT_KEY_DAILY_LIMITS", None)  # obsolete: limits are fetched live now
+        data.pop("AI_CHATBOT_KEY_DAILY_LIMITS", None)
 
         tmp_path = CONFIG_PATH + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -517,7 +457,6 @@ class AIChat(commands.Cog):
             shutil.copymode(CONFIG_PATH, tmp_path)
             os.replace(tmp_path, CONFIG_PATH)
         except OSError:
-            # e.g. config.json is a single-file Docker bind mount: replace isn't allowed, write in place.
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
                 f.write("\n")
@@ -541,7 +480,6 @@ class AIChat(commands.Cog):
         self.worker_keys = keys[1:] if len(keys) > 1 else keys
         self._worker_key_cycle_idx = 0
 
-        # Forget quota / rate-limit data of keys that no longer exist.
         for stale in [k for k in self.key_quota_cache if k not in self.key_account_id]:
             del self.key_quota_cache[stale]
         for stale in [k for k in self.key_rate_limit_snapshot if k not in self.key_account_id]:
@@ -553,7 +491,6 @@ class AIChat(commands.Cog):
         return keys, accounts
 
     async def add_api_key(self, key: str, account: str) -> int:
-        """Adds a key to the pool. Returns its position (1-based)."""
         key = (key or "").strip()
         account = self._clean_account_name(account)
         if not key:
@@ -572,10 +509,6 @@ class AIChat(commands.Cog):
             return len(keys)
 
     async def edit_api_key(self, key: str, new_key: str, new_account: str) -> list[str]:
-        """
-        Edits one key. Blank `new_key` / `new_account` leave that field unchanged.
-        Returns what actually changed (empty list = nothing changed).
-        """
         new_key = (new_key or "").strip()
         new_account = self._clean_account_name(new_account)
 
@@ -602,7 +535,6 @@ class AIChat(commands.Cog):
             return changed
 
     async def delete_api_key(self, key: str) -> str:
-        """Removes a key from the pool. Returns the account name it belonged to."""
         async with self._key_lock:
             if key not in self.api_keys:
                 raise ValueError("That key no longer exists in the pool.")
@@ -622,10 +554,7 @@ class AIChat(commands.Cog):
         if not await handle_common_error(ctx, error):
             raise error
 
-    # -- live quota (fetched from OpenRouter, cached briefly) -------------------
-
     async def _fetch_key_quota(self, key: str) -> tuple[int | None, int | None]:
-        """Returns (used, limit) of a key's free-model daily requests, or (None, None) if unknown."""
         cached = self.key_quota_cache.get(key)
         if cached and time.time() - cached[0] < QUOTA_CACHE_TTL_SECONDS:
             return cached[1], cached[2]
@@ -647,18 +576,16 @@ class AIChat(commands.Cog):
         except Exception:
             used = limit = None
 
-        # Failures are cached too, so a flaky /key endpoint can't slow down every message.
         self.key_quota_cache[key] = (time.time(), used, limit)
         return used, limit
 
     async def _key_has_quota(self, key: str) -> bool:
         used, limit = await self._fetch_key_quota(key)
         if used is None or limit is None:
-            return True  # unknown -> let OpenRouter decide; key rotation handles real 429s
+            return True
         return used < limit
 
     def _bump_cached_usage(self, key: str) -> None:
-        """Counts a request we're about to send against the cached quota, so the cache stays fresh between lookups."""
         cached = self.key_quota_cache.get(key)
         if cached and cached[1] is not None:
             self.key_quota_cache[key] = (cached[0], cached[1] + 1, cached[2])
@@ -676,8 +603,6 @@ class AIChat(commands.Cog):
             "observed_at": datetime.now(timezone.utc),
         }
 
-    # -- path safety -------------------------------------------------------
-
     def _resolve_path(self, relative_path: str) -> str:
         return os.path.abspath(os.path.join(PROJECT_ROOT, relative_path))
 
@@ -686,15 +611,11 @@ class AIChat(commands.Cog):
         root = os.path.abspath(PROJECT_ROOT)
         return abs_target == root or abs_target.startswith(root + os.sep)
 
-    # -- API key pool & rotation ---------------------------------------------
-
     def _next_worker_key(self) -> str:
         pool = self.worker_keys or [self.primary_key]
         key = pool[self._worker_key_cycle_idx % len(pool)]
         self._worker_key_cycle_idx += 1
         return key
-
-    # -- low-level OpenRouter call --------------------------------------------
 
     async def _call_openrouter(
         self,
@@ -713,9 +634,6 @@ class AIChat(commands.Cog):
             "X-Title": "Utilities Discord Bot Assistant",
         }
         
-        # One model per request. Fallback between models is handled in
-        # _call_openrouter_with_rotation, because OpenRouter's server-side
-        # "models" fallback never triggers when our client times out first.
         payload = {
             "model": model or self.current_model,
             "messages": messages,
@@ -761,31 +679,23 @@ class AIChat(commands.Cog):
         start_key: str | None = None,
         reasoning_effort: str | None = None,
     ) -> dict:
-        """Call OpenRouter, rotating KEYS only for key-side errors and rotating
-        MODELS for model-side errors (timeouts, upstream 429, 5xx).
-
-        Switching keys cannot fix an overloaded / upstream-rate-limited model,
-        and every failed attempt burns daily quota on that key, so we don't.
-        """
-        api_keys = list(self.api_keys)  # snapshot: keys can be edited live via `.ai info`
+        api_keys = list(self.api_keys)
         n_keys = len(api_keys)
         start_key = start_key or api_keys[0]
         start_idx = api_keys.index(start_key) if start_key in api_keys else 0
 
-        # Keys with remaining quota first (round-robin from start_idx), then the rest.
         ordered = [(start_idx + offset) % n_keys for offset in range(n_keys)]
         has_quota = await asyncio.gather(*(self._key_has_quota(k) for k in api_keys))
         key_order = [i for i in ordered if has_quota[i]]
         key_order += [i for i in ordered if i not in key_order]
 
-        # Preferred model first, then the fallbacks (deduplicated, order kept).
         models: list[str] = []
         for m in [self.current_model, *FALLBACK_MODELS]:
             if m and m not in models:
                 models.append(m)
 
-        key_pos = 0          # index into key_order
-        dead_keys = 0        # keys that failed with a key-side error
+        key_pos = 0
+        dead_keys = 0
         last_error: RuntimeError | None = None
 
         for model in models:
@@ -804,7 +714,6 @@ class AIChat(commands.Cog):
                     last_error = e
                     err = str(e)
 
-                    # 1) Problem with this key -> try the next key, same model.
                     if _is_key_side_error(err):
                         dead_keys += 1
                         if dead_keys >= len(key_order):
@@ -816,17 +725,14 @@ class AIChat(commands.Cog):
                         )
                         continue
 
-                    # 2) Model doesn't exist / was removed -> skip it.
                     if "(404)" in err:
                         print(f"[Model Fallback] {model} unavailable (404); skipping.")
                         break
 
-                    # 3) Stalled model -> don't wait again, move on immediately.
                     if _is_timeout_error(err):
                         print(f"[Model Fallback] {model} timed out; trying next model...")
                         break
 
-                    # 4) Overloaded / upstream rate limit / 5xx -> one short retry, then next model.
                     if _is_model_side_error(err):
                         model_attempts += 1
                         print(f"[Model Fallback] {model} busy ({err[:160]}).")
@@ -834,14 +740,11 @@ class AIChat(commands.Cog):
                             await asyncio.sleep(1.5)
                         continue
 
-                    # 5) Anything else (e.g. 400 bad request) can't be fixed by retrying.
                     raise
 
         raise last_error or RuntimeError(
             "All AI models are busy right now. Please try again in a minute."
         )
-
-    # -- prompt / tool definitions ------------------------------------------
 
     def generate_bot_capabilities_prompt(self, is_owner: bool) -> str:
         capabilities = ["Here is a summary of available server commands you can explain to users:\n"]
@@ -1039,8 +942,6 @@ class AIChat(commands.Cog):
         read_only_names = {"list_files", "read_file"}
         return [t for t in self.get_owner_tools() if t["function"]["name"] in read_only_names]
 
-    # -- tool execution -------------------------------------------------------
-
     async def execute_tool_call(self, tool_call: dict) -> str:
         fn_name = tool_call["function"]["name"]
         try:
@@ -1222,7 +1123,6 @@ class AIChat(commands.Cog):
 
     @staticmethod
     def _unique_mentioned_channels(ctx: commands.Context) -> list:
-        """Channel mentions from the invoking message, de-duplicated, in order, same server only."""
         seen, result = set(), []
         for ch in ctx.message.channel_mentions:
             if ch.id in seen or getattr(ch, "guild", None) != ctx.guild:
@@ -1232,7 +1132,6 @@ class AIChat(commands.Cog):
         return result
 
     async def _require_admin(self, ctx: commands.Context, action: str = "add or remove AI channels") -> bool:
-        """Sends an error and returns False unless this is a server and the author is an administrator."""
         if ctx.guild is None:
             await ctx.reply(embed=err_embed("Server Only", "This command can only be used in a server.", emoji="🚫"), mention_author=False)
             return False
@@ -1451,7 +1350,6 @@ class AIChat(commands.Cog):
         return content or "[empty]"
 
     def _build_memory_pages(self, history: list) -> list[discord.Embed]:
-        """Packs the stored messages into embed pages of at most MEMORY_PAGE_CHAR_LIMIT characters."""
         blocks = []
         for i, msg in enumerate(history, start=1):
             role = msg.get("role", "unknown")
@@ -1501,10 +1399,9 @@ class AIChat(commands.Cog):
         view.message = await ctx.reply(embed=pages[0], view=view, mention_author=False)
 
     async def build_info_embed(self) -> discord.Embed:
-        """Model status + live daily usage grouped by OpenRouter account (used by `.ai info`)."""
         timeout = aiohttp.ClientTimeout(total=15)
 
-        keys = list(self.api_keys)  # snapshot: the pool can be edited while we fetch
+        keys = list(self.api_keys)
         primary = self.primary_key
         account_groups: dict[str, list[int]] = defaultdict(list)
         for idx, key in enumerate(keys):
@@ -1534,9 +1431,6 @@ class AIChat(commands.Cog):
                 return {"_error": str(e)}
 
         try:
-            # Fetch each key's real quota from OpenRouter (concurrently) — the daily
-            # limit varies per account (e.g. 50 vs 1000 once $10+ has been spent),
-            # so totals are summed from live data rather than configured defaults.
             results = await asyncio.gather(*(fetch_one(k) for k in keys))
             key_info: dict[str, dict] = dict(zip(keys, results))
         finally:
@@ -1629,8 +1523,6 @@ class AIChat(commands.Cog):
         if message.content.startswith(BOT_PREFIX):
             return
 
-        # Rate limit: one in-flight request per user. The check and the add
-        # below have no `await` between them, so two rapid messages can't both slip through.
         user_id = message.author.id
         if user_id in self._active_users:
             task = asyncio.create_task(self._reject_busy(message))
@@ -1657,7 +1549,6 @@ class AIChat(commands.Cog):
             self._active_users.discard(user_id)
 
     async def _reject_busy(self, message: discord.Message):
-        """React with an hourglass, then delete the too-early message after a few seconds."""
         try:
             await message.add_reaction(BUSY_REACTION)
         except discord.HTTPException:
@@ -1666,18 +1557,20 @@ class AIChat(commands.Cog):
         try:
             await message.delete()
         except discord.HTTPException:
-            pass  # already deleted, or the bot lacks Manage Messages
+            pass
 
     async def _send_result(self, message: discord.Message, text: str):
-        """Sends the final answer as #0414c7 embed(s). Only the result is shown."""
-        formatted_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        model_name = self.current_model
-        footer_text = f"Generated {formatted_time}\nModel: {model_name}"
+        """Sends the final answer as #0414c7 embed(s) with timestamp & model info appended to the message text."""
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        meta_info = f"\n\n---\n🤖 **Model:** `{self.current_model}` | 🕒 <t:{now_ts}:f> (<t:{now_ts}:R>)"
 
         chunks = split_message(text, EMBED_DESCRIPTION_LIMIT)
         for i, chunk in enumerate(chunks):
+            # Append meta_info to the last chunk
+            if i == len(chunks) - 1:
+                chunk += meta_info
+
             embed = discord.Embed(description=chunk, color=BRAND_COLOR)
-            embed.set_footer(text=footer_text)
             if i == 0:
                 await message.reply(embed=embed)
             else:
@@ -1686,8 +1579,6 @@ class AIChat(commands.Cog):
     async def _handle_ai_message(self, message: discord.Message):
         memory_key = (message.channel.id, message.author.id)
 
-        # Single "Thinking..." embed with a live Discord timestamp; edited to
-        # "Thought for N seconds" when done. No reasoning/steps are displayed.
         status = ThinkingStatus(message)
         await status.start()
 
@@ -1776,9 +1667,6 @@ class AIChat(commands.Cog):
                 choice_message = choice["message"]
                 finish_reason = choice.get("finish_reason")
 
-                # Models may embed reasoning inline in `content` via <think> tags,
-                # or in a dedicated `reasoning`/`thinking` field. It is stripped
-                # and discarded here so only the real answer is ever shown.
                 raw_content = choice_message.get("content") or ""
                 _discarded_thinking, cleaned_content = extract_inline_thinking(raw_content)
                 choice_message["content"] = cleaned_content
@@ -1821,8 +1709,6 @@ class AIChat(commands.Cog):
                         })
                     continue
 
-                # `content` has already had any inline <think> tags stripped
-                # above, so this is purely the model's actual answer.
                 reply_text = choice_message.get("content") or ""
 
                 if mutation_happened:
@@ -1865,7 +1751,7 @@ class AIChat(commands.Cog):
                 break
             else:
                 await status.finish(success=False)
-                await message.reply(embed=warn_embed(
+                await message.reply(warn_embed(
                     "Iteration Limit",
                     "Task hit tool call iteration limits."
                 ))
