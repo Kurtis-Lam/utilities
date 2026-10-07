@@ -1562,7 +1562,7 @@ class AIChat(commands.Cog):
     async def _send_result(self, message: discord.Message, text: str):
         """Sends the final answer as #0414c7 embed(s) with timestamp & model info appended to the message text."""
         now_ts = int(datetime.now(timezone.utc).timestamp())
-        meta_info = f"\n\n---\n🤖 **Model:** `{self.current_model}` | 🕒 <t:{now_ts}:f> (<t:{now_ts}:R>)"
+        meta_info = f"\n\n--------------------------------------------------------------------------------\n**Model:** `{self.current_model}`, at <t:{now_ts}:f> (<t:{now_ts}:R>)"
 
         chunks = split_message(text, EMBED_DESCRIPTION_LIMIT)
         for i, chunk in enumerate(chunks):
