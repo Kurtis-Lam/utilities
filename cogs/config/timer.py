@@ -32,6 +32,18 @@ def _label(category: str) -> str:
     return TIMER_LABELS.get(category, category.upper())
 
 
+def _lock_whitelist_covers(channel, whitelist: list) -> bool:
+    """Same rule AutoLock uses: empty == nothing, '*' == whole server,
+    otherwise the channel itself or its category must be listed."""
+    if not whitelist:
+        return False
+    entries = {str(w) for w in whitelist}
+    if "*" in entries or str(channel.id) in entries:
+        return True
+    category_id = getattr(channel, "category_id", None)
+    return bool(category_id and str(category_id) in entries)
+
+
 @dataclass
 class ActiveTimer:
     category: str
@@ -278,6 +290,31 @@ class Timer(commands.Cog):
         cat_id = getattr(parent, "category_id", None)
         return bool(cat_id and str(cat_id) in wl)
 
+    async def _lock_active(
+        self,
+        guild: discord.Guild,
+        channel,
+        activated_categories: list[str],
+    ) -> bool:
+        """True if AutoLock would lock this channel for this spawn.
+
+        Mirrors AutoLock.process_autolock: a category counts when its effective
+        config (guild default + per-channel override) is enabled AND its lock
+        whitelist covers the channel.
+        """
+        config_cog = self.bot.get_cog("AutoLockConfig")
+        if config_cog is None:
+            return False
+
+        for cat in dict.fromkeys(activated_categories):
+            try:
+                cfg = await config_cog.get_category_config_channel(guild.id, channel.id, cat)
+            except Exception:
+                continue
+            if cfg.get("enabled", False) and _lock_whitelist_covers(channel, cfg.get("whitelist", [])):
+                return True
+        return False
+
     async def _non_afk_users(self, guild_id: int, category: str, uids: set[int]) -> set[int]:
         """Hunters who are NOT AFK. Uses SetAFK.format_ping_list (the same filter the
         ping lines use) and keeps the user ids that come back as mentions."""
@@ -305,6 +342,10 @@ class Timer(commands.Cog):
 
         # A fresh spawn replaces whatever timer was running in this channel.
         await self._finish(channel.id, delete=True)
+
+        # The only exception: if a lock is enabled for this channel, no timer.
+        if await self._lock_active(guild, channel, activated_categories):
+            return
 
         doc = await self.get_guild_config(guild.id)
 
