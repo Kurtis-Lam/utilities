@@ -1670,9 +1670,9 @@ class AIChat(commands.Cog):
 
     async def _send_result(self, message: discord.Message, text: str):
         """Sends the final answer as #0414c7 embed(s). Only the result is shown."""
-        timestamp = int(time.time())
+        formatted_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         model_name = self.current_model
-        footer_text = f"Generated <t:{timestamp}:R>, and model: {model_name}"
+        footer_text = f"Generated {formatted_time}\nModel: {model_name}"
 
         chunks = split_message(text, EMBED_DESCRIPTION_LIMIT)
         for i, chunk in enumerate(chunks):
