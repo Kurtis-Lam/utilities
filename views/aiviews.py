@@ -4,9 +4,7 @@ Views for the AI cog.
 * `.ai config` (server administrators): Add / Remove / Clear buttons for the AI channel whitelist.
 * `.ai info`   (bot owner only): Add / Edit / Delete buttons for the OpenRouter API key pool.
 
-The views are deliberately thin: all database / config work lives in the AIChat cog
-(`add_ai_channels`, `add_api_key`, `edit_api_key`, `delete_api_key`, ...),
-so this file only handles the UI. The cog raises ValueError for user-facing problems.
+All UI views, buttons, select menus, and modals are located here.
 """
 import re
 from typing import Optional
@@ -25,11 +23,6 @@ def parse_channels(
     """
     Turns text like `general, 123456789012345678, #bot-chat, <#987654321>`
     into (channel_ids, unrecognised_tokens).
-
-    Tokens are split on commas / whitespace. Each one may be a channel name,
-    a raw ID or a <#mention>. With `allow_unknown_ids` (used when removing),
-    raw IDs of channels that no longer exist are still accepted so stale
-    entries can be cleaned out.
     """
     ids: list[int] = []
     invalid: list[str] = []
@@ -127,10 +120,7 @@ class AIConfigView(BaseLayout):
             return False
         return True
 
-    # -- shared -----------------------------------------------------------
-
     async def _refresh(self, interaction: discord.Interaction, result_text: str):
-        """Redraws the config embed in place, then privately tells the user what happened."""
         embed = await self.cog.build_config_embed(self.guild)
         self.render(embed)
         result = discord.Embed(description=result_text, color=BRAND_COLOR)
@@ -169,8 +159,6 @@ class AIConfigView(BaseLayout):
             lines.append("⚠️ No channels were provided.")
 
         await self._refresh(interaction, "\n".join(lines))
-
-    # -- buttons ------------------------------------------------------------
 
     async def _on_add(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ChannelModal(self, "add"))
@@ -246,8 +234,6 @@ class AddKeyModal(discord.ui.Modal):
 
 
 class EditKeyModal(discord.ui.Modal):
-    """Both fields are optional: leaving one blank keeps its current value."""
-
     def __init__(self, info_view: "AIInfoView", key: str, position: int, account: str):
         super().__init__(title=f"Edit Key #{position}")
         self.info_view = info_view
@@ -335,9 +321,7 @@ class ConfirmDeleteView(discord.ui.View):
 
 
 class KeyPickerView(discord.ui.View):
-    """Ephemeral dropdown to choose which key to edit or delete. Keys are never shown in full."""
-
-    MAX_OPTIONS = 25  # Discord's select-menu limit
+    MAX_OPTIONS = 25
 
     def __init__(self, info_view: "AIInfoView", action: str):
         super().__init__(timeout=60)
@@ -422,7 +406,6 @@ class AIInfoView(BaseLayout):
         return True
 
     async def refresh_message(self) -> None:
-        """Rebuilds the info embed (live usage included) and redraws the main message in place."""
         message = getattr(self, "message", None)
         if message is None:
             return
@@ -431,8 +414,6 @@ class AIInfoView(BaseLayout):
             await message.edit(view=self)
         except Exception as e:
             print(f"AIInfoView: failed to refresh info message: {e}")
-
-    # -- buttons ------------------------------------------------------------
 
     async def _on_add(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AddKeyModal(self))
