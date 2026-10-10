@@ -32,12 +32,12 @@ async def spawnsconfig(ctx: commands.Context):
     
     # Optional safety check just in case the cog failed to load
     if cog is None:
-        return await ctx.send(embed=error_embed("SpawnsConfig is not loaded."))
+        return await ctx.reply(embed=error_embed("SpawnsConfig is not loaded."), mention_author=False)
 
     # Use the retrieved cog instead of ctx.cog
     embed = await cog.build_config_embed(ctx.guild)
     view = SpawnsConfigView(cog, author_id=ctx.author.id, embed=embed)
-    view.message = await ctx.send(view=view)
+    view.message = await ctx.reply(view=view, mention_author=False)
 
 
 @spawnsconfig.error
