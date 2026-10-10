@@ -31,7 +31,7 @@ class AFK(commands.Cog):
     @commands.hybrid_command(name="afk", aliases=["setafk"], description="Toggle AFK status and configure ping settings.")
     async def afk(self, ctx: commands.Context):
         if not ctx.guild:
-            return await ctx.send(embed=error_embed("Server only."))
+            return await ctx.reply(embed=error_embed("Server only."), mention_author=False)
 
         doc = await self.afk_collection.find_one({"_id": ctx.author.id})
         is_afk = bool(doc and doc.get("afk"))
@@ -42,7 +42,7 @@ class AFK(commands.Cog):
 
         view = AFKView(self, ctx.author.id, is_afk, current_settings)
         # Components V2: send only the view (no content/embed)
-        await ctx.send(view=view)
+        await ctx.reply(view=view, mention_author=False)
 
 
 async def setup(bot: commands.Bot):
