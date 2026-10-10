@@ -873,7 +873,7 @@ async def grindconfig(ctx: commands.Context):
     """Shows mode configurations for the current server."""
     if ctx.invoked_subcommand is None:
         if not ctx.guild:
-            await ctx.send(embed=error_embed("Server only."))
+            await ctx.reply(embed=error_embed("Server only."), mention_author=False)
             return
 
         guild_id = str(ctx.guild.id)
@@ -882,7 +882,7 @@ async def grindconfig(ctx: commands.Context):
         accounts = g_data.get("accounts", [])
 
         embed = await build_mode_configs_embed(ctx.guild, configs, accounts)
-        await ctx.send(view=ConfigView(page="modes", embed=embed))
+        await ctx.reply(view=ConfigView(page="modes", embed=embed), mention_author=False)
 
 
 @grindconfig.command(name="add", aliases=["a"])
@@ -896,27 +896,27 @@ async def grindconfig_add(
 ):
     """Add a mode configuration: .c g a {mode} {account index} {args separated by commas}"""
     if not ctx.guild:
-        await ctx.send(embed=error_embed("Server only."))
+        await ctx.reply(embed=error_embed("Server only."), mention_author=False)
         return
 
     mode_lower = mode.lower()
     if mode_lower not in VALID_MODES:
-        await ctx.send(embed=error_embed(
+        await ctx.reply(embed=error_embed(
             f"Invalid mode `{mode}`. Valid modes are: {', '.join([f'`{m}`' for m in VALID_MODES])}"
-        ))
+        ), mention_author=False)
         return
 
     g_data = await get_global_data()
     accounts = g_data.get("accounts", [])
 
     if not accounts:
-        await ctx.send(embed=error_embed("No accounts registered in global data."))
+        await ctx.reply(embed=error_embed("No accounts registered in global data."), mention_author=False)
         return
 
     if acc_idx < 1 or acc_idx > len(accounts):
-        await ctx.send(embed=error_embed(
+        await ctx.reply(embed=error_embed(
             f"Invalid account index #{acc_idx}. Valid account range is `1` to `{len(accounts)}`."
-        ))
+        ), mention_author=False)
         return
 
     token = accounts[acc_idx - 1]
@@ -924,15 +924,15 @@ async def grindconfig_add(
 
     # Validate mode-specific required arguments
     if mode_lower == "spam" and not arg_list:
-        await ctx.send(embed=error_embed("Missing required argument: Target / Channel ID for `spam` mode."))
+        await ctx.reply(embed=error_embed("Missing required argument: Target / Channel ID for `spam` mode."), mention_author=False)
         return
     elif mode_lower in ["dotcatch", "commaedit"] and not arg_list:
-        await ctx.send(embed=error_embed(f"Missing required argument: Channel ID for `{mode_lower}` mode."))
+        await ctx.reply(embed=error_embed(f"Missing required argument: Channel ID for `{mode_lower}` mode."), mention_author=False)
         return
     elif mode_lower == "periodicmsg" and len(arg_list) < 2:
-        await ctx.send(embed=error_embed(
+        await ctx.reply(embed=error_embed(
             "Missing required arguments for `periodicmsg` mode. Format: `{channel_id}, {message}, [time1], [time2]`"
-        ))
+        ), mention_author=False)
         return
 
     if mode_lower == "periodicmsg":
@@ -962,7 +962,7 @@ async def grindconfig_add(
     if target_str:
         desc += f"\n**Target/Args:** `{target_str}`"
 
-    await ctx.send(embed=success_embed(desc))
+    await ctx.reply(embed=success_embed(desc), mention_author=False)
 
 
 @grindconfig.command(name="remove", aliases=["r"])
@@ -973,18 +973,18 @@ async def grindconfig_remove(
 ):
     """Remove a mode configuration: .c g r {index}"""
     if not ctx.guild:
-        await ctx.send(embed=error_embed("Server only."))
+        await ctx.reply(embed=error_embed("Server only."), mention_author=False)
         return
 
     guild_id = str(ctx.guild.id)
     configs = await get_guild_configs(guild_id)
 
     if not configs:
-        await ctx.send(embed=error_embed("No configs in this server."))
+        await ctx.reply(embed=error_embed("No configs in this server."), mention_author=False)
         return
 
     if index < 1 or index > len(configs):
-        await ctx.send(embed=error_embed(f"Invalid index `#{index}`. Server has `{len(configs)}` config(s)."))
+        await ctx.reply(embed=error_embed(f"Invalid index `#{index}`. Server has `{len(configs)}` config(s)."), mention_author=False)
         return
 
     removed_cfg = configs.pop(index - 1)
@@ -1002,9 +1002,9 @@ async def grindconfig_remove(
     user_uid = get_user_id_from_token(tok) if tok else None
     user_mention = f"<@{user_uid}>" if user_uid else (f"Acc #{acc_idx}" if acc_idx > 0 else "Unknown Acc")
 
-    await ctx.send(embed=success_embed(
+    await ctx.reply(embed=success_embed(
         f"Removed config `[#{index}]` (`{mode}` | {user_mention} | Acc #{acc_idx})."
-    ))
+    ), mention_author=False)
 
 
 async def _config_command_error(ctx: commands.Context, error: Exception):
@@ -1065,14 +1065,14 @@ class GrinderCog(commands.Cog):
     ):
         """Pause configs (all, or the numbers you list)."""
         if not ctx.guild:
-            await ctx.send(embed=error_embed("Server only."))
+            await ctx.reply(embed=error_embed("Server only."), mention_author=False)
             return
 
         guild_id = str(ctx.guild.id)
         configs = await get_guild_configs(guild_id)
 
         if not configs:
-            await ctx.send(embed=error_embed("No configs in this server."))
+            await ctx.reply(embed=error_embed("No configs in this server."), mention_author=False)
             return
 
         indices, duration = parse_indices_and_duration(raw_args)
@@ -1094,11 +1094,11 @@ class GrinderCog(commands.Cog):
                     if idx not in target_indices:
                         target_indices.append(idx)
                 else:
-                    await ctx.send(embed=error_embed(f"Invalid index #{idx}. Max is {len(configs)}."))
+                    await ctx.reply(embed=error_embed(f"Invalid index #{idx}. Max is {len(configs)}."), mention_author=False)
                     return
 
         if not target_indices:
-            await ctx.send(embed=error_embed("No valid configs."))
+            await ctx.reply(embed=error_embed("No valid configs."), mention_author=False)
             return
 
         g_data = await get_global_data()
@@ -1143,7 +1143,7 @@ class GrinderCog(commands.Cog):
                 cancel_text="❌ Cancelled.",
                 timeout_text="⏰ Timed out.",
             )
-            await confirm_view.send(ctx, reply=False)
+            await confirm_view.send(ctx)
             await confirm_view.wait()
 
             if confirm_view.value is True:
@@ -1179,14 +1179,14 @@ class GrinderCog(commands.Cog):
         acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
 
         if duration:
-            await ctx.send(embed=make_embed(description=(
+            await ctx.reply(embed=make_embed(description=(
                 f"⏸ Paused Config **#{idx}** (`{mode}` | {acc_str}) for **{duration}** "
                 f"(resumes <t:{int(pause_until / 1000)}:R>)."
-            )))
+            )), mention_author=False)
         else:
-            await ctx.send(embed=make_embed(
+            await ctx.reply(embed=make_embed(
                 description=f"⏸️ Paused Config **#{idx}** (`{mode}` | {acc_str}) indefinitely."
-            ))
+            ), mention_author=False)
 
     @commands.command(name="resume", aliases=["r"])
     @commands.is_owner()
@@ -1198,14 +1198,14 @@ class GrinderCog(commands.Cog):
     ):
         """Resume configs (all, or the numbers you list)."""
         if not ctx.guild:
-            await ctx.send(embed=error_embed("Server only."))
+            await ctx.reply(embed=error_embed("Server only."), mention_author=False)
             return
 
         guild_id = str(ctx.guild.id)
         configs = await get_guild_configs(guild_id)
 
         if not configs:
-            await ctx.send(embed=error_embed("No configs in this server."))
+            await ctx.reply(embed=error_embed("No configs in this server."), mention_author=False)
             return
 
         indices, _ = parse_indices_and_duration(raw_args)
@@ -1219,11 +1219,11 @@ class GrinderCog(commands.Cog):
                     if idx not in target_indices:
                         target_indices.append(idx)
                 else:
-                    await ctx.send(embed=error_embed(f"Invalid index #{idx}. Max is {len(configs)}."))
+                    await ctx.reply(embed=error_embed(f"Invalid index #{idx}. Max is {len(configs)}."), mention_author=False)
                     return
 
         if not target_indices:
-            await ctx.send(embed=error_embed("No valid configs."))
+            await ctx.reply(embed=error_embed("No valid configs."), mention_author=False)
             return
 
         g_data = await get_global_data()
@@ -1266,7 +1266,7 @@ class GrinderCog(commands.Cog):
                 cancel_text="❌ Cancelled.",
                 timeout_text="⏰ Timed out.",
             )
-            await confirm_view.send(ctx, reply=False)
+            await confirm_view.send(ctx)
             await confirm_view.wait()
 
             if confirm_view.value is True:
@@ -1299,7 +1299,7 @@ class GrinderCog(commands.Cog):
                 tok = accounts[acc_idx - 1]
 
         acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
-        await ctx.send(embed=make_embed(description=f"▶️ Resumed Config **#{idx}** (`{mode}` | {acc_str})."))
+        await ctx.reply(embed=make_embed(description=f"▶️ Resumed Config **#{idx}** (`{mode}` | {acc_str})."), mention_author=False)
 
     @commands.command(name="syncguilds", aliases=["sg"])
     @commands.is_owner()
@@ -1318,7 +1318,7 @@ class GrinderCog(commands.Cog):
             return
 
         if from_id == to_id:
-            await ctx.send(embed=error_embed("IDs must differ."))
+            await ctx.reply(embed=error_embed("IDs must differ."), mention_author=False)
             return
 
         source_configs = await get_guild_configs(from_id)
@@ -1326,7 +1326,7 @@ class GrinderCog(commands.Cog):
         source_logs = await get_guild_logs(from_id)
 
         if not source_configs and not source_excludes and not source_logs:
-            await ctx.send(embed=error_embed(f"Nothing to sync from {from_id}."))
+            await ctx.reply(embed=error_embed(f"Nothing to sync from {from_id}."), mention_author=False)
             return
 
         if source_configs:
@@ -1343,9 +1343,9 @@ class GrinderCog(commands.Cog):
         if source_logs:
             await save_guild_logs(to_id, source_logs)
 
-        await ctx.send(embed=success_embed(
+        await ctx.reply(embed=success_embed(
             f"Synced configs (no SPAM), excludes and logs: `{from_id}` → `{to_id}`."
-        ))
+        ), mention_author=False)
 
 
 async def setup(bot: commands.Bot):
