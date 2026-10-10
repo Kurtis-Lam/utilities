@@ -70,7 +70,7 @@ async def safe_edit(msg, content: str):
 
 async def safe_send(ctx, *args, **kwargs):
     try:
-        return await ctx.send(*args, **kwargs)
+        return await ctx.reply(*args, **kwargs, mention_author=False)
     except Exception:
         return None
 
