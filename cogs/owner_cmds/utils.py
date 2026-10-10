@@ -1,7 +1,26 @@
 import asyncio
 import os
 
+from discord.ext import commands
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+class OwnerCog(commands.Cog):
+    """Base class for every owner_cmds cog.
+
+    The cog-level check runs before *any* command in the cog, so every command
+    (including ones added later) is owner-only. Owners come from "OWNER_IDS" in
+    config.json (loaded into ``bot.owner_ids`` by main.py).
+    """
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        if not await self.bot.is_owner(ctx.author):
+            raise commands.NotOwner("This command is for the bot owners only.")
+        return True
 
 
 async def run_cmd(*args: str, timeout: int = 120):
