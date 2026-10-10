@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 # Import ConfirmView from views/common.py
-from views.common_views import ConfirmView
+from views.common_views import ConfirmView, reply_or_send
 from views.embeds import ok_embed, err_embed, info_embed, handle_common_error, send_usage
 
 
@@ -527,10 +527,12 @@ class Messages(commands.Cog):
             count = len(deleted)
 
         target_str = f" from {user.display_name}" if user else ""
-        # Send a plain channel message because the invoking message was deleted in the purge
-        await ctx.send(
+        # Prefix invocations: the command message itself was purged, so reply_or_send
+        # falls back to a plain channel message. Slash invocations reply normally.
+        await reply_or_send(
+            ctx,
             embed=ok_embed("Messages Purged", f"Purged **{count}** message(s){target_str}.", emoji="🧹"),
-            delete_after=3
+            delete_after=3,
         )
 
     @commands.hybrid_command(name="pin", description="Pins a message (reply to a message or provide a message ID/link).")
