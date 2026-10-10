@@ -388,12 +388,12 @@ class Recognize(commands.Cog):
                     description=pings if pings else None,
                     color=EMBED_COLOR
                 )
-                await ctx.send(
+                await ctx.reply(
                     embed=embed,
-                    allowed_mentions=discord.AllowedMentions(roles=True, users=True)
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=True), mention_author=False
                 )
             except Exception as e:    
-                await ctx.send(embed=error_embed(f"Recognition failed: `{e}`"))    
+                await ctx.reply(embed=error_embed(f"Recognition failed: `{e}`"), mention_author=False)    
 
     @commands.Cog.listener()    
     async def on_message(self, message: discord.Message):    
@@ -509,12 +509,21 @@ class Recognize(commands.Cog):
         if len(self.pending_verifications) > self.max_predictions_cache:    
             self.pending_verifications.popitem(last=False)    
 
+        # Users really @mentioned in the ping message (role pings never match <@&id>);
+        # AutoLock hands these to LockDM. Nobody was pinged if the message couldn't be sent.
+        pinged_users = (
+            {int(uid) for uid in re.findall(r"<@!?(\d+)>", pings or "")} if detection_msg else set()
+        )
+        ping_url = detection_msg.jump_url if detection_msg else message.jump_url
+
         if self.autolock_cog and activated_categories:    
             task1 = asyncio.create_task(    
                 self.autolock_cog.process_autolock(    
                     channel=message.channel,     
                     activated_categories=activated_categories,    
                     category_users=category_users,    
+                    pinged_users=pinged_users,
+                    ping_url=ping_url,
                 )
             )
             self._background_tasks.add(task1)    
