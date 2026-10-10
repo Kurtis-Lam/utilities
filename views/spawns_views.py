@@ -5,6 +5,7 @@ import discord
 from views.common_views import (
     EmbedLayout,
     error_embed,
+    make_embed,
     success_embed,
     themed,
     warning_embed,
@@ -281,3 +282,51 @@ class SpawnsConfigView(EmbedLayout):
 
     async def refresh(self, interaction: discord.Interaction):
         await self.push(interaction, await self.cog.build_config_embed(interaction.guild))
+
+
+class UnlockView(discord.ui.LayoutView):
+    def __init__(self, cog=None, unlocked: bool = False):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.text = discord.ui.TextDisplay("")
+        self.button = discord.ui.Button(label="Unlock", style=discord.ButtonStyle.green)
+        self.button.callback = self.unlock
+        self.container = discord.ui.Container(
+            self.text,
+            discord.ui.Separator(),
+            discord.ui.ActionRow(self.button),
+        )
+        self.add_item(self.container)
+        self.apply_state(unlocked)
+
+    def apply_state(self, unlocked: bool):
+        if unlocked:
+            self.text.content = "## 🔓 Channel Unlocked"
+            self.container.accent_colour = discord.Color.green()
+            self.button.label = "Unlocked"
+            self.button.emoji = None
+            self.button.style = discord.ButtonStyle.secondary
+            self.button.disabled = True
+        else:
+            self.text.content = "## 🔒 Channel Locked\nUse `.u` or the button."
+            self.container.accent_colour = discord.Color.red()
+            self.button.label = "Unlock"
+            self.button.emoji = "🔓"
+            self.button.style = discord.ButtonStyle.green
+            self.button.disabled = False
+
+    async def unlock(self, interaction: discord.Interaction):
+        poketwo_id = interaction.client.poketwo_id
+        target = interaction.guild.get_member(poketwo_id) or await interaction.guild.fetch_member(poketwo_id)
+        await interaction.channel.set_permissions(target, view_channel=True, send_messages=True)
+
+        self.apply_state(True)
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(
+            embed=make_embed(
+                description=f"🔓 Unlocked by {interaction.user.mention}."
+            )
+        )
+
+        if self.cog:
+            self.cog.active_locks.pop(interaction.channel.id, None)
