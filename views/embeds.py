@@ -149,6 +149,26 @@ USAGE_EXAMPLES = {
         "{p}set lockdelay 15 all",
         "{p}set lockdelay 15 sh --global",
     ],
+    "set locktime": [
+        "{p}set locktime 2h sh",
+        "{p}set locktime 30m sh cl --global",
+        "{p}set locktime off sh",
+    ],
+    "set whitelist": [
+        "{p}set whitelist sh add #chat #bots",
+        "{p}set whitelist sh cl r #chat",
+        "{p}set whitelist all clear",
+    ],
+    "set use-standard": ["{p}set use-standard sh", "{p}set use-standard sh cl tp"],
+    "set standard-lockdelay": ["{p}set standard-lockdelay 20", "{p}set standard-lockdelay off"],
+    "set standard-locktime": ["{p}set standard-locktime 2h"],
+    "set standard-locktimer": ["{p}set standard-locktimer on", "{p}set standard-locktimer 90m"],
+    "set standard-whitelist": [
+        "{p}set standard-whitelist add #chat #bots",
+        "{p}set standard-whitelist r #chat",
+        "{p}set standard-whitelist clear",
+    ],
+    "toggle locktime": ["{p}toggle locktime sh", "{p}toggle locktime sh cl --global"],
     "set rarerole": ["{p}set rarerole @Rare Ping", "{p}set rarerole"],
     "set regionalrole": ["{p}set regionalrole @Regional Ping", "{p}set regionalrole"],
     "set gigantamaxrole": ["{p}set gigantamaxrole @GMax Ping", "{p}set gigantamaxrole"],
@@ -330,10 +350,10 @@ async def send_usage(ctx, note: str = None, title: str = None):
 
     examples = example_embed(ctx)
     if examples is None:
-        return await ctx.send(embed=embed)
+        return await ctx.reply(embed=embed, mention_author=False)
 
     view = ExampleLayout(embed, examples)
-    msg = await ctx.send(view=view)
+    msg = await ctx.reply(view=view, mention_author=False)
     view.message = msg
     return msg
 
@@ -362,20 +382,20 @@ async def handle_common_error(ctx, error) -> bool:
         await send_usage(ctx, note=str(error) or "Invalid argument provided.")
     elif isinstance(error, commands.MissingPermissions):
         perms = ", ".join(f"`{p.replace('_', ' ').title()}`" for p in error.missing_permissions)
-        await ctx.send(embed=err_embed(f"Missing permissions: {perms}"))
+        await ctx.reply(embed=err_embed(f"Missing permissions: {perms}"), mention_author=False)
     elif isinstance(error, commands.BotMissingPermissions):
         perms = ", ".join(f"`{p.replace('_', ' ').title()}`" for p in error.missing_permissions)
-        await ctx.send(embed=err_embed(f"I need: {perms}"))
+        await ctx.reply(embed=err_embed(f"I need: {perms}"), mention_author=False)
     elif isinstance(error, commands.NotOwner):
-        await ctx.send(embed=err_embed("Owner only.", emoji="🚫"))
+        await ctx.reply(embed=err_embed("Owner only.", emoji="🚫"), mention_author=False)
     elif isinstance(error, commands.NoPrivateMessage):
-        await ctx.send(embed=err_embed("Server only.", emoji="🚫"))
+        await ctx.reply(embed=err_embed("Server only.", emoji="🚫"), mention_author=False)
     elif isinstance(error, commands.CommandOnCooldown):
-        await ctx.send(embed=warn_embed("Slow Down", f"Retry in **{error.retry_after:.1f}s**.", emoji="⏳"))
+        await ctx.reply(embed=warn_embed("Slow Down", f"Retry in **{error.retry_after:.1f}s**.", emoji="⏳"), mention_author=False)
     elif isinstance(error, commands.CheckFailure):
-        await ctx.send(embed=err_embed("You can't use this here.", emoji="🚫"))
+        await ctx.reply(embed=err_embed("You can't use this here.", emoji="🚫"), mention_author=False)
     elif isinstance(error, commands.CommandInvokeError) and isinstance(error.original, discord.Forbidden):
-        await ctx.send(embed=err_embed("Check my permissions and role position."))
+        await ctx.reply(embed=err_embed("Check my permissions and role position."), mention_author=False)
     else:
         return False
     return True
@@ -388,4 +408,4 @@ async def handle_command_error(ctx, error) -> None:
         return
     original = getattr(error, "original", error)
     traceback.print_exception(type(original), original, original.__traceback__)
-    await ctx.send(embed=err_embed(f"Internal error: {original}", emoji="⚠️"))
+    await ctx.reply(embed=err_embed(f"Internal error: {original}", emoji="⚠️"), mention_author=False)
