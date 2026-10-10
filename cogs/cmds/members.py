@@ -292,7 +292,7 @@ class Members(commands.Cog):
             color=discord.Color.red()
         )
         success_embed.add_field(name="Reason", value=reason, inline=False)
-        await ctx.reply(embed=success_embed, mention_author=False)
+        await confirmed.show(success_embed)
 
     @commands.hybrid_command(name="nick", with_app_command=True, description="Changes the nickname of a target server member.")
     @app_commands.describe(
