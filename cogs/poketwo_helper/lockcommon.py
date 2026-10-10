@@ -6,8 +6,6 @@ import discord
 
 from views.common_views import one_line_embed
 
-POKETWO_ID = 716390085896962058
-
 # Default number of seconds a delay-enabled lock waits before actually
 # locking. Single source of truth so autolockconfig.py (which writes it)
 # and autolock.py (which has a fallback read of it) never disagree.
@@ -70,12 +68,13 @@ def display_name(category: str) -> str:
 UNLOCK_PRIORITY = (("re",), ("sh",), ("cl",), ("tp", "rp"))
 
 
-async def get_poketwo_target(guild: discord.Guild):
-    member = guild.get_member(POKETWO_ID)
+async def get_poketwo_target(bot, guild: discord.Guild):
+    """Poketwo's member object in ``guild``; its ID comes from config.json (bot.poketwo_id)."""
+    member = guild.get_member(bot.poketwo_id)
     if member:
         return member
     try:
-        return await guild.fetch_member(POKETWO_ID)
+        return await guild.fetch_member(bot.poketwo_id)
     except discord.HTTPException:
         return None
 
