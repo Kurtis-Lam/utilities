@@ -6,7 +6,6 @@ from discord.ext import commands
 
 from cogs.poketwo_helper.lockcommon import (
     DEFAULT_DELAY,
-    POKETWO_ID,
     SHORT_NAMES,
     UNLOCK_PRIORITY,
     WARN_COLOR,
@@ -14,7 +13,8 @@ from cogs.poketwo_helper.lockcommon import (
     locked_embed,
     now_unix,
 )
-from cogs.poketwo_helper.lockunlock import NO_PINGS, UnlockLayout
+from cogs.poketwo_helper.lockunlock import NO_PINGS
+from views.lockunlock_views import UnlockLayout
 
 
 def _channel_in_whitelist(channel, whitelist: list) -> bool:
@@ -150,7 +150,7 @@ class AutoLock(commands.Cog):
         """True if the Pokémon was caught before the delay ran out."""
         def poketwo_check(m: discord.Message) -> bool:
             return (
-                m.author.id == POKETWO_ID
+                m.author.id == self.bot.poketwo_id
                 and m.channel.id == channel.id
                 and m.content.startswith("Congratulations")
             )
@@ -168,7 +168,7 @@ class AutoLock(commands.Cog):
         allowed_unlockers: list[int] | None,
         restrict_cats: list[str],
     ):
-        target = await get_poketwo_target(channel.guild)
+        target = await get_poketwo_target(self.bot, channel.guild)
         if target is None:
             print(f"AutoLock: Poketwo not found in guild {channel.guild.id}, can't lock #{channel.id}")
             return
