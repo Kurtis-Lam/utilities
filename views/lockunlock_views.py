@@ -40,6 +40,17 @@ def message_texts(message: discord.Message | None) -> tuple[list[str], discord.C
     return texts, accent
 
 
+def drop_auto_unlock(texts: list[str]) -> list[str]:
+    """Remove the 'Auto Unlock' paragraph from a lock message's text blocks. Used when the
+    channel is unlocked by hand, so the greyed-out message no longer promises an auto-unlock."""
+    cleaned = []
+    for text in texts:
+        paragraphs = [p for p in text.split("\n\n") if not p.startswith("**⏳ Auto Unlock**")]
+        if paragraphs:
+            cleaned.append("\n\n".join(paragraphs))
+    return cleaned
+
+
 class UnlockLayout(discord.ui.LayoutView):
     """The lock message: the embed-style container with the Unlock button *inside* it.
 
@@ -75,7 +86,7 @@ class UnlockLayout(discord.ui.LayoutView):
     async def _retire(self, interaction: discord.Interaction) -> None:
         """Grey out the button on the message that was clicked (acknowledges the interaction)."""
         texts, accent = message_texts(interaction.message)
-        view = UnlockLayout(self.bot, texts=texts, accent=accent, unlocked=True)
+        view = UnlockLayout(self.bot, texts=drop_auto_unlock(texts), accent=accent, unlocked=True)
         try:
             await interaction.response.edit_message(view=view)
         except discord.HTTPException:
