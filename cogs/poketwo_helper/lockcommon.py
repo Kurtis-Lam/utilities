@@ -11,6 +11,16 @@ from views.common_views import one_line_embed
 # and autolock.py (which has a fallback read of it) never disagree.
 DEFAULT_DELAY = 15
 
+# Auto-unlock ("locktime"): how long an autolocked channel stays locked before the
+# bot unlocks it again. Stored in seconds. Same single-source-of-truth idea as DEFAULT_DELAY.
+DEFAULT_LOCKTIME = 3600           # 1h, used when an admin turns the timer on without a value
+MIN_LOCKTIME = 60                 # 1 minute
+MAX_LOCKTIME = 30 * 86400         # 30 days
+
+# LockDM: the earliest a "DM before auto-unlock" reminder may be set (it must also stay
+# shorter than the shortest auto-unlock time an admin configured).
+MIN_BEFORE_UNLOCK = 60            # 1 minute
+
 # Full display names, e.g. for embeds and confirmation messages.
 CATEGORY_NAMES = {
     "re": "Reserves Lock",
@@ -58,6 +68,39 @@ def resolve_category(token: str) -> str | None:
 
 def display_name(category: str) -> str:
     return CATEGORY_NAMES.get(category, category.capitalize())
+
+
+# --- Durations ("30m", "2h", "1h30m") ---------------------------------------------
+
+_DURATION_FULL = re.compile(r"^(?:\d+[smhdw])+$")
+_DURATION_PART = re.compile(r"(\d+)([smhdw])")
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_duration(text: str, default_unit: str = "m") -> int | None:
+    """'30m' / '2h' / '1h30m' / '1d' -> seconds. A bare number uses ``default_unit``
+    (minutes unless told otherwise). None if the text isn't a valid duration."""
+    text = re.sub(r"\s+", "", (text or "").lower())
+    if not text:
+        return None
+    if text.isdigit():
+        text += default_unit
+    if not _DURATION_FULL.match(text):
+        return None
+    return sum(int(n) * _DURATION_UNITS[u] for n, u in _DURATION_PART.findall(text))
+
+
+def format_duration(seconds: int) -> str:
+    """3600 -> '1h', 5400 -> '1h 30m', 45 -> '45s'."""
+    seconds = max(0, int(seconds))
+    if seconds == 0:
+        return "0s"
+    parts = []
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
+        amount, seconds = divmod(seconds, size)
+        if amount:
+            parts.append(f"{amount}{unit}")
+    return " ".join(parts)
 
 
 # Who may unlock when several restricted locks fire on the same channel at
@@ -165,6 +208,7 @@ def locked_embed(
     allowed_users=None,
     restricted_by=None,
     when: int | None = None,
+    unlock_at: int | None = None,
 ) -> discord.Embed:
     when = when or now_unix()
     embed = discord.Embed(
@@ -183,6 +227,12 @@ def locked_embed(
     if restricted_by:
         text += f"\n-# Restricted by `{_categories_label(restricted_by)}`."
     embed.add_field(name="🔐 Who Can Unlock", value=text, inline=False)
+    if unlock_at:
+        embed.add_field(
+            name="⏳ Auto Unlock",
+            value=f"Unlocking automatically {stamp(unlock_at)} (<t:{unlock_at}:t>)",
+            inline=False,
+        )
     return embed
 
 
@@ -194,6 +244,34 @@ def unlocked_embed(channel, *, unlocked_by, locked_at: int | None = None, when: 
     )
     embed.add_field(name="🕒 Unlocked At", value=stamp(when), inline=True)
     embed.add_field(name="👤 Unlocked By", value=unlocked_by.mention, inline=True)
+    return embed
+
+
+def auto_unlocked_embed(
+    channel,
+    *,
+    lock_doc: dict | None = None,
+    when: int | None = None,
+) -> discord.Embed:
+    """What the lock message turns into once the auto-unlock timer runs out."""
+    when = when or now_unix()
+    lock_doc = lock_doc or {}
+    embed = discord.Embed(
+        title="🔓 Channel Unlocked",
+        color=UNLOCK_COLOR,
+    )
+
+    locked_at = to_unix(lock_doc.get("locked_at"))
+    if locked_at:
+        by_text = ""
+        if lock_doc.get("source") == "autolock":
+            by_text = f" by Auto-lock (`{_categories_label(lock_doc.get('categories'))}`)"
+        embed.add_field(name="🕒 Locked At", value=f"{stamp(locked_at)}{by_text}", inline=False)
+
+    embed.add_field(name="🕒 Unlocked At", value=stamp(when), inline=True)
+    locktime = lock_doc.get("locktime")
+    how = f"Automatic (after {format_duration(locktime)})" if locktime else "Automatic"
+    embed.add_field(name="👤 Unlocked By", value=how, inline=True)
     return embed
 
 
@@ -217,6 +295,10 @@ def already_locked_embed(channel, lock_doc: dict | None = None) -> discord.Embed
             embed.add_field(name="👤 Locked By", value=by_text.strip(), inline=False)
 
         embed.add_field(name="🔐 Who Can Unlock", value=who_can_unlock_text(lock_doc.get("allowed_users")), inline=False)
+
+        unlock_at = to_unix(lock_doc.get("unlock_at"))
+        if unlock_at:
+            embed.add_field(name="⏳ Auto Unlock", value=f"Unlocking automatically {stamp(unlock_at)}", inline=False)
     return embed
 
 
