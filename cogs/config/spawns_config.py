@@ -9,16 +9,15 @@ from discord.ext import commands
 
 from views.common_views import error_embed, make_embed
 from views.embeds import handle_command_error
-from views.spawns_views import SpawnsConfigView
+from views.spawns_views import SpawnsConfigView, UnlockView
 from .baseconfigs import config_group
 
-POKETWO_ID = 716390085896962058
 SENSOR_IDS = {874910942490677270, 854233015475109888, 1250429544486273038}
 
 
-async def get_poketwo_target(guild: discord.Guild):
-    """Retrieve Poketwo Member object via cache or fetch."""
-    return guild.get_member(POKETWO_ID) or await guild.fetch_member(POKETWO_ID)
+async def get_poketwo_target(bot: commands.Bot, guild: discord.Guild):
+    """Retrieve Poketwo Member object via cache or fetch (ID comes from config.json)."""
+    return guild.get_member(bot.poketwo_id) or await guild.fetch_member(bot.poketwo_id)
 
 
 @config_group.command(
@@ -44,53 +43,6 @@ async def spawnsconfig(ctx: commands.Context):
 @spawnsconfig.error
 async def spawnsconfig_error(ctx: commands.Context, error: Exception):
     await handle_command_error(ctx, error)
-
-
-class UnlockView(discord.ui.LayoutView):
-    def __init__(self, cog=None, unlocked: bool = False):
-        super().__init__(timeout=None)
-        self.cog = cog
-        self.text = discord.ui.TextDisplay("")
-        self.button = discord.ui.Button(label="Unlock", style=discord.ButtonStyle.green)
-        self.button.callback = self.unlock
-        self.container = discord.ui.Container(
-            self.text,
-            discord.ui.Separator(),
-            discord.ui.ActionRow(self.button),
-        )
-        self.add_item(self.container)
-        self.apply_state(unlocked)
-
-    def apply_state(self, unlocked: bool):
-        if unlocked:
-            self.text.content = "## 🔓 Channel Unlocked"
-            self.container.accent_colour = discord.Color.green()
-            self.button.label = "Unlocked"
-            self.button.emoji = None
-            self.button.style = discord.ButtonStyle.secondary
-            self.button.disabled = True
-        else:
-            self.text.content = "## 🔒 Channel Locked\nUse `.u` or the button."
-            self.container.accent_colour = discord.Color.red()
-            self.button.label = "Unlock"
-            self.button.emoji = "🔓"
-            self.button.style = discord.ButtonStyle.green
-            self.button.disabled = False
-
-    async def unlock(self, interaction: discord.Interaction):
-        target = await get_poketwo_target(interaction.guild)
-        await interaction.channel.set_permissions(target, view_channel=True, send_messages=True)
-
-        self.apply_state(True)
-        await interaction.response.edit_message(view=self)
-        await interaction.followup.send(
-            embed=make_embed(
-                description=f"🔓 Unlocked by {interaction.user.mention}."
-            )
-        )
-
-        if self.cog:
-            self.cog.active_locks.pop(interaction.channel.id, None)
 
 
 class SpawnsConfig(commands.Cog):
@@ -236,7 +188,7 @@ class SpawnsConfig(commands.Cog):
 
         def poketwo_check(m: discord.Message) -> bool:
             return (
-                m.author.id == POKETWO_ID
+                m.author.id == self.bot.poketwo_id
                 and m.channel.id == message.channel.id
                 and m.content.startswith("Congratulations")
             )
@@ -253,7 +205,7 @@ class SpawnsConfig(commands.Cog):
             except discord.HTTPException:
                 pass
 
-            target = await get_poketwo_target(message.guild)
+            target = await get_poketwo_target(self.bot, message.guild)
             await message.channel.set_permissions(target, view_channel=False, send_messages=False)
 
             lock_msg = await message.channel.send(view=UnlockView(cog=self))
