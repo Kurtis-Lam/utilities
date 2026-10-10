@@ -396,9 +396,9 @@ class Role(commands.Cog):
         try:
             await role.delete(reason=f"Deleted by {ctx.author}")
             await self.timed_roles.delete_many({"guild_id": ctx.guild.id, "role_id": role.id})
-            await ctx.reply(embed=ok_embed("Role Deleted", f"Successfully deleted the role **{role_name}**.", emoji="🗑️"), mention_author=False)
+            await confirmed.show(ok_embed("Role Deleted", f"Successfully deleted the role **{role_name}**.", emoji="🗑️"))
         except discord.HTTPException:
-            await ctx.reply(embed=err_embed("Delete Failed", "Failed to delete the role. Check my permissions."), mention_author=False)
+            await confirmed.show(err_embed("Delete Failed", "Failed to delete the role. Check my permissions."))
 
 
 async def setup(bot):
