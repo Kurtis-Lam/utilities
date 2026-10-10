@@ -1,3 +1,5 @@
+import re
+
 import discord
 from discord.ext import commands
 
@@ -6,8 +8,9 @@ from cogs.poketwo_helper.lockcommon import (
     MIN_LOCKTIME,
     format_duration,
     parse_duration,
+    split_scope_flags,
 )
-from views.autolock_views import whitelist_result_text
+from views.autolock_views import MAX_DELAY, MIN_DELAY, whitelist_result_text
 from views.embeds import (
     err_embed,
     handle_command_error,
@@ -16,6 +19,7 @@ from views.embeds import (
     send_usage,
     warn_embed,
 )
+from views.timer_views import MAX_SECONDS, MIN_SECONDS, TIMER_LABELS
 
 
 ADD_WORDS = {"add", "a"}
@@ -23,6 +27,11 @@ REMOVE_WORDS = {"remove", "r"}
 CLEAR_WORDS = {"clear", "reset"}
 ON_WORDS = {"on", "enable", "enabled", "true"}
 OFF_WORDS = {"off", "disable", "disabled", "false"}
+
+STANDARD = "standard"
+
+# A whitelist item: channel mention, channel id (or list index when removing), "*" or "#name".
+CHANNEL_TOKEN = re.compile(r"^(<#\d+>|\d+|\*|#\S+)$")
 
 
 class Set(commands.Cog):
@@ -37,104 +46,20 @@ class Set(commands.Cog):
     @commands.group(
         name="set",
         invoke_without_command=True,
-        description="Configure lock delays, lock times, whitelists, standards and category ping roles.",
+        description="Configure lock delays, lock times, whitelists, timers and category ping roles.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def set_group(self, ctx: commands.Context):
         await send_usage(ctx)
 
-    # --- .set lockdelay <seconds> <lock...> [--global] ------------------------------------
-    @set_group.command(
-        name="lockdelay",
-        aliases=["ld", "delay", "lock-delay"],
-        usage="<seconds> <lock...> [--global]",
-        description="Set a lock's delay in seconds.",
-    )
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def set_lockdelay(self, ctx: commands.Context, seconds: str = None, *locks_and_flags: str):
-        # Parse arguments to check for --global flag
-        locks = []
-        global_flag = False
-
-        for arg in locks_and_flags:
-            if arg.lower() == "--global":
-                global_flag = True
-            else:
-                locks.append(arg)
-
-        if seconds is None:
-            return await send_usage(ctx, title="Missing arg: `seconds`")
-        if not locks:
-            return await send_usage(ctx, title="Missing arg: `lock`")
-
-        try:
-            delay = int(seconds.lower().rstrip("s"))
-        except ValueError:
-            return await ctx.reply(embed=err_embed(f"Invalid seconds: {seconds}"), mention_author=False)
-
-        if not (1 <= delay <= 600):
-            return await ctx.reply(embed=err_embed("Delay must be 1-600s."), mention_author=False)
-
-        cog = self.bot.get_cog("AutoLockConfig")
-        if not cog:
-            return await ctx.reply(embed=err_embed("AutoLockConfig is not loaded.", emoji="⚠️"), mention_author=False)
-
-        if any(l.lower() == "all" for l in locks):
-            cats = list(cog.all_categories())
-            unknown = []
-        else:
-            cats, unknown = [], []
-            for tok in locks:
-                cat = cog.resolve_category(tok)
-                if cat is None:
-                    unknown.append(tok)
-                elif cat not in cats:
-                    cats.append(cat)
-
-        if not cats:
-            return await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
-
-        lines = []
-        for cat in cats:
-            if global_flag:
-                # Apply to whole server (guild level)
-                await cog.set_delay(ctx.guild.id, cat, delay)
-                scope = "whole server"
-            else:
-                # Apply to current channel only
-                await cog.set_delay_channel(ctx.guild.id, ctx.channel.id, cat, delay)
-                scope = f"{ctx.channel.mention}"
-
-            line = f"⏱️ **{cog.display_name(cat)}** → **{delay}s** ({scope})"
-            if not global_flag:
-                cfg_doc = await cog.get_guild_config(ctx.guild.id)
-                if not (cfg_doc.get(cat) or {}).get("delay_enabled", True):
-                    line += " — delay is off"
-            lines.append(line)
-
-        embed = ok_embed("Delay Updated", "\n".join(lines)[:4096])
-        if unknown:
-            embed.add_field(
-                name="⚠️ Unknown Lock(s)",
-                value=", ".join(f"`{u}`" for u in unknown)[:1024],
-                inline=False,
-            )
-        await ctx.reply(embed=embed, mention_author=False)
-
-    # --- shared helpers for the commands below -----------------------------------
+    # --- shared helpers --------------------------------------------------------
 
     async def _cog(self, ctx: commands.Context):
         cog = self.bot.get_cog("AutoLockConfig")
         if not cog:
             await ctx.reply(embed=err_embed("AutoLockConfig is not loaded.", emoji="⚠️"), mention_author=False)
         return cog
-
-    @staticmethod
-    def _split_flags(args) -> tuple[list[str], bool]:
-        global_flag = any(a.lower() == "--global" for a in args)
-        return [a for a in args if a.lower() != "--global"], global_flag
 
     @staticmethod
     def _resolve_locks(cog, tokens) -> tuple[list[str], list[str]]:
@@ -158,48 +83,131 @@ class Set(commands.Cog):
             return f"Lock time must be {format_duration(MIN_LOCKTIME)}-{format_duration(MAX_LOCKTIME)}."
         return None
 
-    async def _whitelist_action(self, ctx, cog, category: str, label: str, action: str, items: list[str]):
-        """add / remove / clear on one whitelist (a lock's, or the standard one)."""
-        guild = ctx.guild
-        if action in CLEAR_WORDS:
-            count = await cog.clear_whitelist(guild.id, category)
-            embed = ok_embed(f"{label} Whitelist Cleared", f"Removed **{count}** entr{'y' if count == 1 else 'ies'}.") \
-                if count else warn_embed(f"{label} Whitelist", "It was already empty.")
-            return await ctx.reply(embed=embed, mention_author=False)
+    @staticmethod
+    def _check_delay(value: str):
+        """Returns (seconds, error). A bare number is seconds; `15s` / `1m` also work."""
+        seconds = parse_duration(value, default_unit="s")
+        if seconds is None:
+            return None, f"Invalid time: {value} (use seconds, e.g. `15`)."
+        if not (MIN_DELAY <= seconds <= MAX_DELAY):
+            return None, f"Delay must be {MIN_DELAY}-{MAX_DELAY}s."
+        return seconds, None
 
-        if not items:
-            return await send_usage(ctx, title="Missing arg: `channels`")
+    async def _scope_error(self, ctx, locks, is_global: bool, is_standard: bool, *, allow_global: bool = True) -> bool:
+        """Replies and returns True when the flag combination is not allowed."""
+        message = None
+        if is_global and is_standard:
+            message = "`--global` and `--standard` can't be used together."
+        elif is_global and not allow_global:
+            message = "`--global` isn't used here: whitelists are always server-wide."
+        elif is_standard and locks:
+            message = "`--standard` sets the standard values, so don't list locks with it."
+        if message:
+            await ctx.reply(embed=err_embed(message), mention_author=False)
+            return True
+        return False
 
-        raw = ",".join(items)
-        if action in ADD_WORDS:
-            added, already, invalid = await cog.add_whitelist(guild, category, raw)
-            text = whitelist_result_text(cog, guild, added=added, already=already, invalid=invalid)
-            embed = ok_embed(f"{label} Whitelist Updated", text) if added else warn_embed(f"{label} Whitelist", text)
-        else:
-            removed, not_found = await cog.remove_whitelist(guild, category, raw)
-            text = whitelist_result_text(cog, guild, removed=removed, not_found=not_found)
-            embed = ok_embed(f"{label} Whitelist Updated", text) if removed else warn_embed(f"{label} Whitelist", text)
-        await ctx.reply(embed=embed, mention_author=False)
+    async def _targets(self, ctx, cog, locks, is_standard: bool):
+        """Locks a command applies to: the standard, the listed locks, or every lock when none
+        are listed. Returns (cats, unknown), or None after replying with an error."""
+        if is_standard:
+            return [STANDARD], []
+        if not locks:
+            return list(cog.all_categories()), []
+        cats, unknown = self._resolve_locks(cog, locks)
+        if not cats:
+            await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
+            return None
+        return cats, unknown
 
-    # --- .set locktime <time|on|off> <lock...> [--global] -----------------------------
+    @staticmethod
+    def _scope_text(ctx, is_global: bool, is_standard: bool) -> str:
+        if is_standard:
+            return "standard"
+        return "whole server" if is_global else ctx.channel.mention
+
+    @staticmethod
+    async def _scope_config(cog, ctx, cat: str, is_global: bool, is_standard: bool) -> dict:
+        if is_standard:
+            return await cog.get_standard(ctx.guild.id)
+        if is_global:
+            return await cog.get_category_config(ctx.guild.id, cat)
+        return await cog.get_category_config_channel(ctx.guild.id, ctx.channel.id, cat)
+
+    @staticmethod
+    def _unknown_field(embed: discord.Embed, unknown: list[str]) -> None:
+        if unknown:
+            embed.add_field(
+                name="⚠️ Unknown Lock(s)",
+                value=", ".join(f"`{u}`" for u in unknown)[:1024],
+                inline=False,
+            )
+
+    # --- .set lockdelay|lock-delay|delay|ld {time} [lock] [--global|--standard] ----------
 
     @set_group.command(
-        name="locktime",
-        aliases=["lt", "locktimer", "lock-time", "autounlock"],
-        usage="<time|on|off> <lock...> [--global]",
-        description="Set how long a lock stays locked before it auto-unlocks.",
+        name="lockdelay",
+        aliases=["lock-delay", "delay", "ld"],
+        usage="<time> [lock...] [--global|--standard]",
+        description="Set a lock's delay in seconds (no lock = all locks).",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_locktime(self, ctx: commands.Context, value: str = None, *locks_and_flags: str):
-        locks, global_flag = self._split_flags(locks_and_flags)
-        if value is None:
+    async def set_lockdelay(self, ctx: commands.Context, *args: str):
+        tokens, is_global, is_standard = split_scope_flags(args)
+        if not tokens:
             return await send_usage(ctx, title="Missing arg: `time`")
-        if not locks:
-            return await send_usage(ctx, title="Missing arg: `lock`")
+        value, locks = tokens[0], tokens[1:]
+
+        if await self._scope_error(ctx, locks, is_global, is_standard):
+            return
+        delay, error = self._check_delay(value)
+        if error:
+            return await ctx.reply(embed=err_embed(error), mention_author=False)
 
         cog = await self._cog(ctx)
         if not cog:
+            return
+        targets = await self._targets(ctx, cog, locks, is_standard)
+        if targets is None:
+            return
+        cats, unknown = targets
+
+        scope = self._scope_text(ctx, is_global, is_standard)
+        lines = []
+        for cat in cats:
+            if is_global or is_standard:
+                await cog.set_delay(ctx.guild.id, cat, delay)
+            else:
+                await cog.set_delay_channel(ctx.guild.id, ctx.channel.id, cat, delay)
+
+            line = f"⏱️ **{cog.display_name(cat)}** → **{delay}s** ({scope})"
+            cfg = await self._scope_config(cog, ctx, cat, is_global, is_standard)
+            if not cfg.get("delay_enabled", True):
+                line += " — delay is off"
+            lines.append(line)
+
+        embed = ok_embed("Delay Updated", "\n".join(lines)[:4096], emoji="⏱️")
+        self._unknown_field(embed, unknown)
+        await ctx.reply(embed=embed, mention_author=False)
+
+    # --- .set locktime|lock-time|time|lt {time} [lock(s)] [--global|--standard] ----------
+
+    @set_group.command(
+        name="locktime",
+        aliases=["lock-time", "time", "lt"],
+        usage="<time|on|off> [lock(s)...] [--global|--standard]",
+        description="Set how long a lock stays locked before it auto-unlocks (no lock = all locks).",
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def set_locktime(self, ctx: commands.Context, *args: str):
+        tokens, is_global, is_standard = split_scope_flags(args)
+        if not tokens:
+            return await send_usage(ctx, title="Missing arg: `time`")
+        value, locks = tokens[0], tokens[1:]
+
+        if await self._scope_error(ctx, locks, is_global, is_standard):
             return
 
         word = value.lower()
@@ -210,63 +218,111 @@ class Set(commands.Cog):
             if error:
                 return await ctx.reply(embed=err_embed(error), mention_author=False)
 
-        cats, unknown = self._resolve_locks(cog, locks)
-        if not cats:
-            return await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
+        cog = await self._cog(ctx)
+        if not cog:
+            return
+        targets = await self._targets(ctx, cog, locks, is_standard)
+        if targets is None:
+            return
+        cats, unknown = targets
 
-        scope = "whole server" if global_flag else ctx.channel.mention
+        scope = self._scope_text(ctx, is_global, is_standard)
         lines = []
         for cat in cats:
             if seconds is not None:
-                if global_flag:
+                if is_global or is_standard:
                     await cog.set_locktime(ctx.guild.id, cat, seconds)
                 else:
                     await cog.set_locktime_channel(ctx.guild.id, ctx.channel.id, cat, seconds)
                 lines.append(f"⌛ **{cog.display_name(cat)}** → **{format_duration(seconds)}** ({scope}, auto-unlock on)")
             else:
                 on = word in ON_WORDS
-                if global_flag:
+                if is_global or is_standard:
                     await cog.set_locktime_enabled(ctx.guild.id, cat, on)
                 else:
                     await cog.set_locktime_enabled_channel(ctx.guild.id, ctx.channel.id, cat, on)
                 lines.append(f"⌛ **{cog.display_name(cat)}** auto-unlock: **{'On ✅' if on else 'Off ❌'}** ({scope})")
 
         embed = ok_embed("Lock Time Updated", "\n".join(lines)[:4096], emoji="⌛")
-        if unknown:
-            embed.add_field(name="⚠️ Unknown Lock(s)", value=", ".join(f"`{u}`" for u in unknown)[:1024], inline=False)
+        self._unknown_field(embed, unknown)
         await ctx.reply(embed=embed, mention_author=False)
 
-    # --- .set whitelist <lock...> <add|remove|clear> [channels...] ---------------------
+    # --- .set whitelist|wl {add|a|remove|r} <channels> [lock(s)] [--standard] --------------
 
     @set_group.command(
         name="whitelist",
         aliases=["wl"],
-        usage="<lock...> <add|a|remove|r|clear|reset> [channels...]",
-        description="Add / remove / clear the channels a lock may autolock in (server-wide).",
+        usage="<add|a|remove|r> <channels...> [lock(s)...] [--standard]",
+        description="Add / remove the channels a lock may autolock in (server-wide; no lock = all locks).",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def set_whitelist(self, ctx: commands.Context, *args: str):
+        tokens, is_global, is_standard = split_scope_flags(args)
+
         actions = ADD_WORDS | REMOVE_WORDS | CLEAR_WORDS
-        idx = next((i for i, a in enumerate(args) if a.lower() in actions), None)
-        if idx is None:
-            return await send_usage(ctx, title="Missing arg: `add|remove|clear`")
-        if idx == 0:
-            return await send_usage(ctx, title="Missing arg: `lock`")
+        if not tokens or tokens[0].lower() not in actions:
+            return await send_usage(ctx, title="Missing arg: `add|remove`")
+        action = tokens[0].lower()
 
         cog = await self._cog(ctx)
         if not cog:
             return
 
-        cats, unknown = self._resolve_locks(cog, args[:idx])
-        if not cats:
-            return await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
+        locks, items, unknown = [], [], []
+        for tok in tokens[1:]:
+            if tok.lower() == "all" or cog.resolve_category(tok) is not None:
+                locks.append(tok)
+            elif CHANNEL_TOKEN.match(tok):
+                items.append(tok)
+            else:
+                unknown.append(tok)
 
-        action = args[idx].lower()
-        for cat in cats:
-            await self._whitelist_action(ctx, cog, cat, cog.display_name(cat), action, list(args[idx + 1:]))
+        if await self._scope_error(ctx, locks, is_global, is_standard, allow_global=False):
+            return
         if unknown:
-            await ctx.reply(embed=warn_embed("Unknown Lock(s)", ", ".join(f"`{u}`" for u in unknown)), mention_author=False)
+            return await ctx.reply(
+                embed=err_embed(f"Unknown lock or channel: {', '.join(f'`{u}`' for u in unknown)}"),
+                mention_author=False,
+            )
+        if action not in CLEAR_WORDS and not items:
+            return await send_usage(ctx, title="Missing arg: `channels`")
+
+        targets = await self._targets(ctx, cog, locks, is_standard)
+        if targets is None:
+            return
+        cats, _ = targets
+
+        guild = ctx.guild
+        raw = ",".join(items)
+        results: list[tuple[str, str]] = []
+        changed = False
+        for cat in cats:
+            label = cog.display_name(cat)
+            if action in CLEAR_WORDS:
+                count = await cog.clear_whitelist(guild.id, cat)
+                text = f"Removed **{count}** entr{'y' if count == 1 else 'ies'}." if count else "It was already empty."
+                did = bool(count)
+            elif action in ADD_WORDS:
+                added, already, invalid = await cog.add_whitelist(guild, cat, raw)
+                text = whitelist_result_text(cog, guild, added=added, already=already, invalid=invalid)
+                did = bool(added)
+            else:
+                removed, not_found = await cog.remove_whitelist(guild, cat, raw)
+                text = whitelist_result_text(cog, guild, removed=removed, not_found=not_found)
+                did = bool(removed)
+            changed = changed or did
+            results.append((label, text))
+
+        make = ok_embed if changed else warn_embed
+        if len(results) == 1:
+            label, text = results[0]
+            embed = make(f"{label} Whitelist {'Updated' if changed else ''}".strip(), text[:4096])
+        else:
+            embed = make(f"Whitelist {'Updated' if changed else ''}".strip())
+            for label, text in results:
+                embed.add_field(name=label, value=text[:1024], inline=False)
+        await ctx.reply(embed=embed, mention_author=False)
 
     # --- .set use-standard <lock...> ----------------------------------------------------
 
@@ -300,133 +356,73 @@ class Set(commands.Cog):
                 f"whitelist `{len(applied['whitelist'])}`"
             )
         embed = ok_embed("Standard Applied", "\n".join(lines)[:4096], emoji="⭐")
-        if unknown:
-            embed.add_field(name="⚠️ Unknown Lock(s)", value=", ".join(f"`{u}`" for u in unknown)[:1024], inline=False)
+        self._unknown_field(embed, unknown)
         await ctx.reply(embed=embed, mention_author=False)
 
-    # --- standard settings ---------------------------------------------------------------
+    # --- timers: .set shtimer|cltimer|rptimer|tptimer {timer} ----------------------------
+    # Timers are stored by the Timer cog (server-wide), see `.c timer` for the rest.
 
-    @set_group.command(
-        name="standard-lockdelay",
-        aliases=["standard-delay", "standard-ld"],
-        usage="<seconds|on|off>",
-        description="Set the standard lock delay.",
-    )
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def set_standard_lockdelay(self, ctx: commands.Context, value: str = None):
+    async def _set_timer(self, ctx: commands.Context, category: str, value: str | None):
         if value is None:
-            return await send_usage(ctx, title="Missing arg: `seconds`")
-        cog = await self._cog(ctx)
-        if not cog:
-            return
+            return await send_usage(ctx, title="Missing arg: `timer`")
 
-        word = value.lower()
-        if word in ON_WORDS | OFF_WORDS:
-            on = word in ON_WORDS
-            await cog.set_delay_enabled(ctx.guild.id, "standard", on)
+        seconds = parse_duration(value, default_unit="s")
+        if seconds is None:
             return await ctx.reply(
-                embed=ok_embed("Standard Lock Delay", f"Delay is now **{'On ✅' if on else 'Off ❌'}**.", emoji="⏱️"),
-                mention_author=False,
+                embed=err_embed(f"Invalid timer: {value} (use seconds, e.g. `15`)."), mention_author=False
             )
-        try:
-            delay = int(word.rstrip("s"))
-        except ValueError:
-            return await ctx.reply(embed=err_embed(f"Invalid seconds: {value}"), mention_author=False)
-        if not (1 <= delay <= 600):
-            return await ctx.reply(embed=err_embed("Delay must be 1-600s."), mention_author=False)
-
-        await cog.set_delay(ctx.guild.id, "standard", delay)
-        await ctx.reply(embed=ok_embed("Standard Lock Delay", f"Set to **{delay}s**.", emoji="⏱️"), mention_author=False)
-
-    @set_group.command(
-        name="standard-locktime",
-        aliases=["standard-lt"],
-        usage="<time>",
-        description="Set the standard lock time (how long before auto-unlock).",
-    )
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def set_standard_locktime(self, ctx: commands.Context, value: str = None):
-        if value is None:
-            return await send_usage(ctx, title="Missing arg: `time`")
-        cog = await self._cog(ctx)
-        if not cog:
-            return
-        seconds = parse_duration(value)
-        error = self._check_locktime(seconds)
-        if error:
-            return await ctx.reply(embed=err_embed(error), mention_author=False)
-        await cog.set_locktime(ctx.guild.id, "standard", seconds)
-        await ctx.reply(
-            embed=ok_embed("Standard Lock Time", f"Set to **{format_duration(seconds)}** (timer on).", emoji="⌛"),
-            mention_author=False,
-        )
-
-    @set_group.command(
-        name="standard-locktimer",
-        aliases=["standard-timer"],
-        usage="<on|off|time>",
-        description="Turn the standard lock timer (auto-unlock) on or off, or give it a time.",
-    )
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def set_standard_locktimer(self, ctx: commands.Context, value: str = None):
-        if value is None:
-            return await send_usage(ctx, title="Missing arg: `on|off`")
-        cog = await self._cog(ctx)
-        if not cog:
-            return
-        word = value.lower()
-        if word in ON_WORDS | OFF_WORDS:
-            on = word in ON_WORDS
-            await cog.set_locktime_enabled(ctx.guild.id, "standard", on)
+        if not (MIN_SECONDS <= seconds <= MAX_SECONDS):
             return await ctx.reply(
-                embed=ok_embed("Standard Lock Timer", f"Auto-unlock is now **{'On ✅' if on else 'Off ❌'}**.", emoji="⏳"),
-                mention_author=False,
+                embed=err_embed(f"Timer must be {MIN_SECONDS}-{MAX_SECONDS}s."), mention_author=False
             )
-        seconds = parse_duration(value)
-        error = self._check_locktime(seconds)
-        if error:
-            return await ctx.reply(embed=err_embed(error), mention_author=False)
-        await cog.set_locktime(ctx.guild.id, "standard", seconds)
-        await ctx.reply(
-            embed=ok_embed("Standard Lock Timer", f"On, set to **{format_duration(seconds)}**.", emoji="⏳"),
-            mention_author=False,
-        )
 
-    @set_group.command(
-        name="standard-whitelist",
-        aliases=["standard-wl"],
-        usage="<add|a|remove|r|clear|reset> [channels...]",
-        description="Add / remove / clear the standard whitelist.",
-    )
+        timer = self.bot.get_cog("Timer")
+        if not timer:
+            return await ctx.reply(embed=err_embed("Timer is not loaded.", emoji="⚠️"), mention_author=False)
+
+        await timer.set_seconds(ctx.guild.id, category, seconds)
+        label = TIMER_LABELS.get(category, category.upper())
+        text = f"Set to **{seconds}s**."
+        cfg = await timer.get_category_config(ctx.guild.id, category)
+        if not cfg.get("enabled", False):
+            text += " The timer is currently off (turn it on in `.c timer`)."
+        await ctx.reply(embed=ok_embed(f"{label} Updated", text, emoji="⏲️"), mention_author=False)
+
+    @set_group.command(name="shtimer", usage="<timer>", description="Set the SH timer length in seconds.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_standard_whitelist(self, ctx: commands.Context, action: str = None, *items: str):
-        if action is None or action.lower() not in ADD_WORDS | REMOVE_WORDS | CLEAR_WORDS:
-            return await send_usage(ctx, title="Missing arg: `add|remove|clear`")
-        cog = await self._cog(ctx)
-        if not cog:
-            return
-        await self._whitelist_action(ctx, cog, "standard", "Standard", action.lower(), list(items))
+    async def set_shtimer(self, ctx: commands.Context, timer: str = None):
+        await self._set_timer(ctx, "sh", timer)
+
+    @set_group.command(name="cltimer", usage="<timer>", description="Set the CL timer length in seconds.")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def set_cltimer(self, ctx: commands.Context, timer: str = None):
+        await self._set_timer(ctx, "cl", timer)
+
+    @set_group.command(name="rptimer", usage="<timer>", description="Set the RP timer length in seconds.")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def set_rptimer(self, ctx: commands.Context, timer: str = None):
+        await self._set_timer(ctx, "rp", timer)
+
+    @set_group.command(name="tptimer", usage="<timer>", description="Set the TP timer length in seconds.")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def set_tptimer(self, ctx: commands.Context, timer: str = None):
+        await self._set_timer(ctx, "tp", timer)
 
     # --- role setters ----------------------------------------------------------
     # Roles live in the PokePings data (utilities.pings -> roles.<key>), which is
     # what the Recognizer reads when it pings, so we write through PokePings.
 
-    async def _set_role(self, ctx: commands.Context, key: str, label: str, role: discord.Role | None):
+    async def _set_role(self, ctx: commands.Context, key: str, label: str, role: discord.Role):
         pings = self.bot.get_cog("PokePings")
         if not pings:
             return await ctx.reply(embed=err_embed("PokePings is not loaded.", emoji="⚠️"), mention_author=False)
 
         g_id = str(ctx.guild.id)
         old_id = await pings.get_guild_role(g_id, key)
-
-        if role is None:
-            if old_id:
-                return await ctx.reply(embed=info_embed(f"{label} Role", f"<@&{old_id}>", emoji="🏷️"), mention_author=False)
-            return await ctx.reply(embed=warn_embed(f"{label} Role", "Not set."), mention_author=False)
 
         if old_id and str(old_id) == str(role.id):
             return await ctx.reply(embed=info_embed("No Change", f"Already {role.mention}."), mention_author=False)
@@ -440,48 +436,48 @@ class Set(commands.Cog):
             await ctx.reply(embed=ok_embed(f"{label} Role Set", role.mention), mention_author=False)
 
     @set_group.command(
-        name="rarerole", aliases=["rarole"], usage="[@role]",
-        description="Set or view the Rare ping role.",
+        name="rarerole", aliases=["rare", "rarole", "ra"], usage="<role>",
+        description="Set the Rare ping role.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_rarerole(self, ctx: commands.Context, role: discord.Role = None):
+    async def set_rarerole(self, ctx: commands.Context, role: discord.Role):
         await self._set_role(ctx, "rare", "Rare", role)
 
     @set_group.command(
-        name="regionalrole", aliases=["regrole"], usage="[@role]",
-        description="Set or view the Regional ping role.",
+        name="regionalrole", aliases=["regional", "regrole", "reg"], usage="<role>",
+        description="Set the Regional ping role.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_regionalrole(self, ctx: commands.Context, role: discord.Role = None):
+    async def set_regionalrole(self, ctx: commands.Context, role: discord.Role):
         await self._set_role(ctx, "regional", "Regional", role)
 
     @set_group.command(
-        name="gigantamaxrole", aliases=["gmaxrole"], usage="[@role]",
-        description="Set or view the Gigantamax ping role.",
+        name="gigantamaxrole", aliases=["gigantamax", "gmaxrole", "gmax"], usage="<role>",
+        description="Set the Gigantamax ping role.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_gigantamaxrole(self, ctx: commands.Context, role: discord.Role = None):
+    async def set_gigantamaxrole(self, ctx: commands.Context, role: discord.Role):
         await self._set_role(ctx, "gmax", "Gigantamax", role)
 
     @set_group.command(
-        name="paradoxrole", aliases=["pararole"], usage="[@role]",
-        description="Set or view the Paradox ping role.",
+        name="paradoxrole", aliases=["paradox", "pararole", "para"], usage="<role>",
+        description="Set the Paradox ping role.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_paradoxrole(self, ctx: commands.Context, role: discord.Role = None):
+    async def set_paradoxrole(self, ctx: commands.Context, role: discord.Role):
         await self._set_role(ctx, "paradox", "Paradox", role)
 
     @set_group.command(
-        name="eeveelutionsrole", aliases=["eevosroles", "eevosrole"], usage="[@role]",
-        description="Set or view the Eeveelutions ping role.",
+        name="eeveelutionsrole", aliases=["eeveelutions", "eevosrole", "eevos"], usage="<role>",
+        description="Set the Eeveelutions ping role.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_eeveelutionsrole(self, ctx: commands.Context, role: discord.Role = None):
+    async def set_eeveelutionsrole(self, ctx: commands.Context, role: discord.Role):
         await self._set_role(ctx, "eevos", "Eeveelutions", role)
 
 
