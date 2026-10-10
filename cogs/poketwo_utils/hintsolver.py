@@ -4,8 +4,6 @@ from discord.ext import commands
 
 from views.embeds import info_embed
 
-TARGET_USER_ID = 716390085896962058
-
 class HintSolver(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -36,7 +34,7 @@ class HintSolver(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.id != TARGET_USER_ID:
+        if message.author.id != self.bot.poketwo_id:
             return
 
         content = message.content
