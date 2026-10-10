@@ -1,4 +1,4 @@
-"""The ``.lockdm`` page: each member's own lock-DM settings, edited with buttons.
+"""The ``.autolockdm`` page: each member's own lock-DM settings, edited with buttons.
 
 * master switch   – DMs on / off (this is the "status" shown at the top)
 * on autolock     – DM me the moment a channel I was pinged in gets autolocked
@@ -13,7 +13,7 @@ import discord
 from cogs.poketwo_helper.lockcommon import MIN_BEFORE_UNLOCK, format_duration, parse_duration
 from views.common_views import EmbedLayout, error_embed, success_embed
 
-TITLE = "🔔 Lock DMs"
+TITLE = "🔔 Autolock DMs"
 
 
 def build_lockdm_embed(guild: discord.Guild, settings: dict, limit: int | None) -> discord.Embed:
