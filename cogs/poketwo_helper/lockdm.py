@@ -126,7 +126,7 @@ class LockDM(commands.Cog):
         links = _links(ping_url, lock_url)
         if links:
             embed.add_field(name="🔗 Links", value=links, inline=False)
-        embed.set_footer(text=f"Run {self.prefix}lockdm in {channel.guild.name} to change these DMs.")
+        embed.set_footer(text=f"Run {self.prefix}autolockdm in {channel.guild.name} to change these DMs.")
         return embed
 
     async def notify_autolock(
@@ -236,18 +236,18 @@ class LockDM(commands.Cog):
         links = _links(doc.get("ping_url"), doc.get("lock_url"))
         if links:
             embed.add_field(name="🔗 Links", value=links, inline=False)
-        embed.set_footer(text=f"Run {self.prefix}lockdm in {guild_name} to change these DMs.")
+        embed.set_footer(text=f"Run {self.prefix}autolockdm in {guild_name} to change these DMs.")
         await self._send_dm(doc["user_id"], embed)
 
-    # --- .lockdm -------------------------------------------------------------------
+    # --- .autolockdm -------------------------------------------------------------------
 
     @commands.command(
-        name="lockdm",
-        aliases=["ldm"],
-        description="See and change your lock DM settings.",
+        name="autolockdm",
+        aliases=["aldm"],
+        description="See and change your autolock DM settings.",
     )
     @commands.guild_only()
-    async def lockdm(self, ctx: commands.Context):
+    async def autolockdm(self, ctx: commands.Context):
         view = await build_lockdm_page(self, ctx.guild, ctx.author.id)
         view.message = await ctx.reply(view=view, mention_author=False)
 
