@@ -2,12 +2,12 @@ import time
 
 from discord.ext import commands
 
-from cogs.owner_cmds.utils import Progress, run_cmd, safe_edit, safe_send
+from cogs.owner_cmds.utils import OwnerCog, Progress, run_cmd, safe_edit, safe_send
 
 
-class Pull(commands.Cog):
+class Pull(OwnerCog):
     def __init__(self, bot: commands.Bot):
-        self.bot = bot
+        super().__init__(bot)
 
     @commands.command(name="pull")
     @commands.is_owner()
