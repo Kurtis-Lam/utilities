@@ -18,8 +18,6 @@ from views.timer_views import (
 )
 from .baseconfigs import config_group
 
-POKETWO_ID = 716390085896962058
-
 READY_TEXT = "You can catch the pokémon now!"
 STEAL_TEXT = "{mention} you have **{short}** stole **{pokemon}**!"
 
@@ -421,7 +419,7 @@ class Timer(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.id != POKETWO_ID or message.channel.id not in self.active:
+        if message.author.id != self.bot.poketwo_id or message.channel.id not in self.active:
             return
 
         text = " ".join(
