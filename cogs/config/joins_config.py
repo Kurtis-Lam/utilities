@@ -17,11 +17,11 @@ from .baseconfigs import config_group
 async def joinsconfig(ctx: commands.Context):
     cog = ctx.bot.get_cog("Joins")
     if not cog:
-        return await ctx.send(embed=error_embed("Joins module unavailable."))
+        return await ctx.reply(embed=error_embed("Joins module unavailable."), mention_author=False)
 
     config = await cog.get_guild_config(ctx.guild.id)
     view = WelcomeConfigView(cog.collection, config, author_id=ctx.author.id)
-    view.message = await ctx.send(view=view)
+    view.message = await ctx.reply(view=view, mention_author=False)
 
 
 @joinsconfig.error
