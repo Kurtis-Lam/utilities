@@ -6,7 +6,7 @@ from typing import List, Tuple, Optional
 import discord
 from discord.ext import commands
 
-from views.common_views import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed, warning_embed
+from views.common_views import EMBED_COLOR, confirm, error_embed, info_embed, make_embed, success_embed, warning_embed
 from views.embeds import handle_command_error, send_usage
 from views.pings_views import (
     EXTRA_RP_CATEGORIES,
@@ -306,6 +306,31 @@ class PokePings(commands.Cog):
             mapped[canonical] = target
         return mapped
 
+    async def _confirm_clear(self, ctx: commands.Context, ping_type: str, label: str, what: str) -> None:
+        """Ask before wiping the author's whole list, then edit that same message to say
+        what happened (cancelled / timed out are edited automatically)."""
+        g_id = str(ctx.guild.id)
+        u_id = str(ctx.author.id)
+
+        current = await self.get_ping_data(g_id, ping_type, u_id, default=[])
+        if not current:
+            await ctx.reply(embed=warning_embed(f"Your {label} is already empty."), mention_author=False)
+            return
+
+        count = len(current) if isinstance(current, list) else 1
+        confirmed = await confirm(
+            ctx,
+            f"Clear your whole {label}? This removes **{count}** {what} and turns all of its pings off.",
+            title="⚠️ Confirm",
+            cancel_text="❌ Cancelled",
+            timeout_text="⏱️ Timed out",
+        )
+        if not confirmed:
+            return
+
+        await self.clear_ping_category(g_id, ping_type, u_id)
+        await confirmed.show(make_embed(description=f"🧹 Cleared your {label} (**{count}** {what} removed)."))
+
     async def cog_check(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
@@ -336,7 +361,7 @@ class PokePings(commands.Cog):
         *,
         pokemon: str = commands.parameter(
             default=None,
-            description="Pokémon, or 'reset'.",
+            description="Pokémon, or 'clear' / 'reset'.",
         ),
     ):
         g_id = str(ctx.guild.id)
@@ -355,7 +380,7 @@ class PokePings(commands.Cog):
                 f"• `{p}sh <pokemon>` — Choose matching variants",
                 f"• `{p}sh all <pokemon>` — Subscribe to all matching variants",
                 f"• `{p}sh only <pokemon>` — Subscribe to the exact Pokémon only",
-                f"• `{p}sh reset` — Clear"
+                f"• `{p}sh clear` | `{p}sh reset` — Remove all your targets"
             ])
             embed = discord.Embed(
                 title="✨ Shiny Hunt",
@@ -365,9 +390,8 @@ class PokePings(commands.Cog):
             await ctx.reply(embed=embed, mention_author=False)
             return
 
-        if pokemon.strip().lower() == "reset":
-            await self.clear_ping_category(g_id, "sh", u_id)
-            await ctx.reply(embed=make_embed(description="🧹 Cleared."), mention_author=False)
+        if pokemon.strip().lower() in ("clear", "reset"):
+            await self._confirm_clear(ctx, "sh", "Shiny Hunt list", "target(s)")
             return
 
         mode = "select"
@@ -390,7 +414,7 @@ class PokePings(commands.Cog):
             embeds = self._sh_confirmation_embeds(variants, "✨ Shiny Hunt Pings Added")
             await ctx.reply(embeds=embeds[:10], mention_author=False)
             for start in range(10, len(embeds), 10):
-                await ctx.send(embeds=embeds[start:start + 10])
+                await ctx.reply(embeds=embeds[start:start + 10], mention_author=False)
             return
 
         if mode == "only" or len(variants) == 1:
@@ -422,6 +446,7 @@ class PokePings(commands.Cog):
                     description=(
                         f"• `{p}cl a <pokemon>` — Add\n"
                         f"• `{p}cl r <pokemon>` — Remove\n"
+                        f"• `{p}cl clear` | `{p}cl reset` — Remove everything\n"
                         f"• `{p}cl list` — View"
                     ),
                     color=EMBED_COLOR
@@ -512,13 +537,9 @@ class PokePings(commands.Cog):
 
         await ctx.reply(embed=make_embed(description="\n".join(msg_parts)), mention_author=False)
 
-    @cl_group.command(name="clear", aliases=["c"], description="Clear your whole collection list.")
+    @cl_group.command(name="clear", aliases=["c", "reset"], description="Clear your whole collection list.")
     async def cl_clear(self, ctx: commands.Context):
-        g_id = str(ctx.guild.id)
-        u_id = str(ctx.author.id)
-
-        await self.set_ping_data(g_id, "cl", u_id, [])
-        await ctx.reply(embed=make_embed(description="🧹 Cleared."), mention_author=False)
+        await self._confirm_clear(ctx, "cl", "collection list", "Pokémon")
 
     @cl_group.command(name="list", aliases=["l"], description="Show your collection list.")
     async def cl_list(self, ctx: commands.Context):
@@ -789,7 +810,7 @@ class PokePings(commands.Cog):
         *,
         target: str = commands.parameter(
             default=None,
-            description="Type(s) to toggle. Empty = menu.",
+            description="Type(s) to toggle, 'clear' / 'reset' to turn all off. Empty = menu.",
         ),
     ):
         g_id = str(ctx.guild.id)
@@ -800,6 +821,10 @@ class PokePings(commands.Cog):
             view = TypePingView(self, ctx.author.id, user_types)
             embed = view.make_embed(user_types)
             await ctx.reply(embed=embed, view=view, mention_author=False)
+            return
+
+        if target.strip().lower() in ("clear", "reset"):
+            await self._confirm_clear(ctx, "tp", "type pings", "type(s)")
             return
 
         types_map = {t.lower(): t for t in TYPES}
@@ -848,7 +873,7 @@ class PokePings(commands.Cog):
         *,
         target: str = commands.parameter(
             default=None,
-            description="Region(s) or Gmax/Paradox/Eevos. Empty = menu.",
+            description="Region(s) or Gmax/Paradox/Eevos, 'clear' / 'reset' to turn all off. Empty = menu.",
         ),
     ):
         g_id = str(ctx.guild.id)
@@ -859,6 +884,10 @@ class PokePings(commands.Cog):
             view = RegionPingView(self, ctx.author.id, user_regions)
             embed = view.make_embed(user_regions)
             await ctx.reply(embed=embed, view=view, mention_author=False)
+            return
+
+        if target.strip().lower() in ("clear", "reset"):
+            await self._confirm_clear(ctx, "rp", "region pings", "region(s)")
             return
 
         all_items = REGIONS + EXTRA_RP_CATEGORIES
