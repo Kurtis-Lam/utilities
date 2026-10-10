@@ -143,7 +143,7 @@ class GitStats(OwnerCog):
 
         if frc != 0:
             embed.set_footer(text=f"⚠️ Fetch failed, remote info may be stale: {ferr[:100]}")
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
 
 async def setup(bot: commands.Bot):
