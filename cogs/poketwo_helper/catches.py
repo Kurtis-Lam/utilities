@@ -9,7 +9,6 @@ from pymongo import ASCENDING, DESCENDING, UpdateOne
 from views.common_views import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed
 from views.embeds import handle_command_error, send_usage
 
-POKETWO_ID = 716390085896962058
 HKT = timezone(timedelta(hours=8))
 
 
@@ -177,7 +176,7 @@ class Catches(commands.Cog):
     async def on_message(self, message: discord.Message):
         if (
             not message.guild
-            or message.author.id != POKETWO_ID
+            or message.author.id != self.bot.poketwo_id
             or not message.content.startswith("Congratulations ")
             or not message.mentions
         ):
