@@ -308,7 +308,7 @@ class Starboard(commands.Cog):
         config = await self.starboard_collection.find_one({"guild_id": str(ctx.guild.id)})
         embed = build_status_embed(config.get("channel_id") if config else None)
         view = StarboardView(self, ctx)
-        view.message = await ctx.send(embed=embed, view=view)
+        view.message = await ctx.reply(embed=embed, view=view, mention_author=False)
 
     @starboard.command(
         name="reset",
@@ -323,7 +323,7 @@ class Starboard(commands.Cog):
             if result.deleted_count
             else "No starboard channel is configured."
         )
-        await ctx.send(embed=success_embed(message))
+        await ctx.reply(embed=success_embed(message), mention_author=False)
 
 
 async def setup(bot):
