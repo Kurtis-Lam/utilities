@@ -54,7 +54,7 @@ ROLE_COMMAND_HINTS = {
     "regional": "`.set regionalrole` (alias `.set regrole`)",
     "gmax": "`.set gigantamaxrole` (alias `.set gmaxrole`)",
     "paradox": "`.set paradoxrole` (alias `.set pararole`)",
-    "eevos": "`.set eeveelutionsrole` (alias `.set eevosroles`)",
+    "eevos": "`.set eeveelutionsrole` (alias `.set eevosrole`)",
 }
 
 CATEGORY_DESCRIPTIONS = {
