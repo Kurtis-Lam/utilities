@@ -99,7 +99,7 @@ class AutoLock(commands.Cog):
         activated_categories: categories that matched this spawn (re, sh, cl, tp, rp, rare, ...)
         category_users:       {"re": {uid, ...}, "sh": {...}, ...} users pinged per category
         pinged_users:         users actually @mentioned in the ping message (never role pings);
-                              these are the people LockDM may DM once the channel is locked
+                              these are the people AutoLockDM may DM once the channel is locked
         ping_url:             jump link of the ping message, included in those DMs
         """
         if channel.id in self.pending_locks:
@@ -271,12 +271,12 @@ class AutoLock(commands.Cog):
         except Exception as e:
             print(f"AutoLock: failed to store lock message id: {e}")
 
-        # DM the members who were pinged for this spawn (each one's /lockdm settings decide
+        # DM the members who were pinged for this spawn (each one's /autolockdm settings decide
         # whether and when). Runs in the background so a slow DM never delays anything.
-        lockdm = self.bot.get_cog("LockDM")
-        if lockdm and pinged_users:
+        autolockdm = self.bot.get_cog("AutoLockDM")
+        if autolockdm and pinged_users:
             task = asyncio.create_task(
-                lockdm.notify_autolock(
+                autolockdm.notify_autolock(
                     channel=channel,
                     user_ids=set(pinged_users),
                     categories=active,

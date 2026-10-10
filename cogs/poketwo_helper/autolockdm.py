@@ -6,7 +6,7 @@ from discord.ext import commands, tasks
 
 from cogs.poketwo_helper.lockcommon import LOCK_COLOR, SHORT_NAMES, WARN_COLOR, stamp
 from views.embeds import handle_command_error
-from views.lockdm_views import build_lockdm_page
+from views.autolockdm_views import build_autolockdm_page
 
 DEFAULT_SETTINGS = {
     "enabled": True,          # master switch
@@ -34,7 +34,7 @@ def _links(ping_url: str | None, lock_url: str | None) -> str:
     return " • ".join(links)
 
 
-class LockDM(commands.Cog):
+class AutoLockDM(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -46,11 +46,11 @@ class LockDM(commands.Cog):
 
     @property
     def settings_collection(self):
-        return self.db["lockdm"]
+        return self.db["autolockdm"]
 
     @property
     def reminders_collection(self):
-        return self.db["lockdm_reminders"]
+        return self.db["autolockdm_reminders"]
 
     @property
     def locks_collection(self):
@@ -64,7 +64,7 @@ class LockDM(commands.Cog):
         try:
             await self.reminders_collection.create_index("at")
         except Exception as e:
-            print(f"LockDM: could not create reminder index: {e}")
+            print(f"AutoLockDM: could not create reminder index: {e}")
         self.reminder_loop.start()
 
     async def cog_unload(self):
@@ -187,7 +187,7 @@ class LockDM(commands.Cog):
                     await self._send_dm(user_id, embed)
                     await asyncio.sleep(DM_PAUSE)
         except Exception as e:
-            print(f"LockDM: failed to notify for #{getattr(channel, 'id', '?')}: {e}")
+            print(f"AutoLockDM: failed to notify for #{getattr(channel, 'id', '?')}: {e}")
 
     # --- "before unlock" reminders ------------------------------------------------
 
@@ -199,14 +199,14 @@ class LockDM(commands.Cog):
                 # Claim one due reminder (atomic, so it can never be sent twice).
                 doc = await self.reminders_collection.find_one_and_delete({"at": {"$lte": now}})
             except Exception as e:
-                print(f"LockDM: failed to read due reminders: {e}")
+                print(f"AutoLockDM: failed to read due reminders: {e}")
                 return
             if doc is None:
                 return
             try:
                 await self._send_reminder(doc)
             except Exception as e:
-                print(f"LockDM: failed to send a reminder: {e}")
+                print(f"AutoLockDM: failed to send a reminder: {e}")
 
     @reminder_loop.before_loop
     async def _before_reminder_loop(self):
@@ -248,9 +248,9 @@ class LockDM(commands.Cog):
     )
     @commands.guild_only()
     async def autolockdm(self, ctx: commands.Context):
-        view = await build_lockdm_page(self, ctx.guild, ctx.author.id)
+        view = await build_autolockdm_page(self, ctx.guild, ctx.author.id)
         view.message = await ctx.reply(view=view, mention_author=False)
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(LockDM(bot))
+    await bot.add_cog(AutoLockDM(bot))

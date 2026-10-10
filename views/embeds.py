@@ -123,7 +123,7 @@ USAGE_EXAMPLES = {
     # config
     "config": [
         "{p}config autolock",
-        "{p}c a",
+        "{p}c al",
         "{p}c spawns",
         "{p}c joins",
     ],
@@ -140,10 +140,25 @@ USAGE_EXAMPLES = {
     "resume": ["{p}resume", "{p}resume 1 2", "{p}r 3"],
     # poketwo-management: set
     "set": [
-        "{p}set lockdelay 15 sh",
-        "{p}set locktime 2h sh --global",
-        "{p}set shtimer 20",
+        "{p}set eeveelutionsrole @Eevee Ping",
+        "{p}set gmax @GMax Ping",
+        "{p}set para 123456789012345678",
         "{p}set rarerole @Rare Ping",
+        "{p}set reg @Regional Ping",
+        "{p}set lockdelay 15 sh",
+        "{p}set ld 15 sh cl --global",
+        "{p}set ld 20 --standard",
+        "{p}set shtimer 20",
+        "{p}set locktime 2h sh",
+        "{p}set lt 30m sh cl --global",
+        "{p}set lt 1h --stan",
+        "{p}set whitelist add #chat #bots sh",
+        "{p}set wl r #chat sh cl",
+        "{p}set wl add #chat --standard",
+        "{p}set restrictunlockers true sh",
+        "{p}set ru f sh cl --global",
+        "{p}set ru t --standard",
+        "{p}set use-standard sh cl",
     ],
     "set lockdelay": [
         "{p}set lockdelay 15 sh",
@@ -151,19 +166,30 @@ USAGE_EXAMPLES = {
         "{p}set lockdelay 15",
         "{p}set lockdelay 15 sh --global",
         "{p}set lockdelay 20 --standard",
+        "{p}set lockdelay 20 --stan",
     ],
     "set locktime": [
         "{p}set locktime 2h sh",
         "{p}set lt 30m sh cl --global",
         "{p}set locktime 2h",
         "{p}set locktime off sh",
+        "{p}set locktime 2h --standard",
         "{p}set locktime 2h --stan",
     ],
     "set whitelist": [
         "{p}set whitelist add #chat #bots sh",
+        "{p}set wl a 123456789012345678 sh cl",
         "{p}set wl r #chat sh cl",
         "{p}set whitelist add #chat",
         "{p}set whitelist add #chat #bots --standard",
+        "{p}set whitelist remove #chat --stan",
+    ],
+    "set restrictunlockers": [
+        "{p}set restrictunlockers true sh",
+        "{p}set ru f sh cl",
+        "{p}set restrict-unlockers t",
+        "{p}set ru false sh --global",
+        "{p}set ru t --standard",
     ],
     "set use-standard": ["{p}set use-standard sh", "{p}set use-standard sh cl tp"],
     "set shtimer": ["{p}set shtimer 15", "{p}set shtimer 30s"],
@@ -177,11 +203,19 @@ USAGE_EXAMPLES = {
     "set eeveelutionsrole": ["{p}set eeveelutionsrole @Eevee Ping", "{p}set eevos @Eevee Ping"],
     # poketwo-management: toggle
     "toggle": [
-        "{p}toggle shlock",
-        "{p}toggle sh --global",
-        "{p}toggle sh cl",
+        "{p}toggle sh",
+        "{p}toggle sh cl --global",
         "{p}toggle naming",
         "{p}toggle naming --global",
+        "{p}toggle locktime sh cl",
+        "{p}toggle locktime sh --global",
+        "{p}toggle locktime --standard",
+        "{p}toggle lockdelay sh",
+        "{p}toggle lockdelay sh cl --global",
+        "{p}toggle lockdelay --standard",
+        "{p}toggle restrictunlockers sh",
+        "{p}toggle ru sh cl --global",
+        "{p}toggle ru --standard",
     ],
     "toggle naming": ["{p}toggle naming", "{p}toggle naming --global"],
     "toggle lockdelay": [
@@ -197,15 +231,52 @@ USAGE_EXAMPLES = {
     ],
     "toggle restrictunlockers": [
         "{p}toggle restrictunlockers res",
-        "{p}toggle restuls res sh",
-        "{p}toggle restrictunlockers res --global",
+        "{p}toggle ru res sh",
+        "{p}toggle restrict-unlockers res --global",
+        "{p}toggle ru --standard",
     ],
+    # poketwo-helper
+    "autolockdm": ["{p}autolockdm"],
     # poketwo-management: settings
     "channelsettings": ["{p}channelsettings", "{p}chsettings"],
     # poketwo-utils
     "dex": ["{p}dex pikachu", "{p}dex 25", "{p}pokedex #25"],
     "extract": ["Reply to a Pokétwo embed with: {p}extract", "Reply to a Pokétwo embed with: {p}ex"],
     "checkflee": ["{p}checkflee"],
+}
+
+
+# ---------------------------------------------------------------------------
+# Group overviews: what `.set` / `.toggle` (no subcommand) print. Hand-written so the list
+# keeps this order and shows every alias. {} = required, [] = optional. {p} = the prefix.
+# ---------------------------------------------------------------------------
+USAGE_OVERVIEWS = {
+    "set": [
+        "{p}set eeveelutionsrole|eeveelutions|eevosrole|eevos {role}",
+        "{p}set gigantamaxrole|gigantamax|gmaxrole|gmax {role}",
+        "{p}set paradoxrole|paradox|pararole|para {role}",
+        "{p}set rarerole|rare|rarole|ra {role}",
+        "{p}set regionalrole|regional|regrole|reg {role}",
+        "{p}set lockdelay|lock-delay|delay|ld {time} [lock] [--global|--standard]",
+        "{p}set shtimer/cltimer/rptimer/tptimer {timer}",
+        "{p}set locktime|lock-time|time|lt {time} [lock(s)] [--global|--standard]",
+        "{p}set whitelist|wl {add|a|remove|r} {channel mention(s) / channel id(s)} [lock(s)] [--standard]",
+        "{p}set restrictunlockers|restrict-unlockers|ru {true|false|t|f} [lock(s)] [--global|--standard]",
+        "{p}set use-standard {lock(s)}",
+    ],
+    "toggle": [
+        "{p}toggle {lock} [--global]",
+        "{p}toggle naming [--global]",
+        "{p}toggle locktime {lock(s)} [--global|--standard]",
+        "{p}toggle lockdelay {lock(s)} [--global|--standard]",
+        "{p}toggle restrictunlockers|restrict-unlockers|ru {lock(s)} [--global|--standard]",
+    ],
+}
+USAGE_OVERVIEW_NOTES = {
+    "set": "`{}` required • `[]` optional • `--standard` / `--stan` can't be combined with `--global`, "
+           "and only works with lockdelay, locktime, whitelist and restrictunlockers.",
+    "toggle": "`{}` required • `[]` optional • `--standard` / `--stan` can't be combined with `--global`, "
+              "and only works with lockdelay, locktime and restrictunlockers.",
 }
 
 
@@ -326,6 +397,16 @@ async def group_usage_embed(ctx, note: str = None, title: str = None) -> discord
     if note:
         lines.append(note)
 
+    overview = USAGE_OVERVIEWS.get(group.qualified_name)
+    if overview:
+        lines.append(USAGE_OVERVIEW_NOTES[group.qualified_name])
+        lines.append("\n".join(f"`{line.replace('{p}', prefix)}`" for line in overview))
+        return discord.Embed(
+            title=title or "Usage",
+            description="\n".join(lines)[:4096],
+            color=BRAND_COLOR,
+        )
+
     subs = []
     for sub in sorted(group.commands, key=lambda c: c.name):
         if sub.hidden:
@@ -351,7 +432,7 @@ async def send_usage(ctx, note: str = None, title: str = None):
     When examples / argument descriptions exist, an 'Example' button is placed
     inside the embed itself."""
     cmd = ctx.command
-    if isinstance(cmd, commands.Group) and not cmd.clean_params:
+    if isinstance(cmd, commands.Group) and (not cmd.clean_params or cmd.qualified_name in USAGE_OVERVIEWS):
         embed = await group_usage_embed(ctx, note=note, title=title)
     else:
         embed = usage_embed(ctx, note=note, title=title)

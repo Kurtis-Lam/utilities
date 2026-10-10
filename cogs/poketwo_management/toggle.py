@@ -45,7 +45,7 @@ class Toggle(commands.Cog):
         if is_global and is_standard:
             message = "`--global` and `--standard` can't be used together."
         elif is_standard and not allow_standard:
-            message = "`--standard` can only be used with lockdelay, locktime and whitelist."
+            message = "`--standard` can only be used with lockdelay, locktime and restrictunlockers (and `.set whitelist`)."
         elif is_standard and locks:
             message = "`--standard` toggles the standard values, so don't list locks with it."
         if message:
@@ -80,7 +80,7 @@ class Toggle(commands.Cog):
         name="toggle",
         invoke_without_command=True,
         usage="<lock...> [--global]",
-        description="Toggle locks, Pokémon naming, delays and restrictions.",
+        description="Toggle locks, Pokémon naming, lock delays, lock times and restrict unlockers.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -247,26 +247,34 @@ class Toggle(commands.Cog):
         self._unknown_field(embed, unknown)
         await ctx.reply(embed=embed, mention_author=False)
 
-    # --- .toggle restrictunlockers <lock...> -----------------------------------
+    # --- .toggle restrictunlockers|restrict-unlockers|ru {lock(s)} [--global|--standard] ---
 
     @toggle_group.command(
         name="restrictunlockers",
         aliases=["restuls", "restrict-unlockers", "restrict", "ru"],
-        usage="<lock...> [--global]",
+        usage="<lock(s)...> [--global|--standard]",
         description="Only pinged users can unlock (res/sh/cl/tp/rp).",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def toggle_restrictunlockers(self, ctx: commands.Context, *locks_and_flags: str):
         locks, global_flag, standard_flag = split_scope_flags(locks_and_flags)
-        if await self._flag_error(ctx, locks, global_flag, standard_flag, allow_standard=False):
+        if await self._flag_error(ctx, locks, global_flag, standard_flag, allow_standard=True):
             return
-        if not locks:
+        if not locks and not standard_flag:
             return await send_usage(ctx, title="Missing arg: `lock`")
 
         cog = await self._config_cog(ctx)
         if not cog:
             return
+
+        if standard_flag:
+            new_state = await cog.toggle_restrict(ctx.guild.id, STANDARD)
+            state = "**On ✅**" if new_state else "**Off ❌**"
+            return await ctx.reply(
+                embed=ok_embed("Standard Restrict Toggled", f"Restrict unlockers: {state}", emoji="🔐"),
+                mention_author=False,
+            )
 
         cats, unknown = self._resolve_all(cog, locks)
         if not cats:

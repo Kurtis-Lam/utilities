@@ -4,8 +4,6 @@ import re
 import discord
 
 from cogs.poketwo_helper.lockcommon import (
-    DEFAULT_DELAY,
-    DEFAULT_LOCKTIME,
     MAX_LOCKTIME,
     MIN_LOCKTIME,
     format_duration,
@@ -270,7 +268,7 @@ def _on_off_button(label: str, is_on: bool, callback, emoji=None):
 
 class _SettingsView(EmbedLayout):
     """Shared plumbing of the lock page and the standard page: the buttons that edit
-    delay / lock time / whitelist behave identically on both (``self.category`` is a
+    delay / lock time / whitelist / restrict behave identically on both (``self.category`` is a
     lock key or ``"standard"``)."""
 
     def __init__(self, cog, guild_id: int, author_id: int, category: str, embed: discord.Embed | None):
@@ -314,14 +312,33 @@ class _SettingsView(EmbedLayout):
         await self.cog.toggle_locktime(self.guild_id, self.category)
         await self.reload(interaction)
 
-    def _setting_row(self) -> list:
+    async def _toggle_restrict(self, interaction: discord.Interaction):
+        await self.cog.toggle_restrict(self.guild_id, self.category)
+        await self.reload(interaction)
+
+    # One row per setting, in this order (the lock / use-standard / back rows are added by the pages):
+    #   set delay + delay on/off | set lock time + lock time on/off | whitelist add/remove/clear | restrict on/off
+    def _delay_row(self, cfg: dict) -> list:
         return [
             _make_button("Set Delay", discord.ButtonStyle.blurple, self._set_delay, emoji="⏱️"),
+            _on_off_button("Delay", cfg.get("delay_enabled", True), self._toggle_delay, emoji="⏲️"),
+        ]
+
+    def _locktime_row(self, cfg: dict) -> list:
+        return [
             _make_button("Set Lock Time", discord.ButtonStyle.blurple, self._set_locktime, emoji="⌛"),
+            _on_off_button("Lock Time", cfg.get("locktime_enabled", False), self._toggle_locktime, emoji="⏳"),
+        ]
+
+    def _whitelist_row(self) -> list:
+        return [
             _make_button("Add Whitelist", discord.ButtonStyle.green, self._add_whitelist, emoji="➕"),
             _make_button("Remove Whitelist", discord.ButtonStyle.red, self._remove_whitelist, emoji="➖"),
             _make_button("Clear Whitelist", discord.ButtonStyle.red, self._clear_whitelist, emoji="🧹"),
         ]
+
+    def _restrict_row(self, cfg: dict) -> list:
+        return [_on_off_button("Restrict", cfg.get("restrict_unlockers", True), self._toggle_restrict, emoji="🛡️")]
 
 
 class CategoryConfigView(_SettingsView):
@@ -338,45 +355,31 @@ class CategoryConfigView(_SettingsView):
         super().__init__(cog, guild_id, author_id, category, embed)
         std = std or {}
 
-        self.schedule_row = self._setting_row()
-
         is_enabled = cfg.get("enabled", False)
-        self.switch_row = [
+        self.lock_row = [
             _make_button(
                 "Turn Lock Off" if is_enabled else "Turn Lock On",
                 discord.ButtonStyle.red if is_enabled else discord.ButtonStyle.green,
                 self._toggle_lock,
                 emoji="🔒" if is_enabled else "🔓",
-            ),
-            _on_off_button("Delay", cfg.get("delay_enabled", True), self._toggle_delay, emoji="⏲️"),
-            _on_off_button("Lock Time", cfg.get("locktime_enabled", False), self._toggle_locktime, emoji="⏳"),
-        ]
-
-        if category in RESTRICT_CATEGORIES:
-            self.switch_row.append(
-                _on_off_button("Restrict", cfg.get("restrict_unlockers", True), self._toggle_restrict, emoji="🛡️")
             )
-
-        std_delay = f"{std.get('delay', DEFAULT_DELAY)}s" + ("" if std.get("delay_enabled", True) else ", off")
-        std_locktime = format_duration(std.get("locktime", DEFAULT_LOCKTIME)) + (
-            "" if std.get("locktime_enabled", False) else ", off"
-        )
-        std_whitelist = len(std.get("whitelist", []))
-        self.standard_row = [
-            _make_button(f"Use Standard Delay ({std_delay})", discord.ButtonStyle.gray, self._use_std_delay, emoji="⭐"),
-            _make_button(
-                f"Use Standard Lock Time ({std_locktime})", discord.ButtonStyle.gray, self._use_std_locktime, emoji="⭐"
-            ),
-            _make_button(
-                f"Use Standard Whitelist ({std_whitelist})", discord.ButtonStyle.gray, self._use_std_whitelist, emoji="⭐"
-            ),
         ]
-
+        self.delay_row = self._delay_row(cfg)
+        self.locktime_row = self._locktime_row(cfg)
+        self.whitelist_row = self._whitelist_row()
+        self.restrict_row = self._restrict_row(cfg) if category in RESTRICT_CATEGORIES else None
+        self.standard_row = [
+            _make_button("Use Standard", discord.ButtonStyle.gray, self._use_standard, emoji="⭐")
+        ]
         self.nav_row = [_make_button("Back", discord.ButtonStyle.gray, self._back, emoji="◀️")]
         self.render()
 
     def rows(self):
-        return [self.schedule_row, self.switch_row, self.standard_row, self.nav_row]
+        rows = [self.lock_row, self.delay_row, self.locktime_row, self.whitelist_row]
+        if self.restrict_row:
+            rows.append(self.restrict_row)
+        rows += [self.standard_row, self.nav_row]
+        return rows
 
     async def reload(self, interaction: discord.Interaction):
         view = await _build_category_page(
@@ -384,36 +387,26 @@ class CategoryConfigView(_SettingsView):
         )
         await self.swap(interaction, view=view)
 
-    async def _use_standard(self, interaction: discord.Interaction, part: str, text: str):
-        await self.cog.use_standard(self.guild_id, self.category, (part,))
+    async def _use_standard(self, interaction: discord.Interaction):
+        """One button: copy the standard delay, lock time, whitelist (and restrict) onto this lock."""
+        applied = await self.cog.use_standard(self.guild_id, self.category)
         await self.reload(interaction)
-        await interaction.followup.send(embed=success_embed(text), ephemeral=True)
 
-    async def _use_std_delay(self, interaction: discord.Interaction):
-        std = await self.cog.get_standard(self.guild_id)
-        state = "" if std.get("delay_enabled", True) else " (delay is off)"
-        await self._use_standard(interaction, "delay", f"Lock delay set to the standard `{std.get('delay', DEFAULT_DELAY)}s`.{state}")
-
-    async def _use_std_locktime(self, interaction: discord.Interaction):
-        std = await self.cog.get_standard(self.guild_id)
-        state = "" if std.get("locktime_enabled", False) else " (auto-unlock is off)"
-        await self._use_standard(
-            interaction,
-            "locktime",
-            f"Lock time set to the standard `{format_duration(std.get('locktime', DEFAULT_LOCKTIME))}`.{state}",
+        delay, delay_on = applied["delay"]
+        locktime, locktime_on = applied["locktime"]
+        lines = [
+            f"⏱️ Delay: `{delay}s`" + ("" if delay_on else " (off)"),
+            f"⌛ Lock time: `{format_duration(locktime)}`" + ("" if locktime_on else " (off)"),
+            f"📋 Whitelist: `{len(applied['whitelist'])}` entr{'y' if len(applied['whitelist']) == 1 else 'ies'}",
+        ]
+        if "restrict" in applied:
+            lines.append(f"🛡️ Restrict: {'On' if applied['restrict'] else 'Off'}")
+        await interaction.followup.send(
+            embed=success_embed("Standard applied to this lock.\n" + "\n".join(lines)), ephemeral=True
         )
-
-    async def _use_std_whitelist(self, interaction: discord.Interaction):
-        std = await self.cog.get_standard(self.guild_id)
-        count = len(std.get("whitelist", []))
-        await self._use_standard(interaction, "whitelist", f"Whitelist replaced with the standard one (`{count}` entries).")
 
     async def _toggle_lock(self, interaction: discord.Interaction):
         await self.cog.toggle_lock(self.guild_id, self.category)
-        await self.reload(interaction)
-
-    async def _toggle_restrict(self, interaction: discord.Interaction):
-        await self.cog.toggle_restrict(self.guild_id, self.category)
         await self.reload(interaction)
 
     async def _back(self, interaction: discord.Interaction):
@@ -422,21 +415,20 @@ class CategoryConfigView(_SettingsView):
 
 
 class StandardConfigView(_SettingsView):
-    """⭐ The server's standard delay / lock time / whitelist."""
+    """⭐ The server's standard delay / lock time / whitelist / restrict."""
 
     def __init__(self, cog, guild_id: int, author_id: int, cfg: dict, embed: discord.Embed | None = None):
         super().__init__(cog, guild_id, author_id, "standard", embed)
 
-        self.schedule_row = self._setting_row()
-        self.switch_row = [
-            _on_off_button("Delay", cfg.get("delay_enabled", True), self._toggle_delay, emoji="⏲️"),
-            _on_off_button("Lock Timer", cfg.get("locktime_enabled", False), self._toggle_locktime, emoji="⏳"),
-        ]
+        self.delay_row = self._delay_row(cfg)
+        self.locktime_row = self._locktime_row(cfg)
+        self.whitelist_row = self._whitelist_row()
+        self.restrict_row = self._restrict_row(cfg)
         self.nav_row = [_make_button("Back", discord.ButtonStyle.gray, self._back, emoji="◀️")]
         self.render()
 
     def rows(self):
-        return [self.schedule_row, self.switch_row, self.nav_row]
+        return [self.delay_row, self.locktime_row, self.whitelist_row, self.restrict_row, self.nav_row]
 
     async def reload(self, interaction: discord.Interaction):
         view = await build_standard_page(self.cog, interaction.guild, self.guild_id, self.author_id)

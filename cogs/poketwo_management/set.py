@@ -4,13 +4,14 @@ import discord
 from discord.ext import commands
 
 from cogs.poketwo_helper.lockcommon import (
+    STANDARD_FLAGS,
     MAX_LOCKTIME,
     MIN_LOCKTIME,
     format_duration,
     parse_duration,
     split_scope_flags,
 )
-from views.autolock_views import MAX_DELAY, MIN_DELAY, whitelist_result_text
+from views.autolock_views import MAX_DELAY, MIN_DELAY, RESTRICT_CATEGORIES, whitelist_result_text
 from views.embeds import (
     err_embed,
     handle_command_error,
@@ -27,6 +28,16 @@ REMOVE_WORDS = {"remove", "r"}
 CLEAR_WORDS = {"clear", "reset"}
 ON_WORDS = {"on", "enable", "enabled", "true"}
 OFF_WORDS = {"off", "disable", "disabled", "false"}
+TRUE_WORDS = {"true", "t", "yes", "y", "on", "enable", "enabled"}
+FALSE_WORDS = {"false", "f", "no", "n", "off", "disable", "disabled"}
+
+# Only these accept --standard / --stan; every other .set command rejects the flag.
+STANDARD_COMMANDS = "lockdelay, locktime, whitelist and restrictunlockers"
+NO_STANDARD_COMMANDS = {
+    "set shtimer", "set cltimer", "set rptimer", "set tptimer",
+    "set rarerole", "set regionalrole", "set gigantamaxrole", "set paradoxrole", "set eeveelutionsrole",
+    "set use-standard",
+}
 
 STANDARD = "standard"
 
@@ -42,11 +53,18 @@ class Set(commands.Cog):
         # Missing/invalid arguments -> "how to use" embed, other errors -> embeds
         await handle_command_error(ctx, error)
 
+    async def cog_before_invoke(self, ctx: commands.Context):
+        # --standard is only meaningful for lockdelay / locktime / whitelist / restrictunlockers.
+        # Without this guard the timer / role / use-standard commands would silently ignore it.
+        if ctx.command and ctx.command.qualified_name in NO_STANDARD_COMMANDS:
+            if any(word.lower() in STANDARD_FLAGS for word in ctx.message.content.split()):
+                raise commands.BadArgument(f"`--standard` can only be used with {STANDARD_COMMANDS}.")
+
     # --- group command ---------------------------------------------------------
     @commands.group(
         name="set",
         invoke_without_command=True,
-        description="Configure lock delays, lock times, whitelists, timers and category ping roles.",
+        description="Configure lock delays, lock times, whitelists, restrict unlockers, timers and ping roles.",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -324,13 +342,76 @@ class Set(commands.Cog):
                 embed.add_field(name=label, value=text[:1024], inline=False)
         await ctx.reply(embed=embed, mention_author=False)
 
+    # --- .set restrictunlockers|restrict-unlockers|ru {true|false|t|f} [lock(s)] [--global|--standard] ---
+
+    @set_group.command(
+        name="restrictunlockers",
+        aliases=["restrict-unlockers", "ru"],
+        usage="<true|false|t|f> [lock(s)...] [--global|--standard]",
+        description="Only the pinged user(s) can unlock (res/sh/cl/tp/rp; no lock = all of them).",
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def set_restrictunlockers(self, ctx: commands.Context, *args: str):
+        tokens, is_global, is_standard = split_scope_flags(args)
+        if not tokens:
+            return await send_usage(ctx, title="Missing arg: `true|false`")
+        value, locks = tokens[0].lower(), tokens[1:]
+        if value not in TRUE_WORDS | FALSE_WORDS:
+            return await ctx.reply(embed=err_embed("Use `true`, `false`, `t` or `f`."), mention_author=False)
+        on = value in TRUE_WORDS
+
+        if await self._scope_error(ctx, locks, is_global, is_standard):
+            return
+        cog = await self._cog(ctx)
+        if not cog:
+            return
+
+        scope = self._scope_text(ctx, is_global, is_standard)
+        state = "**On ✅**" if on else "**Off ❌**"
+
+        if is_standard:
+            await cog.set_restrict(ctx.guild.id, STANDARD, on)
+            return await ctx.reply(
+                embed=ok_embed("Standard Restrict Updated", f"🛡️ Restrict unlockers: {state} (standard)", emoji="🛡️"),
+                mention_author=False,
+            )
+
+        if locks:
+            cats, unknown = self._resolve_locks(cog, locks)
+            if not cats:
+                return await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
+        else:
+            cats, unknown = [c for c in cog.all_categories() if cog.can_restrict(c)], []
+
+        lines, changed = [], 0
+        for cat in cats:
+            if not cog.can_restrict(cat):
+                lines.append(f"⚠️ **{cog.display_name(cat)}** can't be restricted.")
+                continue
+            if is_global:
+                await cog.set_restrict(ctx.guild.id, cat, on)
+            else:
+                await cog.set_restrict_channel(ctx.guild.id, ctx.channel.id, cat, on)
+            lines.append(f"🛡️ **{cog.display_name(cat)}** restrict: {state} ({scope})")
+            changed += 1
+
+        description = "\n".join(lines)[:4096]
+        embed = (
+            ok_embed("Restrict Updated", description, emoji="🛡️")
+            if changed
+            else warn_embed("Nothing Changed", description)
+        )
+        self._unknown_field(embed, unknown)
+        await ctx.reply(embed=embed, mention_author=False)
+
     # --- .set use-standard <lock...> ----------------------------------------------------
 
     @set_group.command(
         name="use-standard",
         aliases=["usestandard", "standard"],
         usage="<lock...>",
-        description="Copy the standard delay, lock time and whitelist onto a lock (server-wide).",
+        description="Copy the standard delay, lock time, whitelist and restrict onto a lock (server-wide).",
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -350,11 +431,14 @@ class Set(commands.Cog):
             applied = await cog.use_standard(ctx.guild.id, cat)
             delay, delay_on = applied["delay"]
             locktime, locktime_on = applied["locktime"]
-            lines.append(
+            line = (
                 f"⭐ **{cog.display_name(cat)}** — delay `{delay}s`{'' if delay_on else ' (off)'}, "
                 f"lock time `{format_duration(locktime)}`{'' if locktime_on else ' (off)'}, "
                 f"whitelist `{len(applied['whitelist'])}`"
             )
+            if "restrict" in applied:
+                line += f", restrict {'on' if applied['restrict'] else 'off'}"
+            lines.append(line)
         embed = ok_embed("Standard Applied", "\n".join(lines)[:4096], emoji="⭐")
         self._unknown_field(embed, unknown)
         await ctx.reply(embed=embed, mention_author=False)

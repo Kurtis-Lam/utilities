@@ -510,7 +510,7 @@ class Recognize(commands.Cog):
             self.pending_verifications.popitem(last=False)    
 
         # Users really @mentioned in the ping message (role pings never match <@&id>);
-        # AutoLock hands these to LockDM. Nobody was pinged if the message couldn't be sent.
+        # AutoLock hands these to AutoLockDM. Nobody was pinged if the message couldn't be sent.
         pinged_users = (
             {int(uid) for uid in re.findall(r"<@!?(\d+)>", pings or "")} if detection_msg else set()
         )

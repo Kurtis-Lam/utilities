@@ -26,7 +26,7 @@ from .baseconfigs import config_group
 
 # Pseudo-category used to store the server's "standard" settings. It lives in the same
 # guild document and has the same field names as a real category (delay, delay_enabled,
-# locktime, locktime_enabled, whitelist), so every setter below works on it unchanged.
+# locktime, locktime_enabled, whitelist, restrict_unlockers), so every setter below works on it unchanged.
 STANDARD = "standard"
 
 
@@ -49,11 +49,12 @@ def _default_standard() -> dict:
         "locktime": DEFAULT_LOCKTIME,
         "locktime_enabled": False,
         "whitelist": [],
+        "restrict_unlockers": True,
     }
 
 
-# What "use standard" can copy onto a lock.
-STANDARD_PARTS = ("delay", "locktime", "whitelist")
+# What "use standard" can copy onto a lock (restrict only lands on locks that can be restricted).
+STANDARD_PARTS = ("delay", "locktime", "whitelist", "restrict")
 
 
 def _label(category: str) -> str:
@@ -274,6 +275,12 @@ class AutoLockConfig(commands.Cog):
         )
         return new_val
 
+    async def set_restrict(self, guild_id: int, category: str, value: bool):
+        await self.get_guild_config(guild_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)}, {"$set": {f"{category}.restrict_unlockers": bool(value)}}, upsert=True
+        )
+
     # --- storage helpers (per-channel overrides, i.e. non "--global" commands) -
     #
     # `.set` / `.toggle` without `--global` should only affect the channel the
@@ -341,6 +348,9 @@ class AutoLockConfig(commands.Cog):
         new_val = not cfg.get("delay_enabled", True)
         await self._set_channel_field(guild_id, channel_id, category, "delay_enabled", new_val)
         return new_val
+
+    async def set_restrict_channel(self, guild_id: int, channel_id: int, category: str, value: bool):
+        await self._set_channel_field(guild_id, channel_id, category, "restrict_unlockers", bool(value))
 
     async def toggle_restrict_channel(self, guild_id: int, channel_id: int, category: str) -> bool:
         cfg = await self.get_category_config_channel(guild_id, channel_id, category)
@@ -489,8 +499,8 @@ class AutoLockConfig(commands.Cog):
 
     # --- "standard" settings ----------------------------------------------------
     #
-    # The server keeps one set of standard values (delay, locktime, whitelist). A lock's
-    # page / `.set use-standard` can copy them onto that lock in one go.
+    # The server keeps one set of standard values (delay, locktime, whitelist, restrict). A lock's
+    # "Use Standard" button / `.set use-standard` copies them onto that lock in one go.
 
     async def use_standard(self, guild_id: int, category: str, parts=STANDARD_PARTS) -> dict:
         """Copy the standard ``parts`` onto a lock (guild level). Returns what was applied."""
@@ -509,6 +519,9 @@ class AutoLockConfig(commands.Cog):
         if "whitelist" in parts:
             fields[f"{category}.whitelist"] = list(std.get("whitelist", []))
             applied["whitelist"] = list(std.get("whitelist", []))
+        if "restrict" in parts and category in RESTRICT_CATEGORIES:
+            fields[f"{category}.restrict_unlockers"] = std.get("restrict_unlockers", True)
+            applied["restrict"] = std.get("restrict_unlockers", True)
 
         if fields:
             await self.get_guild_config(guild_id)
@@ -517,7 +530,7 @@ class AutoLockConfig(commands.Cog):
 
     async def get_min_locktime(self, guild_id: int) -> int | None:
         """Shortest auto-unlock time (seconds) any enabled lock in this server can use,
-        counting channel overrides. None when no lock auto-unlocks (LockDM uses this to
+        counting channel overrides. None when no lock auto-unlocks (AutoLockDM uses this to
         decide whether "DM before unlock" can be offered, and how long it may be)."""
         doc = await self.get_guild_config(guild_id)
         channels = doc.get("channels") if isinstance(doc.get("channels"), dict) else {}
@@ -602,16 +615,51 @@ class AutoLockConfig(commands.Cog):
 
         return "\n".join(lines)
 
-    def _count_channel_overrides(self, doc: dict, category: str) -> int:
-        """How many channels have at least one overridden field for this category."""
+    @staticmethod
+    def _describe_override(override: dict) -> str:
+        """{'enabled': True, 'delay': 20} -> 'Lock On • Delay 20s'. Only overridden fields appear."""
+        parts = []
+        if "enabled" in override:
+            parts.append(f"Lock {'On' if override['enabled'] else 'Off'}")
+        if "delay" in override or "delay_enabled" in override:
+            text = f"Delay {override['delay']}s" if "delay" in override else "Delay"
+            if "delay_enabled" in override:
+                text += "" if override["delay_enabled"] else " (off)"
+            parts.append(text)
+        if "locktime" in override or "locktime_enabled" in override:
+            text = f"Lock time {format_duration(override['locktime'])}" if "locktime" in override else "Lock time"
+            if "locktime_enabled" in override:
+                text += "" if override["locktime_enabled"] else " (off)"
+            parts.append(text)
+        if "restrict_unlockers" in override:
+            parts.append(f"Restrict {'On' if override['restrict_unlockers'] else 'Off'}")
+        return " • ".join(parts)
+
+    def _format_overrides(self, guild: discord.Guild, doc: dict, category: str) -> str:
+        """One line per channel that overrides this lock: '#channel — Lock On • Delay 20s'."""
         channels = doc.get("channels")
         if not isinstance(channels, dict):
-            return 0
-        return sum(
-            1
-            for entry in channels.values()
-            if isinstance(entry, dict) and isinstance(entry.get(category), dict) and entry[category]
-        )
+            return "None."
+
+        lines = []
+        for channel_id, entry in channels.items():
+            override = entry.get(category) if isinstance(entry, dict) else None
+            if not isinstance(override, dict) or not override:
+                continue
+            channel = guild.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
+            name = channel.mention if channel else f"`{channel_id}` (deleted)"
+            lines.append(f"{name} — {self._describe_override(override)}")
+        if not lines:
+            return "None."
+
+        shown, length = [], 0
+        for index, line in enumerate(lines):
+            if length + len(line) + 1 > 1000:
+                shown.append(f"…and {len(lines) - index} more")
+                break
+            shown.append(line)
+            length += len(line) + 1
+        return "\n".join(shown)
 
     async def build_main_embed(self, guild: discord.Guild) -> discord.Embed:
         """Landing page: one line per lock, on or off. Details live inside each lock's page."""
@@ -640,7 +688,11 @@ class AutoLockConfig(commands.Cog):
         locktime = f"`{format_duration(std.get('locktime', DEFAULT_LOCKTIME))}`" + (
             "" if std.get("locktime_enabled", False) else " (off)"
         )
-        return f"Delay {delay} • Lock time {locktime} • Whitelist `{len(std.get('whitelist', []))}`"
+        restrict = "On" if std.get("restrict_unlockers", True) else "Off"
+        return (
+            f"Delay {delay} • Lock time {locktime} • Whitelist `{len(std.get('whitelist', []))}` "
+            f"• Restrict {restrict}"
+        )
 
     async def build_standard_embed(self, guild: discord.Guild) -> discord.Embed:
         std = await self.get_standard(guild.id)
@@ -651,7 +703,7 @@ class AutoLockConfig(commands.Cog):
             title=f"⭐ Standard Settings — {guild.name}",
             description=(
                 "Your server's standard values. Press **Use Standard** on a lock's page "
-                "(or run `.set use-standard <lock>`) to copy them onto that lock."
+                "(or run `.set use-standard <lock>`) to copy them all onto that lock."
             ),
             color=discord.Color.blurple(),
         )
@@ -669,6 +721,12 @@ class AutoLockConfig(commands.Cog):
         embed.add_field(
             name="Standard Whitelist",
             value=self._format_whitelist(guild, std.get("whitelist", [])),
+            inline=False,
+        )
+        embed.add_field(
+            name="Standard Restrict Unlockers",
+            value=("On ✅" if std.get("restrict_unlockers", True) else "Off ❌")
+            + " — only pinged user(s) can unlock (admins always can).",
             inline=False,
         )
         return embed
@@ -730,15 +788,9 @@ class AutoLockConfig(commands.Cog):
                 inline=False,
             )
 
-        override_count = self._count_channel_overrides(doc, category)
         embed.add_field(
-            name="Overrides",
-            value=f"`{override_count}` channel(s)." if override_count else "None.",
-            inline=False,
-        )
-        embed.add_field(
-            name="Standard",
-            value=self._standard_summary(doc.get(STANDARD, _default_standard())),
+            name="Channel Overrides",
+            value=self._format_overrides(guild, doc, category),
             inline=False,
         )
 

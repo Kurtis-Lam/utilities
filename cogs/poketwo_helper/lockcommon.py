@@ -17,7 +17,7 @@ DEFAULT_LOCKTIME = 3600           # 1h, used when an admin turns the timer on wi
 MIN_LOCKTIME = 60                 # 1 minute
 MAX_LOCKTIME = 30 * 86400         # 30 days
 
-# LockDM: the earliest a "DM before auto-unlock" reminder may be set (it must also stay
+# AutoLockDM: the earliest a "DM before auto-unlock" reminder may be set (it must also stay
 # shorter than the shortest auto-unlock time an admin configured).
 MIN_BEFORE_UNLOCK = 60            # 1 minute
 

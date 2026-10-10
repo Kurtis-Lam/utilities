@@ -16,7 +16,7 @@ from views.common_views import EmbedLayout, error_embed, success_embed
 TITLE = "🔔 Autolock DMs"
 
 
-def build_lockdm_embed(guild: discord.Guild, settings: dict, limit: int | None) -> discord.Embed:
+def build_autolockdm_embed(guild: discord.Guild, settings: dict, limit: int | None) -> discord.Embed:
     enabled = settings["enabled"]
     before = settings["before_unlock"]
 
@@ -49,12 +49,12 @@ def build_lockdm_embed(guild: discord.Guild, settings: dict, limit: int | None) 
     return embed
 
 
-async def build_lockdm_page(cog, guild: discord.Guild, user_id: int) -> "LockDMView":
+async def build_autolockdm_page(cog, guild: discord.Guild, user_id: int) -> "AutoLockDMView":
     """Always built from a fresh read, so the buttons match what is stored."""
     settings = await cog.get_settings(guild.id, user_id)
     limit = await cog.get_unlock_limit(guild.id)
-    embed = build_lockdm_embed(guild, settings, limit)
-    return LockDMView(cog, guild_id=guild.id, user_id=user_id, settings=settings, limit=limit, embed=embed)
+    embed = build_autolockdm_embed(guild, settings, limit)
+    return AutoLockDMView(cog, guild_id=guild.id, user_id=user_id, settings=settings, limit=limit, embed=embed)
 
 
 class BeforeUnlockModal(discord.ui.Modal, title="DM Before Auto-Unlock"):
@@ -65,7 +65,7 @@ class BeforeUnlockModal(discord.ui.Modal, title="DM Before Auto-Unlock"):
         max_length=20,
     )
 
-    def __init__(self, view: "LockDMView"):
+    def __init__(self, view: "AutoLockDMView"):
         super().__init__()
         self.view = view
 
@@ -105,7 +105,7 @@ class BeforeUnlockModal(discord.ui.Modal, title="DM Before Auto-Unlock"):
         )
 
 
-class LockDMView(EmbedLayout):
+class AutoLockDMView(EmbedLayout):
     def __init__(
         self,
         cog,
@@ -170,7 +170,7 @@ class LockDMView(EmbedLayout):
 
     async def reload(self, interaction: discord.Interaction):
         guild = interaction.guild
-        view = await build_lockdm_page(self.cog, guild, self.user_id)
+        view = await build_autolockdm_page(self.cog, guild, self.user_id)
         await self.swap(interaction, view=view)
 
     async def _toggle_master(self, interaction: discord.Interaction):
