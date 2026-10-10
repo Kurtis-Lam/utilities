@@ -19,7 +19,7 @@ from .recognize import extract_pokemon_from_text, format_name
 class Recognize(commands.Cog):    
     def __init__(self, bot):    
         self.bot = bot    
-        self.poketwo_id = 716390085896962058    
+        self.poketwo_id = bot.poketwo_id    
         self.correct_log_channel_id = 1533816816701407382     
         self.wrong_log_channel_id = 1534081811511246910    
         
