@@ -10,7 +10,11 @@ Everything visual lives here so the whole bot stays consistent:
 * ``ConfirmView``   – red Confirm / grey Cancel prompt, no emojis (same API as before).
 * ``BaseLayout``    – owner-only check + auto-disable on timeout for Components V2 layouts.
 * ``ConfirmLayout`` – Confirm / Cancel prompt with the buttons inside the embed-style container.
-* ``confirm()``     – one-call helper around ``ConfirmLayout`` that returns True / False.
+* ``confirm()``     – one-call helper around ``ConfirmLayout``. Returns the finished layout:
+  it is truthy only if the user pressed Confirm, and ``await result.show(embed)`` edits the
+  confirmation message itself to show what was done (cancel / timeout are edited automatically).
+* ``reply_or_send()`` – ``ctx.reply`` (no ping) that falls back to a plain send when the
+  invoking message no longer exists.
 * ``container_from_embed()`` – turn an embed into a container, optionally with button rows inside.
 """
 from __future__ import annotations
@@ -355,7 +359,13 @@ class ConfirmLayout(BaseLayout):
                 discord.ui.ActionRow(self.confirm_button, self.cancel_button),
             )
         elif state == "confirmed":
-            container = container_from_embed(self.embed)
+            # Buttons are gone while the action runs; callers then call show() with the result.
+            confirmed = discord.Embed(
+                title="✅ Confirmed",
+                description=self.embed.description,
+                color=discord.Color.green(),
+            )
+            container = container_from_embed(confirmed)
         else:
             text = self.cancel_text if state == "cancelled" else self.timeout_text
             head, _, rest = text.partition("\n")
@@ -366,14 +376,16 @@ class ConfirmLayout(BaseLayout):
             )
         self.add_item(container)
 
-    async def send(self, ctx, *, reply: bool = True) -> discord.Message:
-        if reply:
-            self.message = await ctx.reply(view=self, mention_author=False)
-        else:
-            self.message = await ctx.send(view=self)
+    def __bool__(self) -> bool:
+        """Truthy only when the user pressed Confirm."""
+        return self.value is True
+
+    async def send(self, ctx) -> discord.Message:
+        self.message = await ctx.reply(view=self, mention_author=False)
         return self.message
 
     async def show(self, embed: discord.Embed) -> None:
+        """Edit the confirmation message itself to show what was done."""
         self.clear_items()
         self.add_item(container_from_embed(embed))
         if self.message is not None:
@@ -404,8 +416,25 @@ class ConfirmLayout(BaseLayout):
                 pass
 
 
-async def confirm(ctx, prompt: str, **kwargs) -> bool:
+async def confirm(ctx, prompt: str, **kwargs) -> ConfirmLayout:
+    """Ask for confirmation. The returned layout is truthy only if confirmed.
+
+    On cancel / timeout the message is already edited to say so. On confirm the
+    caller does the work and then edits the same message with ``await result.show(embed)``.
+    """
     view = ConfirmLayout(ctx.author, prompt, **kwargs)
     await view.send(ctx)
     await view.wait()
-    return view.value is True
+    return view
+
+
+async def reply_or_send(ctx, *args, **kwargs) -> discord.Message:
+    """``ctx.reply`` without a ping. Falls back to a plain channel message when the
+    invoking message is gone (e.g. it was just purged), because Discord rejects a
+    reply to a deleted message."""
+    kwargs.setdefault("mention_author", False)
+    try:
+        return await ctx.reply(*args, **kwargs)
+    except discord.HTTPException:
+        kwargs.pop("mention_author", None)
+        return await ctx.send(*args, **kwargs)
