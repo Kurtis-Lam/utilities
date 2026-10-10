@@ -48,10 +48,29 @@ if not TOKEN:
     print("❌ Error: 'TOKEN' missing from config.json.")
     sys.exit(1)
 
-OWNERS = {
-    1250429544486273038, 1281560553130692618, 1528374615720591381,
-    1432984051341459527, 1432983193681920014,
-}
+# Poketwo's user ID (config.json -> "POKETWO_ID")
+try:
+    POKETWO_ID = int(config["POKETWO_ID"])
+except (KeyError, TypeError, ValueError):
+    print("❌ Error: 'POKETWO_ID' missing or invalid in config.json (must be a user ID number).")
+    sys.exit(1)
+
+# Bot owners (config.json -> "OWNER_IDS")
+try:
+    OWNERS = {int(owner_id) for owner_id in config.get("OWNER_IDS", [])}
+except (TypeError, ValueError):
+    print("❌ Error: 'OWNER_IDS' in config.json must be a list of user ID numbers.")
+    sys.exit(1)
+if not OWNERS:
+    print("⚠️ Warning: 'OWNER_IDS' is empty in config.json, nobody can use owner commands.")
+
+# Cogs to load (config.json -> "COGS": {"folder": ["cog", ...]})
+COGS = config.get("COGS")
+if not isinstance(COGS, dict) or not all(
+    isinstance(cogs, list) and all(isinstance(c, str) for c in cogs) for cogs in COGS.values()
+):
+    print("❌ Error: 'COGS' in config.json must be an object like {\"cmds\": [\"ping\", ...], ...}.")
+    sys.exit(1)
 
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
@@ -76,6 +95,8 @@ class Utilities(commands.Bot):
             chunk_guilds_at_startup=False,
             member_cache_flags=discord.MemberCacheFlags.none(),
         )
+        self.config = config
+        self.poketwo_id = POKETWO_ID
         self.start_time = datetime.now(timezone.utc)
         self.active_predictions = {}
         self.session = None
@@ -99,14 +120,8 @@ class Utilities(commands.Bot):
         else:
             print("⚠️ MONGO_URI missing, MongoDB features are disabled.")
 
-        self.cogs_dict = {
-            "owner_cmds": ["reload", "pull", "stats", "restart"],
-            "cmds": ["ai", "categories", "channels", "members", "messages", "ping", "roles", "utilities"],
-            "config": ["baseconfigs"],
-            "poketwo_helper": ["afk", "autolock", "catches", "lockunlock", "pings", "recognizer", "starboard"],
-            "poketwo_management": ["set", "settings", "toggle"],
-            "poketwo_utils": ["catchtime", "dex", "extract", "hintsolver"],
-        }
+        # Which cogs to load is defined in config.json ("COGS")
+        self.cogs_dict = COGS
 
     async def get_prefix_with_space(self, bot, message):
         try:
