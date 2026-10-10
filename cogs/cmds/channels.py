@@ -165,14 +165,16 @@ class Channels(commands.Cog):
         if not confirmed:
             return
 
+        target_name = target.name
         await target.delete(reason=f"Deleted by {ctx.author}")
-        if target != ctx.channel:
-            embed = discord.Embed(
-                title="🗑️ Channel Deleted",
-                description=f"Successfully deleted `{target.name}`.",
-                color=discord.Color.red()
-            )
-            await ctx.reply(embed=embed, mention_author=False)
+        # If the confirmation lived inside the deleted channel it is gone with it;
+        # show() swallows that error.
+        embed = discord.Embed(
+            title="🗑️ Channel Deleted",
+            description=f"Successfully deleted `{target_name}`.",
+            color=discord.Color.red()
+        )
+        await confirmed.show(embed)
 
     @commands.hybrid_command(aliases=["rch"], name="renamechannel", description="Renames a text channel.", with_app_command=True)
     @app_commands.describe(
@@ -334,7 +336,11 @@ class Channels(commands.Cog):
             description=f"Nuked by {ctx.author.mention}",
             color=discord.Color.red()
         )
-        await new_channel.send(embed=embed)
+        if target != ctx.channel:
+            # The confirmation message survived: edit it to show what happened.
+            await confirmed.show(embed)
+        else:
+            await new_channel.send(embed=embed)
 
 
 async def setup(bot):
