@@ -5,6 +5,7 @@ from cogs.owner_cmds.utils import OwnerCog, run_cmd, safe_send
 from views.common_views import EMBED_COLOR
 
 MAX_OTHER_REFS = 10
+MAX_DIRTY_FILES = 10
 
 
 def _counts(raw: str) -> tuple[int, int] | None:
@@ -50,7 +51,8 @@ class GitStats(OwnerCog):
             short, subject, author, stamp = (info.split("\x1f") + ["", "", "", ""])[:4] if rc == 0 else ("unknown", "", "", "")
 
             rc, dirty, _ = await run_cmd("git", "status", "--porcelain", timeout=30)
-            changes = len([line for line in dirty.splitlines() if line.strip()]) if rc == 0 else 0
+            dirty_lines = [line.rstrip() for line in dirty.splitlines() if line.strip()] if rc == 0 else []
+            changes = len(dirty_lines)
 
             # Upstream (tracking) branch
             upstream = None
@@ -106,10 +108,23 @@ class GitStats(OwnerCog):
         embed.add_field(name="Commit", value=commit_text[:1024], inline=True)
         if author and stamp.isdigit():
             embed.add_field(name="Author", value=f"{author}\n<t:{stamp}:R>", inline=True)
+
+        # Working tree status formatting
+        if changes == 0:
+            working_tree_text = "Clean"
+            wt_inline = True
+        else:
+            shown_lines = dirty_lines[:MAX_DIRTY_FILES]
+            wt_text = "\n".join(shown_lines)
+            if len(dirty_lines) > MAX_DIRTY_FILES:
+                wt_text += f"\n… and {len(dirty_lines) - MAX_DIRTY_FILES} more"
+            working_tree_text = f"```{wt_text}```"
+            wt_inline = False
+
         embed.add_field(
-            name="Working tree",
-            value="Clean" if changes == 0 else f"{changes} uncommitted change(s)",
-            inline=True,
+            name=f"Working tree ({changes} change{'s' if changes != 1 else ''})" if changes > 0 else "Working tree",
+            value=working_tree_text[:1024],
+            inline=wt_inline,
         )
         embed.add_field(name="Upstream", value=upstream_line[:1024], inline=False)
 
