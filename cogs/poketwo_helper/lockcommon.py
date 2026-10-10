@@ -103,6 +103,29 @@ def format_duration(seconds: int) -> str:
     return " ".join(parts)
 
 
+# --- Scope flags (".set" / ".toggle") ----------------------------------------------
+
+GLOBAL_FLAGS = ("--global",)
+STANDARD_FLAGS = ("--standard", "--stan")
+
+
+def split_scope_flags(args) -> tuple[list[str], bool, bool]:
+    """Pull ``--global`` and ``--standard`` / ``--stan`` out of a command's arguments.
+
+    Returns (remaining tokens, global_flag, standard_flag); flags may appear anywhere."""
+    tokens: list[str] = []
+    is_global = is_standard = False
+    for arg in args:
+        low = arg.lower()
+        if low in GLOBAL_FLAGS:
+            is_global = True
+        elif low in STANDARD_FLAGS:
+            is_standard = True
+        else:
+            tokens.append(arg)
+    return tokens, is_global, is_standard
+
+
 # Who may unlock when several restricted locks fire on the same channel at
 # once. Earlier tier wins; categories inside the same tuple are equal (their
 # allowed-user sets are merged). Role-based locks (rare/regional/gmax/
