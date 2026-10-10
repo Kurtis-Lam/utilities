@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands
 from pymongo import ASCENDING, DESCENDING, UpdateOne
 
-from views.common_views import EMBED_COLOR, error_embed, info_embed, make_embed, success_embed
+from views.common_views import EMBED_COLOR, error_embed, info_embed, make_embed, reply_or_send, success_embed
 from views.embeds import handle_command_error, send_usage
 
 HKT = timezone(timedelta(hours=8))
@@ -170,7 +170,8 @@ class Catches(commands.Cog):
                 await ctx.message.delete()
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 pass
-        await ctx.send(embed=embed, delete_after=1.0)
+        # The invoking message was just deleted, so fall back to a plain message if replying fails.
+        await reply_or_send(ctx, embed=embed, delete_after=1.0)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -329,7 +330,7 @@ class Catches(commands.Cog):
         ),
     ):
         if not ctx.guild:
-            return await ctx.send(embed=error_embed("Server only."))
+            return await ctx.reply(embed=error_embed("Server only."), mention_author=False)
 
         tf_config = self.parse_timeframe(timeframe)
         if not tf_config:
@@ -394,7 +395,7 @@ class Catches(commands.Cog):
             text=f"Server ID: {ctx.guild.id}",
             icon_url=ctx.guild.icon.url if ctx.guild.icon else None,
         )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(
         name="catchleaderboard",
@@ -409,7 +410,7 @@ class Catches(commands.Cog):
         ),
     ):
         if not ctx.guild:
-            return await ctx.send(embed=error_embed("Server only."))
+            return await ctx.reply(embed=error_embed("Server only."), mention_author=False)
 
         tf_config = self.parse_timeframe(timeframe)
         if not tf_config:
@@ -509,7 +510,7 @@ class Catches(commands.Cog):
             inline=False,
         )
 
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
 
 async def setup(bot):
