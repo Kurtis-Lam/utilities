@@ -7,12 +7,12 @@ import discord
 import psutil
 from discord.ext import commands
 
-from cogs.owner_cmds.utils import get_dir_size
+from cogs.owner_cmds.utils import OwnerCog, get_dir_size
 
 
-class Stats(commands.Cog):
+class Stats(OwnerCog):
     def __init__(self, bot: commands.Bot):
-        self.bot = bot
+        super().__init__(bot)
 
     @commands.command(name="stats", aliases=["botinfo", "system", "info"])
     @commands.is_owner()
