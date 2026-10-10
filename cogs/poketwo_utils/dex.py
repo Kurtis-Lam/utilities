@@ -205,7 +205,7 @@ class Dex(commands.Cog):
         query_clean = query.strip().lower().lstrip("#")
 
         if not self.pokedex:
-            return await ctx.reply(embed=warn_embed("Pokédex not loaded yet."))
+            return await ctx.reply(embed=warn_embed("Pokédex not loaded yet."), mention_author=False)
 
         matched_name = None
         data = None
@@ -231,7 +231,7 @@ class Dex(commands.Cog):
                     break
 
         if not data:
-            await ctx.reply(embed=err_embed(f"Couldn't find {query.strip()[:100]}."))
+            await ctx.reply(embed=err_embed(f"Couldn't find {query.strip()[:100]}."), mention_author=False)
             return
 
         dex_num = str(data.get("pokedex_number", "???")).lstrip("#")
@@ -365,7 +365,7 @@ class Dex(commands.Cog):
             kwargs["file"] = file
         if view:
             kwargs["view"] = view
-        msg = await ctx.reply(**kwargs)
+        msg = await ctx.reply(**kwargs, mention_author=False)
         if view:
             view.message = msg
 
