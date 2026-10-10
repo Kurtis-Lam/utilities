@@ -2,12 +2,12 @@ import time
 
 from discord.ext import commands
 
-from cogs.owner_cmds.utils import safe_edit, safe_send
+from cogs.owner_cmds.utils import OwnerCog, safe_edit, safe_send
 
 
-class Restart(commands.Cog):
+class Restart(OwnerCog):
     def __init__(self, bot: commands.Bot):
-        self.bot = bot
+        super().__init__(bot)
 
     @commands.command(name="restart")
     @commands.is_owner()
