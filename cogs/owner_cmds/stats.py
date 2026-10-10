@@ -93,7 +93,7 @@ class Stats(OwnerCog):
             inline=False,
         )
         embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
 
 async def setup(bot: commands.Bot):
