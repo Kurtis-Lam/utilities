@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 
+from cogs.poketwo_helper.lockcommon import format_duration
 from views.embeds import (
     err_embed,
     handle_command_error,
@@ -20,7 +21,7 @@ class Toggle(commands.Cog):
     async def _config_cog(self, ctx: commands.Context):
         cog = self.bot.get_cog("AutoLockConfig")
         if not cog:
-            await ctx.send(embed=err_embed("AutoLockConfig is not loaded.", emoji="⚠️"))
+            await ctx.reply(embed=err_embed("AutoLockConfig is not loaded.", emoji="⚠️"), mention_author=False)
         return cog
 
     @staticmethod
@@ -82,7 +83,7 @@ class Toggle(commands.Cog):
             lines = []
 
         if not cats and not naming_requested:
-            return await ctx.send(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"))
+            return await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
 
         scope = "whole server" if global_flag else ctx.channel.mention
 
@@ -105,7 +106,7 @@ class Toggle(commands.Cog):
                 value=", ".join(f"`{u}`" for u in unknown)[:1024],
                 inline=False,
             )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     # --- .toggle lockdelay <lock...> -------------------------------------------
 
@@ -137,7 +138,7 @@ class Toggle(commands.Cog):
 
         cats, unknown = self._resolve_all(cog, locks)
         if not cats:
-            return await ctx.send(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"))
+            return await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
 
         lines = []
         for cat in cats:
@@ -161,7 +162,83 @@ class Toggle(commands.Cog):
                 value=", ".join(f"`{u}`" for u in unknown)[:1024],
                 inline=False,
             )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
+
+    # --- .toggle locktime <lock...> --------------------------------------------
+
+    @toggle_group.command(
+        name="locktime",
+        aliases=["lt", "locktimer", "lock-time", "autounlock"],
+        usage="<lock...> [--global]",
+        description="Toggle a lock's auto-unlock timer.",
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def toggle_locktime(self, ctx: commands.Context, *locks_and_flags: str):
+        locks = [a for a in locks_and_flags if a.lower() != "--global"]
+        global_flag = len(locks) != len(locks_and_flags)
+
+        if not locks:
+            return await send_usage(ctx, title="Missing arg: `lock`")
+
+        cog = await self._config_cog(ctx)
+        if not cog:
+            return
+
+        cats, unknown = self._resolve_all(cog, locks)
+        if not cats:
+            return await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
+
+        scope = "whole server" if global_flag else ctx.channel.mention
+        lines = []
+        for cat in cats:
+            if global_flag:
+                new_state = await cog.toggle_locktime(ctx.guild.id, cat)
+                cfg = await cog.get_category_config(ctx.guild.id, cat)
+            else:
+                new_state = await cog.toggle_locktime_channel(ctx.guild.id, ctx.channel.id, cat)
+                cfg = await cog.get_category_config_channel(ctx.guild.id, ctx.channel.id, cat)
+            state = f"**On ✅** (`{format_duration(cfg.get('locktime', 3600))}`)" if new_state else "**Off ❌**"
+            lines.append(f"⌛ **{cog.display_name(cat)}** auto-unlock: {state} ({scope})")
+
+        embed = ok_embed("Lock Time Toggled", "\n".join(lines)[:4096], emoji="⌛")
+        if unknown:
+            embed.add_field(name="⚠️ Unknown Lock(s)", value=", ".join(f"`{u}`" for u in unknown)[:1024], inline=False)
+        await ctx.reply(embed=embed, mention_author=False)
+
+    # --- .toggle standard-lockdelay / standard-locktimer -----------------------
+
+    @toggle_group.command(
+        name="standard-lockdelay",
+        aliases=["standard-delay", "standard-ld"],
+        description="Toggle the standard lock delay on/off.",
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def toggle_standard_lockdelay(self, ctx: commands.Context):
+        cog = await self._config_cog(ctx)
+        if not cog:
+            return
+        new_state = await cog.toggle_delay(ctx.guild.id, "standard")
+        std = await cog.get_standard(ctx.guild.id)
+        state = f"**On ✅** (`{std.get('delay', 15)}s`)" if new_state else "**Off ❌**"
+        await ctx.reply(embed=ok_embed("Standard Lock Delay Toggled", f"Delay: {state}", emoji="⏱️"), mention_author=False)
+
+    @toggle_group.command(
+        name="standard-locktimer",
+        aliases=["standard-timer", "standard-locktime"],
+        description="Toggle the standard lock timer (auto-unlock) on/off.",
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def toggle_standard_locktimer(self, ctx: commands.Context):
+        cog = await self._config_cog(ctx)
+        if not cog:
+            return
+        new_state = await cog.toggle_locktime(ctx.guild.id, "standard")
+        std = await cog.get_standard(ctx.guild.id)
+        state = f"**On ✅** (`{format_duration(std.get('locktime', 3600))}`)" if new_state else "**Off ❌**"
+        await ctx.reply(embed=ok_embed("Standard Lock Timer Toggled", f"Auto-unlock: {state}", emoji="⏳"), mention_author=False)
 
     # --- .toggle restrictunlockers <lock...> -----------------------------------
 
@@ -193,7 +270,7 @@ class Toggle(commands.Cog):
 
         cats, unknown = self._resolve_all(cog, locks)
         if not cats:
-            return await ctx.send(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"))
+            return await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
 
         lines = []
         changed = 0
@@ -224,7 +301,7 @@ class Toggle(commands.Cog):
                 value=", ".join(f"`{u}`" for u in unknown)[:1024],
                 inline=False,
             )
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
 
 async def setup(bot: commands.Bot):
