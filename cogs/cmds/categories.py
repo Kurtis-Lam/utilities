@@ -314,7 +314,7 @@ class Categories(commands.Cog):
                 ),
                 color=discord.Color.red(),
             )
-            await ctx.reply(embed=embed, mention_author=False)
+            await confirmed.show(embed)
         except discord.NotFound:
             pass
 
