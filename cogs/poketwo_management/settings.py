@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 
-from cogs.poketwo_helper.lockcommon import DEFAULT_DELAY
+from cogs.poketwo_helper.lockcommon import DEFAULT_DELAY, DEFAULT_LOCKTIME, format_duration
 from views.autolock_views import ALL_CATEGORIES, CATEGORY_LABELS
 from views.embeds import commands_usage_embed, err_embed, handle_command_error
 
@@ -20,7 +20,7 @@ class Settings(commands.Cog):
     async def _get_config_cog(self, ctx: commands.Context):
         cog = self.bot.get_cog("AutoLockConfig")
         if not cog:
-            await ctx.send(embed=err_embed("AutoLockConfig is not loaded.", emoji="⚠️"))
+            await ctx.reply(embed=err_embed("AutoLockConfig is not loaded.", emoji="⚠️"), mention_author=False)
         return cog
 
     @staticmethod
@@ -28,7 +28,12 @@ class Settings(commands.Cog):
         lock_str = "Lock: ✅" if cfg.get("enabled", False) else "Lock: ❌"
         delay_str = f"{cfg.get('delay', DEFAULT_DELAY)}s" if cfg.get("delay_enabled", True) else "Off"
         restricted = "Restrict: ✅" if cfg.get("restrict_unlockers", False) else "Restrict: ❌"
-        return f"{lock_str}\n{delay_str}\n{restricted}"
+        unlock_str = (
+            f"Unlock: {format_duration(cfg.get('locktime', DEFAULT_LOCKTIME))}"
+            if cfg.get("locktime_enabled", False)
+            else "Unlock: Off"
+        )
+        return f"{lock_str}\n{delay_str}\n{unlock_str}\n{restricted}"
 
     # --- .settings -----------------------------------------------------------
     # Just lists the two real commands (plain usage embed, no Example button).
@@ -39,7 +44,7 @@ class Settings(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def settings(self, ctx: commands.Context):
-        await ctx.send(embed=commands_usage_embed(ctx, "channelsettings", "serversettings"))
+        await ctx.reply(embed=commands_usage_embed(ctx, "channelsettings", "serversettings"), mention_author=False)
 
     # --- .channelsettings ----------------------------------------------------
     @commands.command(
@@ -71,7 +76,7 @@ class Settings(commands.Cog):
             embed.add_field(name=_label(cat), value=self._summary_field(cfg), inline=True)
 
         embed.set_footer(text="Edit with .set / .toggle")
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
     # --- .serversettings -----------------------------------------------------
     @commands.command(
@@ -104,8 +109,10 @@ class Settings(commands.Cog):
             value = self._summary_field(cfg) + f"\nWhitelist: {wl_count}"
             embed.add_field(name=_label(cat), value=value, inline=True)
 
+        std = await cog.get_standard(ctx.guild.id)
+        embed.add_field(name="⭐ Standard", value=cog._standard_summary(std), inline=False)
         embed.set_footer(text="Edit with .c a or .set / .toggle --global")
-        await ctx.send(embed=embed)
+        await ctx.reply(embed=embed, mention_author=False)
 
 
 async def setup(bot: commands.Bot):
