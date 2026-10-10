@@ -61,10 +61,10 @@ async def timerconfig(ctx: commands.Context):
     cog = ctx.bot.get_cog("Timer")
 
     if cog is None:
-        return await ctx.send(embed=error_embed("Timer is not loaded."))
+        return await ctx.reply(embed=error_embed("Timer is not loaded."), mention_author=False)
 
     view = await build_main_page(cog, ctx.guild, ctx.guild.id, ctx.author.id)
-    view.message = await ctx.send(view=view)
+    view.message = await ctx.reply(view=view, mention_author=False)
 
 
 @timerconfig.error
