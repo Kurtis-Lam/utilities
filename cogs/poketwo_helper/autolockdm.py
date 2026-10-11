@@ -25,13 +25,11 @@ def _merge(doc: dict | None) -> dict:
     return settings
 
 
-def _links(ping_url: str | None, lock_url: str | None) -> str:
-    links = []
-    if ping_url:
-        links.append(f"[Jump to the ping]({ping_url})")
-    if lock_url:
-        links.append(f"[Jump to the lock message]({lock_url})")
-    return " • ".join(links)
+def _links(lock_url: str | None, guild_name: str | None) -> str:
+    if not lock_url:
+        return ""
+    name = guild_name or "Jump to the lock message"
+    return f"[{name}]({lock_url})"
 
 
 class AutoLockDM(commands.Cog):
@@ -109,7 +107,7 @@ class AutoLockDM(commands.Cog):
         except discord.HTTPException:
             return False  # DMs closed, user gone, ... nothing to do
 
-    def _lock_embed(self, channel, categories, locked_at, unlock_at, ping_url, lock_url) -> discord.Embed:
+    def _lock_embed(self, channel, categories, locked_at, unlock_at, lock_url) -> discord.Embed:
         label = "/".join(SHORT_NAMES.get(c, c) for c in categories)
         embed = discord.Embed(
             title="🔒 Channel Locked",
@@ -123,7 +121,7 @@ class AutoLockDM(commands.Cog):
                 value=f"{stamp(unlock_at)} (<t:{unlock_at}:t>)",
                 inline=True,
             )
-        links = _links(ping_url, lock_url)
+        links = _links(lock_url, channel.guild.name)
         if links:
             embed.add_field(name="🔗 Links", value=links, inline=False)
         embed.set_footer(text=f"Run {self.prefix}autolockdm in {channel.guild.name} to change these DMs.")
@@ -173,8 +171,8 @@ class AutoLockDM(commands.Cog):
                         "user_id": user_id,
                         "at": datetime.datetime.fromtimestamp(unlock_at - before, tz=datetime.timezone.utc),
                         "unlock_at": datetime.datetime.fromtimestamp(unlock_at, tz=datetime.timezone.utc),
-                        "ping_url": ping_url,
                         "lock_url": lock_url,
+                        "guild_name": guild.name,
                     })
 
             # Reminders first: that's one quick insert, the DMs below can take a while.
@@ -182,7 +180,7 @@ class AutoLockDM(commands.Cog):
                 await self.reminders_collection.insert_many(reminders)
 
             if to_dm:
-                embed = self._lock_embed(channel, categories, locked_at, unlock_at, ping_url, lock_url)
+                embed = self._lock_embed(channel, categories, locked_at, unlock_at, lock_url)
                 for user_id in to_dm:
                     await self._send_dm(user_id, embed)
                     await asyncio.sleep(DM_PAUSE)
@@ -225,7 +223,7 @@ class AutoLockDM(commands.Cog):
             return
 
         guild = self.bot.get_guild(doc["guild_id"])
-        guild_name = guild.name if guild else "the server"
+        guild_name = doc.get("guild_name") or (guild.name if guild else "the server")
         unlock_unix = int(doc["unlock_at"].replace(tzinfo=datetime.timezone.utc).timestamp())
 
         embed = discord.Embed(
@@ -233,7 +231,7 @@ class AutoLockDM(commands.Cog):
             description=f"<#{doc['channel_id']}> in **{guild_name}** unlocks automatically {stamp(unlock_unix)}.",
             color=WARN_COLOR,
         )
-        links = _links(doc.get("ping_url"), doc.get("lock_url"))
+        links = _links(doc.get("lock_url"), guild_name)
         if links:
             embed.add_field(name="🔗 Links", value=links, inline=False)
         embed.set_footer(text=f"Run {self.prefix}autolockdm in {guild_name} to change these DMs.")
