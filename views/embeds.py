@@ -493,7 +493,7 @@ async def handle_common_error(ctx, error) -> bool:
         perms = ", ".join(f"`{p.replace('_', ' ').title()}`" for p in error.missing_permissions)
         await ctx.reply(embed=err_embed(f"I need: {perms}"), mention_author=False)
     elif isinstance(error, commands.NotOwner):
-        await ctx.reply(embed=err_embed("Owner only.", emoji="🚫"), mention_author=False)
+        pass  # owner-only commands never answer anyone else
     elif isinstance(error, commands.NoPrivateMessage):
         await ctx.reply(embed=err_embed("Server only.", emoji="🚫"), mention_author=False)
     elif isinstance(error, commands.CommandOnCooldown):
