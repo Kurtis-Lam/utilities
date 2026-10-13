@@ -61,7 +61,7 @@ except (TypeError, ValueError):
     sys.exit(1)
 if not OWNERS:
     print("⚠️ Warning: 'OWNER_IDS' is empty in config.json, nobody can use owner commands.")
- 
+
 COGS = config.get("COGS")
 if not isinstance(COGS, dict) or not all(
     isinstance(cogs, list) and all(isinstance(c, str) for c in cogs) for cogs in COGS.values()
