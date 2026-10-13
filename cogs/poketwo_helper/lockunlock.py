@@ -24,6 +24,8 @@ from cogs.poketwo_helper.lockcommon import (
 )
 from views.common_views import EMBED_COLOR, error_embed
 from views.embeds import handle_command_error
+from views.loading import loading
+from views.navigate import PaginatorView
 from views.lockunlock_views import UnlockLayout, drop_auto_unlock, message_texts, poketwo_missing_embed
 
 UNLOCK_BATCH_SIZE = 5
@@ -43,6 +45,57 @@ def _progress_embed(done: int, total: int, started: float, started_unix: int) ->
 
 
 NO_PINGS = discord.AllowedMentions.none()
+
+# Lockstats paging: a field holds at most 1024 characters, an embed at most 6000 in total.
+FIELD_LIMIT = 1000
+FIELDS_PER_PAGE = 3
+
+
+def _chunk_lines(items: list[str], sep: str, limit: int = FIELD_LIMIT) -> list[str]:
+    """Join items with `sep` into as few strings of at most `limit` characters as possible."""
+    chunks: list[str] = []
+    current = ""
+    for item in items:
+        candidate = f"{current}{sep}{item}" if current else item
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = item
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _lockstats_pages(locked_lines: list[str], unlocked_mentions: list[str]) -> list[discord.Embed]:
+    """Split the lock overview over as many embeds as needed (nothing is cut off)."""
+    summary = f"🔒 **{len(locked_lines)}** locked  •  🔓 **{len(unlocked_mentions)}** unlocked"
+
+    fields: list[tuple[str, str]] = []
+    if locked_lines:
+        for i, chunk in enumerate(_chunk_lines(locked_lines, "\n")):
+            name = f"🔒 Locked ({len(locked_lines)})" if i == 0 else "🔒 Locked (continued)"
+            fields.append((name, chunk))
+    else:
+        fields.append(("🔒 Locked (0)", "None"))
+
+    if unlocked_mentions:
+        for i, chunk in enumerate(_chunk_lines(unlocked_mentions, " ")):
+            name = f"🔓 Unlocked ({len(unlocked_mentions)})" if i == 0 else "🔓 Unlocked (continued)"
+            fields.append((name, chunk))
+    else:
+        fields.append(("🔓 Unlocked (0)", "None"))
+
+    groups = [fields[i:i + FIELDS_PER_PAGE] for i in range(0, len(fields), FIELDS_PER_PAGE)]
+    pages = []
+    for number, group in enumerate(groups, start=1):
+        embed = discord.Embed(title="📊 Locks", description=summary, color=EMBED_COLOR)
+        for name, value in group:
+            embed.add_field(name=name, value=value, inline=False)
+        if len(groups) > 1:
+            embed.set_footer(text=f"Page {number}/{len(groups)}")
+        pages.append(embed)
+    return pages
 
 
 async def _disable_lock_message(channel, message_id: int | None, bot):
@@ -235,6 +288,7 @@ class LockUnlock(commands.Cog):
     @commands.hybrid_command(name="lockstats", aliases=["ls"], description="Shows all locked and unlocked channels (admins only).")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @loading
     async def lockstats(self, ctx):
         poketwo = await get_poketwo_target(self.bot, ctx.guild)
         if poketwo is None:
@@ -252,12 +306,6 @@ class LockUnlock(commands.Cog):
             else:
                 unlocked.append(channel)
 
-        embed = discord.Embed(
-            title="📊 Locks",
-            description=f"🔒 **{len(locked)}** locked  •  🔓 **{len(unlocked)}** unlocked",
-            color=EMBED_COLOR,
-        )
-
         locked_lines = []
         for channel in locked:
             since = locked_since.get(channel.id)
@@ -267,17 +315,13 @@ class LockUnlock(commands.Cog):
                 line += f" • unlocks <t:{unlock_at}:R>"
             locked_lines.append(line)
 
-        if locked:
-            add_item_fields(embed, f"🔒 Locked ({len(locked)})", locked_lines, sep="\n")
-        else:
-            embed.add_field(name="🔒 Locked (0)", value="None", inline=False)
+        pages = _lockstats_pages(locked_lines, [c.mention for c in unlocked])
 
-        if unlocked:
-            add_item_fields(embed, f"🔓 Unlocked ({len(unlocked)})", [c.mention for c in unlocked])
-        else:
-            embed.add_field(name="🔓 Unlocked (0)", value="None", inline=False)
+        if len(pages) == 1:
+            return await ctx.reply(embed=pages[0], mention_author=False)
 
-        await ctx.reply(embed=embed, mention_author=False)
+        view = PaginatorView(pages, user_id=ctx.author.id)
+        view.message = await ctx.reply(embed=pages[0], view=view, mention_author=False)
 
 
 async def setup(bot):
