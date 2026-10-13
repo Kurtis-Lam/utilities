@@ -66,14 +66,21 @@ USAGE_EXAMPLES = {
         "{p}cch secret-chat --prelock --prehide",
     ],
     "renamechannel": ["{p}renamechannel new-name", "{p}rch new-name #old-channel"],
+    "movechannel": [
+        "{p}movechannel 123456789012345678",
+        "{p}movech Staff Area",
+        "{p}movech Voice Channels",
+    ],
     # categories
     "createcategory": [
         "{p}createcategory Staff Area",
         "{p}ccat Staff Area --prelock",
-        "{p}ccat Private @user --prehide",
+        "{p}ccat Private Area @user --prehide",
+        "{p}ccat Private Area 123456789012345678",
     ],
     "renamecategory": ["{p}renamecategory new-name", "{p}rcat new-name old-category"],
     # members
+    "membercount": ["{p}membercount", "{p}mc"],
     "kick": ["{p}kick @user Spamming"],
     "ban": ["{p}ban @user Breaking the rules"],
     "nick": ["{p}nick @user Cool Name", "{p}nick @user reset"],
@@ -114,11 +121,13 @@ USAGE_EXAMPLES = {
         "{p}fwd 123456789012345678 #channel",
         "Reply to a message with: {p}fwd #channel",
     ],
+    "messages": ["{p}messages", "{p}messages @user", "{p}messages 123456789012345678"],
     "echo": ["{p}echo Hello everyone!"],
     "stick": ["{p}stick Please read the rules!"],
     # utilities
     "addprefix": ["{p}addprefix 10"],
-    "remind": ["{p}remind 10m Take a break", "{p}rm 2h Check the oven", "{p}rm 1d Pay rent"],
+    "remind": ["{p}remind 10m Take a break", "{p}rm 2h Check the oven", "{p}remindme 1d Pay rent"],
+    "timer": ["{p}timer 10m", "{p}timer 1h30m Pizza", "{p}timer 45s Tea is ready"],
     "reminders remove": ["{p}reminders remove a1b2c3", "{p}reminders r a1b2c3"],
     # config
     "config": [
@@ -285,15 +294,23 @@ USAGE_OVERVIEW_NOTES = {
 # ---------------------------------------------------------------------------
 
 def _param_descriptions(command) -> dict:
-    """Collect per-argument descriptions from commands.parameter / app_commands.describe."""
+    """Collect per-argument descriptions written in the cogs.
+
+    Sources, in order: ``commands.parameter(description=...)``, ``@app_commands.describe(...)``
+    and, for ``*args`` style commands that can't use ``commands.parameter``, the command's
+    ``extras={"args": {"name": "description"}}``. ``.help`` and the Example button both use this.
+    """
     out = {}
     app_cmd = getattr(command, "app_command", None)
     app_params = getattr(app_cmd, "_params", None) or {}
+    extra_args = (getattr(command, "extras", None) or {}).get("args") or {}
     for name, param in command.clean_params.items():
         desc = getattr(param, "description", None)
         if not isinstance(desc, str) or not desc.strip() or desc == "…":
             ap = app_params.get(name)
             desc = getattr(ap, "description", None)
+        if not isinstance(desc, str) or not desc.strip() or desc == "…":
+            desc = extra_args.get(name)
         if isinstance(desc, str) and desc.strip() and desc != "…":
             out[name] = desc.strip()
     return out
