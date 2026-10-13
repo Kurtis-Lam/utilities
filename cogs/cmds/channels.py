@@ -8,7 +8,39 @@ from discord.ext import commands
 # Import ConfirmView from views/common.py
 from views.common_views import confirm
 from views.embeds import handle_common_error, send_usage
+from views.loading import loading
 from views.prompts import ask, is_skip, one_line
+
+def _normalize(text: str) -> str:
+    """Lower-case and treat '-', '_' and repeated spaces as one space ("staff-area" == "Staff  Area")."""
+    return " ".join(re.sub(r"[-_]+", " ", text).lower().split())
+
+
+def find_category(guild: discord.Guild, query: str):
+    """Find a category by ID, <#mention>, or name (spaces allowed, case-insensitive).
+
+    Returns (category, matches): `category` is the single match or None; `matches` lists
+    every candidate when the name is ambiguous (more than one category fits)."""
+    query = query.strip().strip("\"'").strip()
+    if not query:
+        return None, []
+
+    digits = re.fullmatch(r"<#(\d+)>|(\d{15,25})", query)
+    if digits:
+        channel = guild.get_channel(int(digits.group(1) or digits.group(2)))
+        return (channel, []) if isinstance(channel, discord.CategoryChannel) else (None, [])
+
+    wanted = _normalize(query)
+    for matches in (
+        [c for c in guild.categories if _normalize(c.name) == wanted],
+        [c for c in guild.categories if _normalize(c.name).startswith(wanted)],
+        [c for c in guild.categories if wanted in _normalize(c.name)],
+    ):
+        if len(matches) == 1:
+            return matches[0], []
+        if matches:
+            return None, matches
+    return None, []
 
 
 class Channels(commands.Cog):
@@ -158,7 +190,7 @@ class Channels(commands.Cog):
     async def deletechannel(
         self, 
         ctx, 
-        channel: typing.Optional[discord.TextChannel] = None
+        channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to delete (mention or ID). Defaults to the current channel.")
     ):
         target = channel or ctx.channel
         confirmed = await self.confirm_action(ctx, f"Delete {target.mention}? This cannot be undone.")
@@ -185,8 +217,8 @@ class Channels(commands.Cog):
     async def renamechannel(
         self,
         ctx,
-        new_name: typing.Optional[str] = None,
-        channel: typing.Optional[discord.TextChannel] = None
+        new_name: typing.Optional[str] = commands.parameter(default=None, description="The new channel name. Leave blank and I'll ask you step by step."),
+        channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to rename (mention or ID). Defaults to the current channel.")
     ):
         target_channel = channel or ctx.channel
 
@@ -222,6 +254,58 @@ class Channels(commands.Cog):
         )
         await ctx.reply(embed=embed, mention_author=False)
 
+    @commands.hybrid_command(aliases=["movech"], name="movechannel", description="Moves the current channel to another category.", with_app_command=True)
+    @app_commands.describe(
+        category="The ID or name of the category to move this channel to (names can have spaces)."
+    )
+    @commands.has_permissions(manage_channels=True)
+    @commands.bot_has_permissions(manage_channels=True)
+    @commands.guild_only()
+    @loading
+    async def movechannel(
+        self,
+        ctx,
+        *,
+        category: str = commands.parameter(description="The ID or name of the category to move this channel to (names can have spaces).")
+    ):
+        channel = ctx.channel
+        if not isinstance(channel, discord.abc.GuildChannel):
+            return await ctx.reply(
+                embed=discord.Embed(description="❌ This channel can't be moved to a category.", color=discord.Color.red()),
+                mention_author=False,
+            )
+
+        target, matches = find_category(ctx.guild, category)
+        if target is None:
+            if matches:
+                names = ", ".join(f"**{c.name}** (`{c.id}`)" for c in matches[:10])
+                text = f"❌ More than one category matches `{category}`: {names}. Use the ID instead."
+            else:
+                text = f"❌ Couldn't find a category matching `{category}`."
+            return await ctx.reply(embed=discord.Embed(description=text, color=discord.Color.red()), mention_author=False)
+
+        old = channel.category
+        if old is not None and old.id == target.id:
+            return await ctx.reply(
+                embed=discord.Embed(description=f"ℹ️ {channel.mention} is already in **{target.name}**.", color=discord.Color.gold()),
+                mention_author=False,
+            )
+
+        try:
+            await channel.edit(category=target, reason=f"Moved by {ctx.author}")
+        except discord.HTTPException as e:
+            return await ctx.reply(
+                embed=discord.Embed(description=f"❌ Couldn't move the channel: {e.text or e}", color=discord.Color.red()),
+                mention_author=False,
+            )
+
+        embed = discord.Embed(
+            title="📦 Channel Moved",
+            description=f"Moved {channel.mention} from **{old.name if old else 'no category'}** to **{target.name}**.",
+            color=discord.Color.green()
+        )
+        await ctx.reply(embed=embed, mention_author=False)
+
     @commands.hybrid_command(aliases=["lch"], name="lockchannel", description="Locks a text channel for a user or role.", with_app_command=True)
     @app_commands.describe(
         target="The member or role to lock. Defaults to everyone.",
@@ -231,8 +315,8 @@ class Channels(commands.Cog):
     async def lockchannel(
         self, 
         ctx, 
-        target: typing.Optional[typing.Union[discord.Member, discord.Role]] = None, 
-        channel: typing.Optional[discord.TextChannel] = None
+        target: typing.Optional[typing.Union[discord.Member, discord.Role]] = commands.parameter(default=None, description="The member or role to lock (mention or ID). Defaults to everyone."),
+        channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to lock (mention or ID). Defaults to the current channel.")
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
@@ -253,8 +337,8 @@ class Channels(commands.Cog):
     async def unlockchannel(
         self, 
         ctx, 
-        target: typing.Optional[typing.Union[discord.Member, discord.Role]] = None, 
-        channel: typing.Optional[discord.TextChannel] = None
+        target: typing.Optional[typing.Union[discord.Member, discord.Role]] = commands.parameter(default=None, description="The member or role to unlock (mention or ID). Defaults to everyone."),
+        channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to unlock (mention or ID). Defaults to the current channel.")
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
@@ -275,8 +359,8 @@ class Channels(commands.Cog):
     async def hidechannel(
         self, 
         ctx, 
-        target: typing.Optional[typing.Union[discord.Member, discord.Role]] = None, 
-        channel: typing.Optional[discord.TextChannel] = None
+        target: typing.Optional[typing.Union[discord.Member, discord.Role]] = commands.parameter(default=None, description="The member or role to hide the channel from (mention or ID). Defaults to everyone."),
+        channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to hide (mention or ID). Defaults to the current channel.")
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
@@ -297,8 +381,8 @@ class Channels(commands.Cog):
     async def unhidechannel(
         self, 
         ctx, 
-        target: typing.Optional[typing.Union[discord.Member, discord.Role]] = None, 
-        channel: typing.Optional[discord.TextChannel] = None
+        target: typing.Optional[typing.Union[discord.Member, discord.Role]] = commands.parameter(default=None, description="The member or role to unhide the channel for (mention or ID). Defaults to everyone."),
+        channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to unhide (mention or ID). Defaults to the current channel.")
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
@@ -318,7 +402,7 @@ class Channels(commands.Cog):
     async def nuke(
         self, 
         ctx, 
-        channel: typing.Optional[discord.TextChannel] = None
+        channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to nuke (mention or ID). Defaults to the current channel.")
     ):
         target = channel or ctx.channel
         confirmed = await self.confirm_action(ctx, f"Nuke {target.mention}? This cannot be undone.")
