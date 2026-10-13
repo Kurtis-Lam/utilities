@@ -11,7 +11,7 @@ class Reload(OwnerCog):
 
     @commands.command(name="reload")
     @commands.is_owner()
-    async def reload(self, ctx: commands.Context, cog_name: str = None):
+    async def reload(self, ctx: commands.Context, cog_name: str = commands.parameter(default=None, description="The cog to reload. Leave blank to reload all cogs.")):
         bot = self.bot
 
         if cog_name:
