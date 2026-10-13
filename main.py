@@ -92,6 +92,11 @@ class Utilities(commands.Bot):
             owner_ids=OWNERS,
             intents=INTENTS,
             case_insensitive=True,
+            # Never ping the replied-to user. Without this, editing one of our replies later
+            # (e.g. greying out buttons when a view expires) re-pings whoever ran the command.
+            allowed_mentions=discord.AllowedMentions(replied_user=False),
+            # cogs/cmds/help.py provides the help command.
+            help_command=None,
             chunk_guilds_at_startup=False,
             member_cache_flags=discord.MemberCacheFlags.none(),
         )
