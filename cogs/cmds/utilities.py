@@ -1,21 +1,38 @@
+import asyncio
 import os
 import re
 import secrets
 import time
+import typing
 import discord
 from discord.ext import commands, tasks
 
 from views.embeds import (
     BRAND_COLOR, ok_embed, err_embed, info_embed, handle_common_error, send_usage
 )
+from views.loading import loading
 
 # Compile regex once at module level to avoid recompiling on every command call
 TIME_PATTERN = re.compile(r"^(\d+)([smhd])$")
+# Timers also accept combined durations such as 1h30m or 2d12h.
+DURATION_PART = re.compile(r"(\d+)([smhd])")
+DURATION_FULL = re.compile(r"^(?:\d+[smhd])+$")
+UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+MAX_TIMER_SECONDS = 2592000  # 30 days
+
+
+def parse_duration(text: str):
+    """'90s' / '10m' / '1h30m' -> seconds, or None when the text isn't a duration."""
+    text = text.strip().lower()
+    if not DURATION_FULL.match(text):
+        return None
+    return sum(int(amount) * UNIT_SECONDS[unit] for amount, unit in DURATION_PART.findall(text))
 
 
 class Utilities(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._timer_tasks: dict[str, asyncio.Task] = {}
         self.check_reminders.start()
 
     # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
@@ -31,6 +48,10 @@ class Utilities(commands.Cog):
     def collection(self):
         return self.db["reminders"]
 
+    @property
+    def timers_collection(self):
+        return self.db["timers"]
+
     async def cog_load(self):
         """Warms up the database connection when the bot starts."""
         try:
@@ -38,8 +59,18 @@ class Utilities(commands.Cog):
         except Exception as e:
             print(f"Utilities Cog: MongoDB warmup failed: {e}")
 
+        # Timers survive restarts: re-schedule every unfinished one (overdue ones fire right away).
+        try:
+            for doc in await self.timers_collection.find({}).to_list(length=None):
+                self._schedule_timer(doc)
+        except Exception as e:
+            print(f"Utilities Cog: could not restore timers: {e}")
+
     def cog_unload(self):
         self.check_reminders.cancel()
+        for task in self._timer_tasks.values():
+            task.cancel()
+        self._timer_tasks.clear()
 
     async def cog_command_error(self, ctx, error):
         if not await handle_common_error(ctx, error):
@@ -75,9 +106,15 @@ class Utilities(commands.Cog):
     async def before_check_reminders(self):
         await self.bot.wait_until_ready()
 
-    @commands.command(name="remind", aliases=["rm"], description="Sets a reminder.")
+    @commands.command(name="remind", aliases=["rm", "remindme"], description="Sets a reminder.")
     @commands.is_owner()
-    async def remind(self, ctx, time_str: str, *, message: str):
+    async def remind(
+        self,
+        ctx,
+        time_str: str = commands.parameter(description="When to remind you: a number plus s, m, h or d (e.g. 10m, 2h, 1d). Max 30 days."),
+        *,
+        message: str = commands.parameter(description="What to remind you about."),
+    ):
         match = TIME_PATTERN.match(time_str)
         if not match:
             return await send_usage(ctx, note="Invalid time format. Use `<number><unit>` (e.g., `10s`, `5m`, `2h`, `1d`).")
@@ -106,8 +143,83 @@ class Utilities(commands.Cog):
         embed.add_field(name="🆔 ID", value=f"`{reminder_id}`", inline=True)
         await ctx.reply(embed=embed, mention_author=False)
 
+    # ------------------------------------------------------------------
+    # Timers (.timer)
+    # ------------------------------------------------------------------
+
+    def _schedule_timer(self, doc: dict):
+        old = self._timer_tasks.pop(doc["id"], None)
+        if old:
+            old.cancel()
+        task = asyncio.create_task(self._run_timer(doc))
+        self._timer_tasks[doc["id"]] = task
+        task.add_done_callback(lambda _t, timer_id=doc["id"]: self._timer_tasks.pop(timer_id, None))
+
+    async def _run_timer(self, doc: dict):
+        delay = doc["ends_at"] - time.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        try:
+            channel = self.bot.get_channel(doc["channel_id"]) or await self.bot.fetch_channel(doc["channel_id"])
+            reference = discord.MessageReference(
+                message_id=doc["message_id"],
+                channel_id=doc["channel_id"],
+                guild_id=doc.get("guild_id"),
+                fail_if_not_exists=False,  # the timer message may have been deleted
+            )
+            await channel.send(
+                f"Time's up, <@{doc['user_id']}>!",
+                reference=reference,
+                allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=[discord.Object(id=doc["user_id"])], replied_user=False),
+            )
+        except Exception as e:
+            print(f"Failed to finish timer {doc['id']}: {e}")
+        finally:
+            try:
+                await self.timers_collection.delete_one({"id": doc["id"]})
+            except Exception as e:
+                print(f"Failed to delete timer {doc['id']}: {e}")
+
+    @commands.command(name="timer", description="Starts a timer and pings you in this channel when it ends.")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def timer(
+        self,
+        ctx,
+        time_str: str = commands.parameter(description="How long to wait: a number plus s, m, h or d, and they can be combined (e.g. 30s, 10m, 1h30m). Max 30 days."),
+        *,
+        name: typing.Optional[str] = commands.parameter(default=None, description="Optional name shown in the timer (e.g. Pizza)."),
+    ):
+        seconds = parse_duration(time_str)
+        if not seconds:
+            return await send_usage(ctx, note="Invalid time format. Use `<number><unit>` (e.g., `30s`, `10m`, `1h30m`, `1d`).")
+        if seconds > MAX_TIMER_SECONDS:
+            return await ctx.reply(embed=err_embed("Too Long", "A timer cannot be longer than 30 days."), mention_author=False)
+
+        ends_at = int(time.time()) + seconds
+        description = f"{name.strip()}\n" if name and name.strip() else ""
+        embed = discord.Embed(description=f"{description}# <t:{ends_at}:R>", color=BRAND_COLOR)
+        embed.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
+        message = await ctx.reply(embed=embed, mention_author=False)
+
+        doc = {
+            "id": secrets.token_hex(3),
+            "user_id": ctx.author.id,
+            "guild_id": ctx.guild.id,
+            "channel_id": ctx.channel.id,
+            "message_id": message.id,
+            "ends_at": ends_at,
+            "name": name,
+        }
+        try:
+            await self.timers_collection.insert_one(dict(doc))
+        except Exception as e:  # still works until the next restart
+            print(f"Failed to save timer {doc['id']}: {e}")
+        self._schedule_timer(doc)
+
     @commands.group(name="reminders", invoke_without_command=True, description="View your active reminders.")
     @commands.is_owner()
+    @loading
     async def reminders(self, ctx):
         user_reminders = await self.collection.find({"user_id": ctx.author.id}).to_list(length=None)
         
@@ -140,7 +252,11 @@ class Utilities(commands.Cog):
 
     @reminders.command(name="remove", aliases=["r"], description="Remove a reminder by its ID.")
     @commands.is_owner()
-    async def reminders_remove(self, ctx, reminder_id: str):
+    async def reminders_remove(
+        self,
+        ctx,
+        reminder_id: str = commands.parameter(description="The ID of the reminder to remove (shown by .reminders and when you set it)."),
+    ):
         result = await self.collection.delete_one({"id": reminder_id, "user_id": ctx.author.id})
 
         if result.deleted_count > 0:
