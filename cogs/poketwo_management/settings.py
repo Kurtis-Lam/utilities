@@ -4,6 +4,7 @@ from discord.ext import commands
 from cogs.poketwo_helper.lockcommon import DEFAULT_DELAY, DEFAULT_LOCKTIME, format_duration
 from views.autolock_views import ALL_CATEGORIES, CATEGORY_LABELS
 from views.embeds import commands_usage_embed, err_embed, handle_command_error
+from views.loading import loading
 
 
 def _label(category: str) -> str:
@@ -54,6 +55,7 @@ class Settings(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @loading
     async def channel_settings(self, ctx: commands.Context):
         """This channel's autolock settings (server defaults + this channel's overrides)."""
         cog = await self._get_config_cog(ctx)
@@ -86,6 +88,7 @@ class Settings(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @loading
     async def server_settings(self, ctx: commands.Context):
         """Server-wide autolock defaults (what applies where a channel has no override)."""
         cog = await self._get_config_cog(ctx)
