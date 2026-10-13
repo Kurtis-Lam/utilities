@@ -10,8 +10,10 @@ from discord.ext import commands
 # Import ConfirmView from views/common.py
 from views.common_views import confirm
 from views.embeds import handle_common_error, ok_embed, err_embed, warn_embed, info_embed, BRAND_COLOR
+from views.loading import loading
 from views.navigate import PaginatorView
 
+MEMBERCOUNT_CACHE_SECONDS = 60
 MAX_REASON_LENGTH = 500
 DEFAULT_REASON = "No reason provided"
 
@@ -19,6 +21,9 @@ DEFAULT_REASON = "No reason provided"
 class Members(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # guild_id -> (timestamp, humans, bots); members are not cached by this bot, so a
+        # count means fetching the member list. Keep the result for a minute.
+        self._membercount_cache: dict[int, tuple[float, int, int]] = {}
 
     # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
     @property
@@ -87,10 +92,11 @@ class Members(commands.Cog):
     )
     @app_commands.describe(target="The member or user ID to look up.")
     @commands.guild_only()
+    @loading
     async def whois(
         self,
         ctx: commands.Context,
-        target: typing.Union[discord.Member, discord.User] = None,
+        target: typing.Union[discord.Member, discord.User] = commands.parameter(default=None, description="The member or user to look up (mention or ID). Leave blank for yourself."),
     ):
         if target is None:
             target = ctx.author
@@ -162,6 +168,49 @@ class Members(commands.Cog):
         await ctx.reply(embed=embed, mention_author=False)
 
     # ------------------------------------------------------------------
+    # Member count (.membercount) - everyone can use it
+    # ------------------------------------------------------------------
+
+    async def _count_members(self, guild: discord.Guild) -> tuple[int, int]:
+        """Returns (humans, bots) for a guild."""
+        cached = self._membercount_cache.get(guild.id)
+        if cached and time.monotonic() - cached[0] < MEMBERCOUNT_CACHE_SECONDS:
+            return cached[1], cached[2]
+
+        humans = bots = 0
+        async for member in guild.fetch_members(limit=None):
+            if member.bot:
+                bots += 1
+            else:
+                humans += 1
+
+        self._membercount_cache[guild.id] = (time.monotonic(), humans, bots)
+        return humans, bots
+
+    @commands.hybrid_command(
+        name="membercount",
+        aliases=["mc"],
+        with_app_command=True,
+        description="Shows how many members, humans and bots the server has.",
+    )
+    @commands.guild_only()
+    @loading
+    async def membercount(self, ctx: commands.Context):
+        guild = ctx.guild
+        humans, bots = await self._count_members(guild)
+
+        embed = discord.Embed(
+            description=(
+                f"👥 **Members:** {humans + bots:,}\n"
+                f"🧑 **Humans:** {humans:,}\n"
+                f"🤖 **Bots:** {bots:,}"
+            ),
+            color=BRAND_COLOR,
+        )
+        embed.set_author(name=guild.name, icon_url=guild.icon.url if guild.icon else None)
+        await ctx.reply(embed=embed, mention_author=False)
+
+    # ------------------------------------------------------------------
     # Mute role (stored per server in MongoDB, set with .muterole)
     # ------------------------------------------------------------------
 
@@ -185,7 +234,7 @@ class Members(commands.Cog):
         role="The role to use for mutes (mention or ID). Leave blank to view the current one."
     )
     @commands.has_permissions(manage_roles=True)
-    async def muterole(self, ctx, role: discord.Role = None):
+    async def muterole(self, ctx, role: discord.Role = commands.parameter(default=None, description="The role to use for mutes (mention or ID). Leave blank to view the current one.")):
         if role is None:
             current = await self.get_mute_role(ctx.guild)
             if current:
@@ -227,9 +276,9 @@ class Members(commands.Cog):
     async def kick(
         self, 
         ctx, 
-        user: discord.Member, 
+        user: discord.Member = commands.parameter(description="The member to kick (mention or ID)."), 
         *, 
-        reason: str = "No reason provided"
+        reason: str = commands.parameter(default='No reason provided', description="Why they are being kicked.")
     ):
         if user.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
             embed = discord.Embed(title="❌ Action Denied", description="You cannot kick someone with a role higher than or equal to yours.", color=discord.Color.red())
@@ -263,9 +312,9 @@ class Members(commands.Cog):
     async def ban(
         self, 
         ctx, 
-        user: discord.Member, 
+        user: discord.Member = commands.parameter(description="The member to ban (mention or ID)."), 
         *, 
-        reason: str = "No reason provided"
+        reason: str = commands.parameter(default='No reason provided', description="Why they are being banned.")
     ):
         if user.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
             embed = discord.Embed(title="❌ Action Denied", description="You cannot ban someone with a role higher than or equal to yours.", color=discord.Color.red())
@@ -304,9 +353,9 @@ class Members(commands.Cog):
     async def nick(
         self, 
         ctx, 
-        user: discord.Member, 
+        user: discord.Member = commands.parameter(description="The member whose nickname to change (mention or ID)."), 
         *, 
-        new_name: str
+        new_name: str = commands.parameter(description="The new nickname. Use none or reset to remove it.")
     ):
         if user.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
             embed = discord.Embed(title="❌ Action Denied", description="You cannot change the nickname of someone with a role higher than or equal to yours.", color=discord.Color.red())
@@ -356,10 +405,10 @@ class Members(commands.Cog):
     async def mute(
         self,
         ctx,
-        user: discord.Member,
-        duration: typing.Optional[str] = None,
+        user: discord.Member = commands.parameter(description="The member to mute (mention or ID)."),
+        duration: typing.Optional[str] = commands.parameter(default=None, description="How long, e.g. 30s, 10m, 2h, 1d. Leave blank for permanent."),
         *,
-        reason: str = "No reason provided"
+        reason: str = commands.parameter(default='No reason provided', description="Why they are being muted.")
     ):
         if user.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
             embed = discord.Embed(title="❌ Action Denied", description="You cannot mute someone with a role higher than or equal to yours.", color=discord.Color.red())
@@ -431,7 +480,7 @@ class Members(commands.Cog):
     async def unmute(
         self,
         ctx,
-        user: discord.Member
+        user: discord.Member = commands.parameter(description="The member to unmute (mention or ID).")
     ):
         muted_role = await self.require_mute_role(ctx)
         if not muted_role:
@@ -491,9 +540,9 @@ class Members(commands.Cog):
     async def warn(
         self,
         ctx,
-        user: discord.Member,
+        user: discord.Member = commands.parameter(description="The member to warn (mention or ID)."),
         *,
-        reason: str = "No reason provided"
+        reason: str = commands.parameter(default='No reason provided', description="Why they are being warned.")
     ):
         if user.bot:
             return await ctx.reply(embed=err_embed("Action Denied", "You cannot warn a bot."), mention_author=False)
@@ -536,7 +585,7 @@ class Members(commands.Cog):
         warn_id="The ID of the warn to remove."
     )
     @commands.has_permissions(administrator=True)
-    async def warn_remove(self, ctx, user: discord.User, warn_id: str):
+    async def warn_remove(self, ctx, user: discord.User = commands.parameter(description="The member (mention or ID) the warn belongs to."), warn_id: str = commands.parameter(description="The ID of the warn to remove, shown in the warns list.")):
         await self._remove_warn(ctx, user, warn_id)
 
     @commands.hybrid_group(
@@ -548,7 +597,8 @@ class Members(commands.Cog):
     )
     @app_commands.describe(user="The member (mention or ID) to look up.")
     @commands.has_permissions(administrator=True)
-    async def warns(self, ctx, user: discord.User):
+    @loading
+    async def warns(self, ctx, user: discord.User = commands.parameter(description="The member (mention or ID) to look up.")):
         docs = await self.warns_collection.find(
             {"guild_id": ctx.guild.id, "user_id": user.id}
         ).sort("created_at", -1).to_list(length=None)
@@ -579,7 +629,7 @@ class Members(commands.Cog):
         warn_id="The ID of the warn to remove."
     )
     @commands.has_permissions(administrator=True)
-    async def warns_remove(self, ctx, user: discord.User, warn_id: str):
+    async def warns_remove(self, ctx, user: discord.User = commands.parameter(description="The member (mention or ID) the warn belongs to."), warn_id: str = commands.parameter(description="The ID of the warn to remove, shown in the warns list.")):
         await self._remove_warn(ctx, user, warn_id)
 
 
@@ -645,19 +695,22 @@ class Members(commands.Cog):
     @commands.hybrid_command(name="kicked", with_app_command=True, description="Shows when, by whom and why a user was kicked.")
     @app_commands.describe(user="The user (mention or ID) to look up.")
     @commands.has_permissions(administrator=True)
-    async def kicked(self, ctx, user: discord.User):
+    @loading
+    async def kicked(self, ctx, user: discord.User = commands.parameter(description="The user (mention or ID) to look up.")):
         await self._show_logs(ctx, user, "kick", "👢 Kick History", "kick", discord.Color.orange())
 
     @commands.hybrid_command(name="banned", with_app_command=True, description="Shows when, by whom and why a user was banned.")
     @app_commands.describe(user="The user (mention or ID) to look up.")
     @commands.has_permissions(administrator=True)
-    async def banned(self, ctx, user: discord.User):
+    @loading
+    async def banned(self, ctx, user: discord.User = commands.parameter(description="The user (mention or ID) to look up.")):
         await self._show_logs(ctx, user, "ban", "🔨 Ban History", "ban", discord.Color.red())
 
     @commands.hybrid_command(name="mutelogs", with_app_command=True, description="Shows a user's mute history (when, by whom, why, and for how long).")
     @app_commands.describe(user="The user (mention or ID) to look up.")
     @commands.has_permissions(administrator=True)
-    async def mutelogs(self, ctx, user: discord.User):
+    @loading
+    async def mutelogs(self, ctx, user: discord.User = commands.parameter(description="The user (mention or ID) to look up.")):
         await self._show_logs(ctx, user, "mute", "🔇 Mute History", "mute", discord.Color.dark_grey())
 
 
