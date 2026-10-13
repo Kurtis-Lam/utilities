@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from views.dex_views import ShinyView
 from views.embeds import err_embed, handle_command_error, make_embed, send_usage, warn_embed
+from views.loading import loading
 
 TYPE_EMOJIS = {
     "normal": "🔘",
@@ -198,7 +199,8 @@ class Dex(commands.Cog):
         usage="<name or dex number>",
         description="Look up a Pokémon by name or dex number.",
     )
-    async def dex_cmd(self, ctx: commands.Context, *, query: str = None):
+    @loading
+    async def dex_cmd(self, ctx: commands.Context, *, query: str = commands.parameter(default=None, description="Pokémon name or Pokédex number (e.g. pikachu, 25, #25).")):
         if query is None or not query.strip():
             return await send_usage(ctx, title="Missing arg: `query`")
 
