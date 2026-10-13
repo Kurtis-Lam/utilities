@@ -3,16 +3,28 @@ import time
 import typing
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
+from pymongo import UpdateOne
 
 # Import ConfirmView from views/common.py
 from views.common_views import ConfirmView, reply_or_send
-from views.embeds import ok_embed, err_embed, info_embed, handle_common_error, send_usage
+from views.embeds import ok_embed, err_embed, info_embed, handle_common_error, send_usage, BRAND_COLOR
+from views.loading import loading
+
+COUNT_FLUSH_SECONDS = 20
 
 
 class Messages(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # (guild_id, user_id) -> messages seen since the last flush to MongoDB
+        self._pending_counts: dict[tuple[int, int], int] = {}
+        self._flush_lock = asyncio.Lock()
+        self.flush_counts_loop.start()
+
+    def cog_unload(self):
+        self.flush_counts_loop.cancel()
+        asyncio.ensure_future(self._flush_counts())
 
     # Retrieves MongoDB instance dynamically from main.py's bot.mongo_client
     @property
@@ -26,6 +38,11 @@ class Messages(commands.Cog):
     @property
     def collection(self):
         return self.db["sticks"]
+
+    @property
+    def counts_collection(self):
+        """One document per member: {_id: "guild:user", guild_id, user_id, count}."""
+        return self.db["message_counts"]
 
     @property
     def snipes_collection(self):
@@ -73,6 +90,77 @@ class Messages(commands.Cog):
                 )
             except discord.HTTPException:
                 pass
+
+    # ------------------------------------------------------------------
+    # Message counter (.messages)
+    # ------------------------------------------------------------------
+
+    @commands.Cog.listener("on_message")
+    async def count_message(self, message):
+        """Counts every message in memory; flush_counts_loop writes them to MongoDB in batches."""
+        if message.guild is None or message.webhook_id is not None:
+            return
+        key = (message.guild.id, message.author.id)
+        self._pending_counts[key] = self._pending_counts.get(key, 0) + 1
+
+    async def _flush_counts(self):
+        async with self._flush_lock:
+            if not self._pending_counts or self.mongo_client is None:
+                return
+            batch, self._pending_counts = self._pending_counts, {}
+            operations = [
+                UpdateOne(
+                    {"_id": f"{guild_id}:{user_id}"},
+                    {"$inc": {"count": amount}, "$setOnInsert": {"guild_id": guild_id, "user_id": user_id}},
+                    upsert=True,
+                )
+                for (guild_id, user_id), amount in batch.items()
+            ]
+            try:
+                await self.counts_collection.bulk_write(operations, ordered=False)
+            except Exception as e:
+                print(f"Messages Cog: failed to save message counts: {e}")
+                for key, amount in batch.items():  # keep them for the next attempt
+                    self._pending_counts[key] = self._pending_counts.get(key, 0) + amount
+
+    @tasks.loop(seconds=COUNT_FLUSH_SECONDS)
+    async def flush_counts_loop(self):
+        await self._flush_counts()
+
+    @flush_counts_loop.before_loop
+    async def before_flush_counts_loop(self):
+        await self.bot.wait_until_ready()
+
+    @commands.hybrid_command(
+        name="messages",
+        aliases=["msgcount"],
+        with_app_command=True,
+        description="Shows how many messages a user has sent in this server.",
+    )
+    @app_commands.describe(user="The member (mention or ID) to check. Defaults to you.")
+    @commands.guild_only()
+    @loading
+    async def messages(
+        self,
+        ctx,
+        user: typing.Optional[typing.Union[discord.Member, discord.User]] = commands.parameter(
+            default=None,
+            description="The member (mention or ID) to check. Defaults to you.",
+        ),
+    ):
+        user = user or ctx.author
+        await self._flush_counts()
+
+        doc = await self.counts_collection.find_one({"_id": f"{ctx.guild.id}:{user.id}"})
+        count = (doc or {}).get("count", 0) + self._pending_counts.get((ctx.guild.id, user.id), 0)
+
+        embed = discord.Embed(
+            title="Messages",
+            description=f"{user.mention} has sent **{count}** messages in this server.",
+            color=BRAND_COLOR,
+        )
+        embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+        await ctx.reply(embed=embed, mention_author=False)
 
     async def cog_command_error(self, ctx, error):
         if not await handle_common_error(ctx, error):
@@ -307,6 +395,7 @@ class Messages(commands.Cog):
     )
     @commands.has_permissions(manage_messages=True)
     @commands.bot_has_permissions(manage_messages=True)
+    @loading
     async def forward(
         self,
         ctx,
@@ -623,6 +712,7 @@ class Messages(commands.Cog):
     ])
     @commands.has_permissions(manage_messages=True)
     @commands.bot_has_permissions(manage_messages=True)
+    @loading
     async def pins(
         self,
         ctx,
@@ -686,7 +776,7 @@ class Messages(commands.Cog):
     )
     @commands.has_permissions(manage_messages=True)
     @commands.bot_has_permissions(manage_messages=True)
-    async def stick(self, ctx, *, msg: str):
+    async def stick(self, ctx, *, msg: str = commands.parameter(description="The text to keep at the bottom of this channel.")):
         channel_id_str = str(ctx.channel.id)
 
         # AWAITED: Non-blocking DB fetch
@@ -721,7 +811,7 @@ class Messages(commands.Cog):
     @commands.hybrid_command(name="unstick", description="Unsticks the sticky message in the current channel.")
     @commands.has_permissions(manage_messages=True)
     @commands.bot_has_permissions(manage_messages=True)
-    async def unstick(self, ctx, channel: typing.Optional[discord.TextChannel] = None):
+    async def unstick(self, ctx, channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to unstick (mention or ID). Defaults to the current channel.")):
         target_channel = channel or ctx.channel
         channel_id_str = str(target_channel.id)
 
@@ -771,7 +861,7 @@ class Messages(commands.Cog):
     )
     @commands.has_permissions(manage_messages=True)
     @commands.bot_has_permissions(manage_permissions=True)
-    async def sticks_remove(self, ctx, target: typing.Optional[str] = None):
+    async def sticks_remove(self, ctx, target: typing.Optional[str] = commands.parameter(default=None, description="The channel (mention/ID) or list number to remove. Leave blank for this channel.")):
         target_channel = None
         target_id_str = None
 
