@@ -3,6 +3,7 @@ from discord.ext import commands
 
 from cogs.owner_cmds.utils import OwnerCog, run_cmd, safe_send
 from views.common_views import EMBED_COLOR
+from views.loading import loading
 
 MAX_OTHER_REFS = 10
 MAX_DIRTY_FILES = 10
@@ -33,6 +34,7 @@ class GitStats(OwnerCog):
 
     @commands.command(name="gitstats")
     @commands.is_owner()
+    @loading
     async def gitstats(self, ctx: commands.Context):
         """Show the current git branch/commit and how far ahead/behind it is."""
         async with ctx.typing():
