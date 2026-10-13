@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from views.common_views import EMBED_COLOR, confirm, error_embed, info_embed, make_embed, success_embed, warning_embed
 from views.embeds import handle_command_error, send_usage
+from views.loading import loading
 from views.pings_views import (
     EXTRA_RP_CATEGORIES,
     REGIONS,
@@ -542,6 +543,7 @@ class PokePings(commands.Cog):
         await self._confirm_clear(ctx, "cl", "collection list", "Pokémon")
 
     @cl_group.command(name="list", aliases=["l"], description="Show your collection list.")
+    @loading
     async def cl_list(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
@@ -585,7 +587,15 @@ class PokePings(commands.Cog):
         invoke_without_command=True,
         description="Show your reserves or view all server reserves.",
     )
-    async def reserves(self, ctx: commands.Context, *, scope: Optional[str] = None):
+    async def reserves(
+        self,
+        ctx: commands.Context,
+        *,
+        scope: Optional[str] = commands.parameter(
+            default=None,
+            description="Optional: 'all' (all server reserves, admin) or 'list' (your reserves).",
+        ),
+    ):
         if ctx.invoked_subcommand is not None:
             return
 
@@ -612,6 +622,7 @@ class PokePings(commands.Cog):
         await ctx.reply(embed=embed, mention_author=False)
 
     @reserves.command(name="list", aliases=["l"], description="Show your reserves.")
+    @loading
     async def re_list(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
         u_id = str(ctx.author.id)
@@ -647,6 +658,7 @@ class PokePings(commands.Cog):
             await ctx.reply(embed=pages[0], view=view, mention_author=False)
 
     @reserves.command(name="all", description="View all user reserves in this server (admin only).")
+    @loading
     async def re_all(self, ctx: commands.Context):
         if not ctx.author.guild_permissions.administrator:
             await ctx.reply(
