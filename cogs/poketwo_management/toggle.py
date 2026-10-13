@@ -81,6 +81,7 @@ class Toggle(commands.Cog):
         invoke_without_command=True,
         usage="<lock...> [--global]",
         description="Toggle locks, Pokémon naming, lock delays, lock times and restrict unlockers.",
+        extras={"args": {"args": "One or more lock names to toggle (sh, cl, rp, tp, res) and/or naming, plus optional --global to apply to the whole server instead of this channel."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -130,6 +131,7 @@ class Toggle(commands.Cog):
         name="naming",
         usage="[--global]",
         description="Toggle Pokémon naming for this channel (or the whole server).",
+        extras={"args": {"flags": "Optional --global to toggle Pokemon naming for the whole server instead of this channel."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -153,6 +155,7 @@ class Toggle(commands.Cog):
         aliases=["lock-delay", "delay", "ld"],
         usage="<lock(s)...> [--global|--standard]",
         description="Toggle a lock's delay.",
+        extras={"args": {"args": "One or more lock names (sh, cl, rp, tp, res), plus optional --global (whole server) or --standard (the standard delay; no locks with it)."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -204,6 +207,7 @@ class Toggle(commands.Cog):
         aliases=["lock-time", "time", "lt"],
         usage="<lock(s)...> [--global|--standard]",
         description="Toggle a lock's auto-unlock timer.",
+        extras={"args": {"args": "One or more lock names (sh, cl, rp, tp, res), plus optional --global (whole server) or --standard (the standard lock time; no locks with it)."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -254,6 +258,7 @@ class Toggle(commands.Cog):
         aliases=["restuls", "restrict-unlockers", "restrict", "ru"],
         usage="<lock(s)...> [--global|--standard]",
         description="Only pinged users can unlock (res/sh/cl/tp/rp).",
+        extras={"args": {"locks_and_flags": "One or more lock names (res, sh, cl, tp, rp), plus optional --global (whole server) or --standard (the standard value; no locks with it)."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
