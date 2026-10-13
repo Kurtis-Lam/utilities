@@ -20,6 +20,7 @@ from views.embeds import (
     send_usage,
     warn_embed,
 )
+from views.loading import loading
 from views.timer_views import MAX_SECONDS, MIN_SECONDS, TIMER_LABELS
 
 
@@ -168,9 +169,11 @@ class Set(commands.Cog):
         aliases=["lock-delay", "delay", "ld"],
         usage="<time> [lock...] [--global|--standard]",
         description="Set a lock's delay in seconds (no lock = all locks).",
+        extras={"args": {"args": "Delay in seconds (e.g. 15 or 30s), then optional lock names to change (sh, cl, rp, tp, res or all; none = all locks), plus optional --global (whole server) or --standard (the standard value; no locks with it)."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @loading
     async def set_lockdelay(self, ctx: commands.Context, *args: str):
         tokens, is_global, is_standard = split_scope_flags(args)
         if not tokens:
@@ -216,9 +219,11 @@ class Set(commands.Cog):
         aliases=["lock-time", "time", "lt"],
         usage="<time|on|off> [lock(s)...] [--global|--standard]",
         description="Set how long a lock stays locked before it auto-unlocks (no lock = all locks).",
+        extras={"args": {"args": "Lock time (e.g. 30m, 2h, 1h30m; a bare number = minutes) or on/off to toggle auto-unlock, then optional lock names (sh, cl, rp, tp, res or all; none = all locks), plus optional --global or --standard."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @loading
     async def set_locktime(self, ctx: commands.Context, *args: str):
         tokens, is_global, is_standard = split_scope_flags(args)
         if not tokens:
@@ -272,9 +277,11 @@ class Set(commands.Cog):
         aliases=["wl"],
         usage="<add|a|remove|r> <channels...> [lock(s)...] [--standard]",
         description="Add / remove the channels a lock may autolock in (server-wide; no lock = all locks).",
+        extras={"args": {"args": "add/a, remove/r or clear/reset, then channels (#mentions, channel IDs, #name, * for all, or list numbers when removing), then optional lock names (sh, cl, rp, tp, res or all; none = all locks). --standard edits the standard whitelist."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @loading
     async def set_whitelist(self, ctx: commands.Context, *args: str):
         tokens, is_global, is_standard = split_scope_flags(args)
 
@@ -349,9 +356,11 @@ class Set(commands.Cog):
         aliases=["restrict-unlockers", "ru"],
         usage="<true|false|t|f> [lock(s)...] [--global|--standard]",
         description="Only the pinged user(s) can unlock (res/sh/cl/tp/rp; no lock = all of them).",
+        extras={"args": {"args": "true/t or false/f, then optional lock names (res, sh, cl, tp, rp or all; none = all of them), plus optional --global or --standard."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @loading
     async def set_restrictunlockers(self, ctx: commands.Context, *args: str):
         tokens, is_global, is_standard = split_scope_flags(args)
         if not tokens:
@@ -412,9 +421,11 @@ class Set(commands.Cog):
         aliases=["usestandard", "standard"],
         usage="<lock...>",
         description="Copy the standard delay, lock time, whitelist and restrict onto a lock (server-wide).",
+        extras={"args": {"locks": "One or more lock names (sh, cl, rp, tp, res or all) to copy the standard delay, lock time, whitelist and restrict onto."}},
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @loading
     async def set_use_standard(self, ctx: commands.Context, *locks: str):
         if not locks:
             return await send_usage(ctx, title="Missing arg: `lock`")
@@ -475,25 +486,41 @@ class Set(commands.Cog):
     @set_group.command(name="shtimer", usage="<timer>", description="Set the SH timer length in seconds.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_shtimer(self, ctx: commands.Context, timer: str = None):
+    async def set_shtimer(
+        self,
+        ctx: commands.Context,
+        timer: str = commands.parameter(default=None, description="Timer length in seconds, e.g. 15 or 30s."),
+    ):
         await self._set_timer(ctx, "sh", timer)
 
     @set_group.command(name="cltimer", usage="<timer>", description="Set the CL timer length in seconds.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_cltimer(self, ctx: commands.Context, timer: str = None):
+    async def set_cltimer(
+        self,
+        ctx: commands.Context,
+        timer: str = commands.parameter(default=None, description="Timer length in seconds, e.g. 15 or 30s."),
+    ):
         await self._set_timer(ctx, "cl", timer)
 
     @set_group.command(name="rptimer", usage="<timer>", description="Set the RP timer length in seconds.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_rptimer(self, ctx: commands.Context, timer: str = None):
+    async def set_rptimer(
+        self,
+        ctx: commands.Context,
+        timer: str = commands.parameter(default=None, description="Timer length in seconds, e.g. 15 or 30s."),
+    ):
         await self._set_timer(ctx, "rp", timer)
 
     @set_group.command(name="tptimer", usage="<timer>", description="Set the TP timer length in seconds.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_tptimer(self, ctx: commands.Context, timer: str = None):
+    async def set_tptimer(
+        self,
+        ctx: commands.Context,
+        timer: str = commands.parameter(default=None, description="Timer length in seconds, e.g. 15 or 30s."),
+    ):
         await self._set_timer(ctx, "tp", timer)
 
     # --- role setters ----------------------------------------------------------
@@ -525,7 +552,11 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_rarerole(self, ctx: commands.Context, role: discord.Role):
+    async def set_rarerole(
+        self,
+        ctx: commands.Context,
+        role: discord.Role = commands.parameter(description="The role to ping for Rare spawns (mention or ID)."),
+    ):
         await self._set_role(ctx, "rare", "Rare", role)
 
     @set_group.command(
@@ -534,7 +565,11 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_regionalrole(self, ctx: commands.Context, role: discord.Role):
+    async def set_regionalrole(
+        self,
+        ctx: commands.Context,
+        role: discord.Role = commands.parameter(description="The role to ping for Regional spawns (mention or ID)."),
+    ):
         await self._set_role(ctx, "regional", "Regional", role)
 
     @set_group.command(
@@ -543,7 +578,11 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_gigantamaxrole(self, ctx: commands.Context, role: discord.Role):
+    async def set_gigantamaxrole(
+        self,
+        ctx: commands.Context,
+        role: discord.Role = commands.parameter(description="The role to ping for Gigantamax spawns (mention or ID)."),
+    ):
         await self._set_role(ctx, "gmax", "Gigantamax", role)
 
     @set_group.command(
@@ -552,7 +591,11 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_paradoxrole(self, ctx: commands.Context, role: discord.Role):
+    async def set_paradoxrole(
+        self,
+        ctx: commands.Context,
+        role: discord.Role = commands.parameter(description="The role to ping for Paradox spawns (mention or ID)."),
+    ):
         await self._set_role(ctx, "paradox", "Paradox", role)
 
     @set_group.command(
@@ -561,7 +604,11 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def set_eeveelutionsrole(self, ctx: commands.Context, role: discord.Role):
+    async def set_eeveelutionsrole(
+        self,
+        ctx: commands.Context,
+        role: discord.Role = commands.parameter(description="The role to ping for Eeveelutions spawns (mention or ID)."),
+    ):
         await self._set_role(ctx, "eevos", "Eeveelutions", role)
 
 
