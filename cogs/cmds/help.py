@@ -12,11 +12,15 @@ from the loaded cogs.
                             ``is_owner`` / ``OwnerCog`` = owner. Commands that check permissions inside
                             their body can be listed in ``ACCESS_OVERRIDES``.
 * Overview grouping      -> ``HELP_CATEGORIES`` below (commands that aren't listed land in "Other").
+                            Categories listed in ``POKETWO_CATEGORIES`` are shown in their own
+                            "Poketwo Commands" section (user and admin commands together, admin-only
+                            ones tagged ``(admin)``).
 
-Usage:  .help                 User Commands, Admin Commands and (owners only) Owner Commands,
-                              each split into categories
+Usage:  .help                 User Commands, Admin Commands, Poketwo Commands and (owners only)
+                              Owner Commands, each split into categories
         .help <command>       usage, aliases, arguments (+ descriptions), subcommands, examples.
-                              Admin-only commands get a ``*`` after their name, owner-only ones ``***``
+                              Admin-only commands get a ``*`` after their name, owner-only ones ``***``.
+                              Poketwo commands use ``(admin)`` instead of ``*`` for admin-only ones
         .help <cog>           the commands of one cog
         .help <group> <sub>   e.g. .help set lockdelay
 
@@ -37,15 +41,22 @@ from views.navigate import PaginatorView
 PAGE_CHAR_LIMIT = 3800
 FIELD_CHAR_LIMIT = 1000
 
-USER, ADMIN, OWNER = 0, 1, 2
+USER, ADMIN, OWNER = 0, 1, 2   # access levels
+POKETWO = 3                     # display section only (not an access level)
 
 SECTIONS = {
-    USER: ("👤", "User Commands"),
-    ADMIN: ("🛡️", "Admin Commands"),
-    OWNER: ("👑", "Owner Commands"),
+    USER: ("", "User Commands"),
+    ADMIN: ("", "Admin Commands"),
+    POKETWO: ("", "Pokétwo Commands"),
+    OWNER: ("", "Owner Commands"),
 }
+SECTION_ORDER = (USER, ADMIN, POKETWO, OWNER)
 MARKERS = {USER: "", ADMIN: "*", OWNER: "***"}
 LEGEND = {ADMIN: "* Admin only", OWNER: "*** Owner only"}
+
+# Admin-only marker used inside the Poketwo section / on Poketwo commands.
+POKETWO_ADMIN_MARKER = "(admin)"
+POKETWO_ADMIN_LEGEND = f"{POKETWO_ADMIN_MARKER} Admin only"
 
 # Show the Admin Commands section to everybody (False = only to people who can run them).
 SHOW_ADMIN_COMMANDS_TO_EVERYONE = True
@@ -104,6 +115,9 @@ HELP_CATEGORIES: dict[str, list[str]] = {
 }
 OTHER_CATEGORY = "Other"
 
+# Categories that are shown in the "Poketwo Commands" section instead of User / Admin.
+POKETWO_CATEGORIES = {"Pokétwo Pings", "Pokétwo Helper", "Pokétwo Management", "Pokétwo Utils"}
+
 CATEGORY_OF = {name: title for title, names in HELP_CATEGORIES.items() for name in names}
 CATEGORY_ORDER = {title: index for index, title in enumerate(HELP_CATEGORIES)}
 COMMAND_ORDER = {name: index for index, name in enumerate(CATEGORY_OF)}
@@ -124,6 +138,33 @@ def access_level(cmd: commands.Command) -> int:
     if cmd.parent is not None:
         level = max(level, access_level(cmd.parent))
     return level
+
+
+def _in_poketwo(cmd: commands.Command) -> bool:
+    """True if the command belongs to one of the Poketwo categories."""
+    root = cmd.root_parent or cmd
+    return CATEGORY_OF.get(root.name) in POKETWO_CATEGORIES
+
+
+def section_of(cmd: commands.Command, level: int) -> int:
+    """Overview section: owner commands always stay under Owner, Poketwo commands go to Poketwo."""
+    if level == OWNER:
+        return OWNER
+    return POKETWO if _in_poketwo(cmd) else level
+
+
+def _tag(cmd: commands.Command, level: int, *, md: bool = False) -> str:
+    """Access marker of a command: '(admin)' for admin-only Poketwo commands, else '', '*' or '***'."""
+    if level == ADMIN and _in_poketwo(cmd):
+        return POKETWO_ADMIN_MARKER
+    return _marker_md(level) if md else _marker(level)
+
+
+def _legend(cmd: commands.Command, level: int) -> str:
+    """Legend text matching `_tag`."""
+    if level == ADMIN and _in_poketwo(cmd):
+        return POKETWO_ADMIN_LEGEND
+    return LEGEND[level]
 
 
 def _marker(level: int) -> str:
@@ -234,7 +275,7 @@ class Help(commands.Cog):
 
     async def _overview_pages(self, ctx: commands.Context, owner: bool) -> list[discord.Embed]:
         prefix = ctx.clean_prefix
-        grouped: dict[int, dict[str, list[commands.Command]]] = {USER: {}, ADMIN: {}, OWNER: {}}
+        grouped: dict[int, dict[str, list[commands.Command]]] = {section: {} for section in SECTION_ORDER}
 
         for cmd in self.bot.walk_commands():
             if _is_hidden(cmd):
@@ -245,22 +286,30 @@ class Help(commands.Cog):
             if not await self._visible(cmd, ctx, level, owner):
                 continue
             root = cmd.root_parent or cmd
-            grouped[level].setdefault(CATEGORY_OF.get(root.name, OTHER_CATEGORY), []).append(cmd)
+            section = section_of(cmd, level)
+            grouped[section].setdefault(CATEGORY_OF.get(root.name, OTHER_CATEGORY), []).append(cmd)
 
         blocks: list[tuple[str, list[str]]] = []
-        for level in (USER, ADMIN, OWNER):
-            categories = grouped[level]
+        for section in SECTION_ORDER:
+            categories = grouped[section]
             if not categories:
                 continue
-            emoji, title = SECTIONS[level]
+            emoji, title = SECTIONS[section]
             lines = []
             for category in sorted(categories, key=lambda c: CATEGORY_ORDER.get(c, len(CATEGORY_ORDER))):
                 cmds = sorted(
                     categories[category],
                     key=lambda c: (COMMAND_ORDER.get((c.root_parent or c).name, 10**6), c.qualified_name),
                 )
-                names = ", ".join(f"`{prefix}{c.qualified_name}`" for c in cmds)
-                lines.append(f"**{category}:** {names}")
+                names = []
+                for c in cmds:
+                    entry = f"`{prefix}{c.qualified_name}`"
+                    if section == POKETWO and access_level(c) == ADMIN:
+                        entry += f" {POKETWO_ADMIN_MARKER}"
+                    names.append(entry)
+                # Inside the Poketwo section the "Pokétwo " prefix is redundant.
+                shown = category.removeprefix("Pokétwo ") if section == POKETWO else category
+                lines.append(f"**{shown}:** {', '.join(names)}")
             blocks.append((f"## {emoji} {title}", lines))
 
         if not blocks:
@@ -301,6 +350,7 @@ class Help(commands.Cog):
         """None means "stay silent": the cog only holds owner commands and the invoker isn't an owner."""
         prefix = ctx.clean_prefix
         lines = []
+        legends: dict[str, None] = {}
         hidden_owner_commands = False
         for cmd in sorted(cog.get_commands(), key=lambda c: c.name):
             if _is_hidden(cmd):
@@ -312,7 +362,9 @@ class Help(commands.Cog):
             if not await self._visible(cmd, ctx, level, owner):
                 continue
             aliases = f" (`{'`, `'.join(cmd.aliases)}`)" if cmd.aliases else ""
-            marker = f" {_marker_md(level)}" if level != USER else ""
+            marker = f" {_tag(cmd, level, md=True)}" if level != USER else ""
+            if level != USER:
+                legends[_legend(cmd, level)] = None
             summary = _short(cmd.description or cmd.short_doc)
             lines.append(f"**{prefix}{cmd.name}**{marker}{aliases}" + (f" — {summary}" if summary else ""))
 
@@ -321,7 +373,7 @@ class Help(commands.Cog):
             if hidden_owner_commands:
                 return None
             return [discord.Embed(title=title, description="No commands available.", color=BRAND_COLOR)]
-        legend = " • ".join(LEGEND[level] for level in (ADMIN, OWNER) if any(_marker_md(level) in line for line in lines))
+        legend = " • ".join(legends)
         footer = f"Use {prefix}help <command> for details."
         return self._text_pages(title, lines, footer=f"{footer} • {legend}" if legend else footer)
 
@@ -344,7 +396,9 @@ class Help(commands.Cog):
         descriptions = _param_descriptions(cmd)
         level = access_level(cmd)
 
-        embed = discord.Embed(title=f"{prefix}{cmd.qualified_name}{_marker(level)}", color=BRAND_COLOR)
+        tag = _tag(cmd, level)
+        tag = f" {tag}" if tag == POKETWO_ADMIN_MARKER else tag
+        embed = discord.Embed(title=f"{prefix}{cmd.qualified_name}{tag}", color=BRAND_COLOR)
         summary = (cmd.description or cmd.help or "").strip()
         body = [summary] if summary else []
         if not await _can_use(cmd, ctx):
@@ -377,7 +431,7 @@ class Help(commands.Cog):
             embed.add_field(name="Examples", value=text[:1024], inline=False)
 
         subcommands = []
-        used_levels: set[int] = set()
+        used_legends: dict[str, None] = {}
         if isinstance(cmd, commands.Group):
             for sub in sorted(cmd.commands, key=lambda c: c.name):
                 if sub.hidden:
@@ -387,8 +441,8 @@ class Help(commands.Cog):
                     continue
                 marker = ""
                 if sub_level != level:
-                    marker = f" {_marker_md(sub_level)}"
-                    used_levels.add(sub_level)
+                    marker = f" {_tag(sub, sub_level, md=True)}"
+                    used_legends[_legend(sub, sub_level)] = None
                 subs_summary = _short(sub.description or sub.short_doc)
                 subcommands.append(f"`{_usage_line(sub, prefix)}`{marker}" + (f"\n{subs_summary}" if subs_summary else ""))
 
@@ -396,7 +450,7 @@ class Help(commands.Cog):
         if argument_lines or not subcommands:
             notes.append("<required> [optional]")
         if level != USER:
-            notes.append(LEGEND[level])
+            notes.append(_legend(cmd, level))
         if notes:
             embed.set_footer(text=" • ".join(notes))
 
@@ -405,7 +459,7 @@ class Help(commands.Cog):
 
         # Subcommands can be many: first page = the command, following pages = its subcommands.
         sub_footer = " • ".join(
-            [f"Use {prefix}help {cmd.qualified_name} <subcommand> for details.", *(LEGEND[l] for l in sorted(used_levels))]
+            [f"Use {prefix}help {cmd.qualified_name} <subcommand> for details.", *used_legends]
         )
         pages = [embed]
         pages.extend(self._text_pages(f"{prefix}{cmd.qualified_name} — subcommands", subcommands, footer=sub_footer))
