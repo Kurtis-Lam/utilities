@@ -8,6 +8,7 @@ from pymongo import ASCENDING, DESCENDING, UpdateOne
 
 from views.common_views import EMBED_COLOR, error_embed, info_embed, make_embed, reply_or_send, success_embed
 from views.embeds import handle_command_error, send_usage
+from views.loading import loading
 
 HKT = timezone(timedelta(hours=8))
 
@@ -244,6 +245,7 @@ class Catches(commands.Cog):
         description="Link two servers so their catches merge.",
     )
     @commands.has_permissions(administrator=True)
+    @loading
     async def catches_link(
         self,
         ctx,
@@ -322,6 +324,7 @@ class Catches(commands.Cog):
     @commands.hybrid_command(
         name="catches", description="View your catch stats."
     )
+    @loading
     async def view_catches(
         self,
         ctx,
@@ -402,6 +405,7 @@ class Catches(commands.Cog):
         aliases=["clb"],
         description="Server catch leaderboard.",
     )
+    @loading
     async def catch_leaderboard(
         self,
         ctx,
