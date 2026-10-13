@@ -11,7 +11,7 @@ class Pull(OwnerCog):
 
     @commands.command(name="pull")
     @commands.is_owner()
-    async def pull(self, ctx: commands.Context, mode: str = ""):
+    async def pull(self, ctx: commands.Context, mode: str = commands.parameter(default="", description="Type `force` to restart even when nothing changed.")):
         """Pull the latest code, show progress, and restart.
         Use `update force` to restart even if nothing changed."""
         bot = self.bot
