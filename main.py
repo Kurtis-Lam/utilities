@@ -40,22 +40,20 @@ else:
     print("❌ Error: 'config.json' file not found.")
     sys.exit(1)
 
-TOKEN = config.get("TOKEN") or os.environ.get("TOKEN")
-MONGO_URI = config.get("MONGO_URI") or os.environ.get("MONGO_URI")
-PREFIX = config.get("PREFIX", ".")  # defaults to '.' if not specified
+TOKEN = config.get("TOKEN")
+MONGO_URI = config.get("MONGO_URI")
+PREFIX = config.get("PREFIX", ".")
 
 if not TOKEN:
     print("❌ Error: 'TOKEN' missing from config.json.")
     sys.exit(1)
 
-# Poketwo's user ID (config.json -> "POKETWO_ID")
 try:
     POKETWO_ID = int(config["POKETWO_ID"])
 except (KeyError, TypeError, ValueError):
     print("❌ Error: 'POKETWO_ID' missing or invalid in config.json (must be a user ID number).")
     sys.exit(1)
 
-# Bot owners (config.json -> "OWNER_IDS")
 try:
     OWNERS = {int(owner_id) for owner_id in config.get("OWNER_IDS", [])}
 except (TypeError, ValueError):
@@ -63,8 +61,7 @@ except (TypeError, ValueError):
     sys.exit(1)
 if not OWNERS:
     print("⚠️ Warning: 'OWNER_IDS' is empty in config.json, nobody can use owner commands.")
-
-# Cogs to load (config.json -> "COGS": {"folder": ["cog", ...]})
+ 
 COGS = config.get("COGS")
 if not isinstance(COGS, dict) or not all(
     isinstance(cogs, list) and all(isinstance(c, str) for c in cogs) for cogs in COGS.values()
