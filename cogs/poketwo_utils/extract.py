@@ -3,6 +3,7 @@ import discord
 from discord.ext import commands
 
 from views.embeds import err_embed, handle_command_error, info_embed, send_usage
+from views.loading import loading
 
 
 def _clip(text: str, limit: int = 1900) -> str:
@@ -22,6 +23,7 @@ class PokemonExtractor(commands.Cog):
         aliases=["ex"],
         description="Reply to a Pokétwo embed to extract names, numbers or IDs.",
     )
+    @loading
     async def extract(self, ctx):
         if not ctx.message.reference:
             await send_usage(ctx, note="Reply to a Pokétwo message.")
