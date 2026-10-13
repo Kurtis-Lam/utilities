@@ -8,11 +8,20 @@ from the loaded cogs.
                             (or ``@app_commands.describe(...)``). For ``*args`` style commands that
                             can't use ``commands.parameter``: ``extras={"args": {"name": "..."}}``.
 * Examples               -> ``USAGE_EXAMPLES`` in views/embeds.py (optional).
+* Access level           -> detected from the command's checks: ``has_permissions`` = admin,
+                            ``is_owner`` / ``OwnerCog`` = owner. Commands that check permissions inside
+                            their body can be listed in ``ACCESS_OVERRIDES``.
+* Overview grouping      -> ``HELP_CATEGORIES`` below (commands that aren't listed land in "Other").
 
-Usage:  .help                 every command you can use, grouped by cog
-        .help <command>       usage, aliases, arguments (+ descriptions), subcommands, examples
+Usage:  .help                 User Commands, Admin Commands and (owners only) Owner Commands,
+                              each split into categories
+        .help <command>       usage, aliases, arguments (+ descriptions), subcommands, examples.
+                              Admin-only commands get a ``*`` after their name, owner-only ones ``***``
         .help <cog>           the commands of one cog
         .help <group> <sub>   e.g. .help set lockdelay
+
+Owner-only commands are invisible to everyone else: they are never listed, and asking for them
+(``.help pull``) gets no response at all.
 """
 import difflib
 import re
@@ -21,13 +30,118 @@ import typing
 import discord
 from discord.ext import commands
 
+from cogs.owner_cmds.utils import OwnerCog
 from views.embeds import BRAND_COLOR, USAGE_EXAMPLES, _param_descriptions, _usage_line, handle_common_error
-from views.loading import loading
 from views.navigate import PaginatorView
 
 PAGE_CHAR_LIMIT = 3800
 FIELD_CHAR_LIMIT = 1000
-FIELDS_PER_PAGE = 6
+
+USER, ADMIN, OWNER = 0, 1, 2
+
+SECTIONS = {
+    USER: ("👤", "User Commands"),
+    ADMIN: ("🛡️", "Admin Commands"),
+    OWNER: ("👑", "Owner Commands"),
+}
+MARKERS = {USER: "", ADMIN: "*", OWNER: "***"}
+LEGEND = {ADMIN: "* Admin only", OWNER: "*** Owner only"}
+
+# Show the Admin Commands section to everybody (False = only to people who can run them).
+SHOW_ADMIN_COMMANDS_TO_EVERYONE = True
+
+# Check function names (the part before ".<locals>") that make a command admin / owner only.
+ADMIN_CHECKS = {"has_permissions", "has_guild_permissions"}
+OWNER_CHECKS = {"is_owner", "is_bot_owner"}
+
+# Commands that verify permissions inside their body, so no check can be detected on them.
+ACCESS_OVERRIDES: dict[str, int] = {
+    "config": ADMIN,
+    "ai config": ADMIN,
+    "ai enable": ADMIN,
+    "ai disable": ADMIN,
+    "ai add": ADMIN,
+    "ai remove": ADMIN,
+}
+
+# ===================================================================
+# Overview categories: category title -> top-level command names.
+# A category shows up under User / Admin / Owner Commands depending on each command's access
+# level, so "Message" can list `snipe` for everyone and `purge` for admins. Subcommands follow
+# their parent's category (e.g. `reserves add` is listed under Pokétwo Pings).
+# ===================================================================
+HELP_CATEGORIES: dict[str, list[str]] = {
+    "General": ["help", "ping"],
+    "Category": [
+        "createcategory", "deletecategory", "renamecategory", "lockcategory",
+        "unlockcategory", "hidecategory", "unhidecategory",
+    ],
+    "Channel": [
+        "createchannel", "deletechannel", "renamechannel", "movechannel", "lockchannel",
+        "unlockchannel", "hidechannel", "unhidechannel", "nuke",
+    ],
+    "Role": ["createrole", "deleterole", "giverole", "removerole", "setperms"],
+    "Member": [
+        "membercount", "whois", "kick", "ban", "nick", "mute", "unmute", "muterole",
+        "warn", "warns", "kicked", "banned", "mutelogs",
+    ],
+    "Message": [
+        "snipe", "messages", "timediff", "purge", "forward", "pin", "unpin", "pins",
+        "echo", "stick", "unstick", "sticks",
+    ],
+    "AI Chatbot": ["ai"],
+    "Configurations": ["config"],
+    "Pokétwo Pings": ["sh", "cl", "tp", "rp", "reserves"],
+    "Pokétwo Helper": [
+        "afk", "catches", "catchleaderboard", "catcheslink", "lock", "unlock", "lockstats",
+        "unlockallchannels", "autolockdm", "starboard", "rec",
+    ],
+    "Pokétwo Management": ["set", "toggle", "settings", "channelsettings", "serversettings"],
+    "Pokétwo Utils": ["catchtime", "dex", "extract"],
+    "Utilities": ["remind", "timer", "reminders"],
+    "Grinder": ["grindconfig", "pause", "resume", "syncguilds"],
+    "Bot": ["stats", "gitstats", "pull", "reload", "restart"],
+}
+OTHER_CATEGORY = "Other"
+
+CATEGORY_OF = {name: title for title, names in HELP_CATEGORIES.items() for name in names}
+CATEGORY_ORDER = {title: index for index, title in enumerate(HELP_CATEGORIES)}
+COMMAND_ORDER = {name: index for index, name in enumerate(CATEGORY_OF)}
+
+
+def access_level(cmd: commands.Command) -> int:
+    """USER, ADMIN or OWNER. A subcommand is at least as restricted as its parent group."""
+    level = USER
+    for check in cmd.checks:
+        kind = getattr(check, "__qualname__", "").split(".")[0]
+        if kind in OWNER_CHECKS:
+            level = OWNER
+        elif kind in ADMIN_CHECKS:
+            level = max(level, ADMIN)
+    if isinstance(cmd.cog, OwnerCog):
+        level = OWNER
+    level = max(level, ACCESS_OVERRIDES.get(cmd.qualified_name, USER))
+    if cmd.parent is not None:
+        level = max(level, access_level(cmd.parent))
+    return level
+
+
+def _marker(level: int) -> str:
+    """Plain-text marker for titles: '' / '*' / '***'."""
+    return MARKERS[level]
+
+
+def _marker_md(level: int) -> str:
+    """Marker escaped for markdown descriptions."""
+    return MARKERS[level].replace("*", "\\*")
+
+
+def _is_hidden(cmd: commands.Command) -> bool:
+    while cmd is not None:
+        if cmd.hidden:
+            return True
+        cmd = cmd.parent
+    return False
 
 
 def _pretty(name: str) -> str:
@@ -50,22 +164,6 @@ def _chunk(lines: list[str], limit: int) -> list[str]:
         if len(candidate) > limit and current:
             chunks.append(current)
             current = line
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def _chunk_words(words: list[str], limit: int) -> list[str]:
-    """Join words with spaces into chunks of at most `limit` characters."""
-    chunks: list[str] = []
-    current = ""
-    for word in words:
-        candidate = f"{current} {word}" if current else word
-        if len(candidate) > limit and current:
-            chunks.append(current)
-            current = word
         else:
             current = candidate
     if current:
@@ -108,14 +206,23 @@ class Help(commands.Cog):
                 return cog
         return None
 
-    def _all_names(self) -> list[str]:
+    def _all_names(self, owner: bool) -> list[str]:
         names: list[str] = []
         for cmd in self.bot.walk_commands():
-            if cmd.hidden:
+            if _is_hidden(cmd) or (access_level(cmd) == OWNER and not owner):
                 continue
             names.append(cmd.qualified_name)
             names.extend(f"{cmd.parent.qualified_name} {alias}" if cmd.parent else alias for alias in cmd.aliases)
         return names
+
+    async def _visible(self, cmd: commands.Command, ctx: commands.Context, level: int, owner: bool) -> bool:
+        """Owner commands only for owners; admin commands for everyone (or only for people who
+        can run them); everything else only if the invoker can run it."""
+        if level == OWNER:
+            return owner
+        if level == ADMIN and SHOW_ADMIN_COMMANDS_TO_EVERYONE:
+            return True
+        return await _can_use(cmd, ctx)
 
     @staticmethod
     def _error(text: str) -> discord.Embed:
@@ -125,66 +232,98 @@ class Help(commands.Cog):
     # Embeds
     # ------------------------------------------------------------------
 
-    async def _overview_pages(self, ctx: commands.Context) -> list[discord.Embed]:
+    async def _overview_pages(self, ctx: commands.Context, owner: bool) -> list[discord.Embed]:
         prefix = ctx.clean_prefix
-        sections: dict[str, list[str]] = {}
+        grouped: dict[int, dict[str, list[commands.Command]]] = {USER: {}, ADMIN: {}, OWNER: {}}
 
-        for cmd in sorted(self.bot.commands, key=lambda c: c.name):
-            if cmd.hidden or not await _can_use(cmd, ctx):
+        for cmd in self.bot.walk_commands():
+            if _is_hidden(cmd):
                 continue
-            cog_name = _pretty(cmd.cog.qualified_name) if cmd.cog else "Other"
-            sections.setdefault(cog_name, []).append(f"`{prefix}{cmd.name}`")
+            level = access_level(cmd)
+            if cmd.parent is not None and level == access_level(cmd.parent):
+                continue  # already covered by its parent group
+            if not await self._visible(cmd, ctx, level, owner):
+                continue
+            root = cmd.root_parent or cmd
+            grouped[level].setdefault(CATEGORY_OF.get(root.name, OTHER_CATEGORY), []).append(cmd)
 
-        if not sections:
-            return [discord.Embed(title="Help", description="No commands available.", color=BRAND_COLOR)]
+        blocks: list[tuple[str, list[str]]] = []
+        for level in (USER, ADMIN, OWNER):
+            categories = grouped[level]
+            if not categories:
+                continue
+            emoji, title = SECTIONS[level]
+            lines = []
+            for category in sorted(categories, key=lambda c: CATEGORY_ORDER.get(c, len(CATEGORY_ORDER))):
+                cmds = sorted(
+                    categories[category],
+                    key=lambda c: (COMMAND_ORDER.get((c.root_parent or c).name, 10**6), c.qualified_name),
+                )
+                names = ", ".join(f"`{prefix}{c.qualified_name}`" for c in cmds)
+                lines.append(f"**{category}:** {names}")
+            blocks.append((f"## {emoji} {title}", lines))
 
-        fields: list[tuple[str, str]] = []
-        for cog_name in sorted(sections):
-            parts = _chunk_words(sections[cog_name], FIELD_CHAR_LIMIT)
-            for index, part in enumerate(parts):
-                fields.append((cog_name if index == 0 else f"{cog_name} (continued)", part))
+        if not blocks:
+            return [discord.Embed(title="📖 Help", description="No commands available.", color=BRAND_COLOR)]
 
-        groups: list[list[tuple[str, str]]] = []
-        current: list[tuple[str, str]] = []
+        pages: list[list[str]] = []
+        current: list[str] = []
         size = 0
-        for field in fields:
-            field_size = len(field[0]) + len(field[1])
-            if current and (len(current) >= FIELDS_PER_PAGE or size + field_size > PAGE_CHAR_LIMIT):
-                groups.append(current)
-                current, size = [], 0
-            current.append(field)
-            size += field_size
+        for header, lines in blocks:
+            for index, line in enumerate(lines):
+                extra = ([""] if current else []) + [header] if index == 0 else []
+                cost = sum(len(item) + 1 for item in extra) + len(line) + 1
+                if current and size + cost > PAGE_CHAR_LIMIT:
+                    pages.append(current)
+                    current, size = [], 0
+                    extra = [header if index == 0 else f"{header} (continued)"]
+                    cost = sum(len(item) + 1 for item in extra) + len(line) + 1
+                current.extend(extra + [line])
+                size += cost
         if current:
-            groups.append(current)
+            pages.append(current)
 
-        pages = []
-        for number, group in enumerate(groups, start=1):
+        intro = f"Use `{prefix}help <command>` for details, arguments and examples."
+        embeds = []
+        for number, page in enumerate(pages, start=1):
+            body = "\n".join(page)
             embed = discord.Embed(
                 title="📖 Help",
-                description=f"Use `{prefix}help <command>` for details, arguments and examples.",
+                description=f"{intro}\n\n{body}" if number == 1 else body,
                 color=BRAND_COLOR,
             )
-            for name, value in group:
-                embed.add_field(name=name, value=value, inline=False)
-            if len(groups) > 1:
-                embed.set_footer(text=f"Page {number}/{len(groups)}")
-            pages.append(embed)
-        return pages
+            if len(pages) > 1:
+                embed.set_footer(text=f"Page {number}/{len(pages)}")
+            embeds.append(embed)
+        return embeds
 
-    async def _cog_pages(self, ctx: commands.Context, cog: commands.Cog) -> list[discord.Embed]:
+    async def _cog_pages(self, ctx: commands.Context, cog: commands.Cog, owner: bool) -> typing.Optional[list[discord.Embed]]:
+        """None means "stay silent": the cog only holds owner commands and the invoker isn't an owner."""
         prefix = ctx.clean_prefix
         lines = []
+        hidden_owner_commands = False
         for cmd in sorted(cog.get_commands(), key=lambda c: c.name):
-            if cmd.hidden or not await _can_use(cmd, ctx):
+            if _is_hidden(cmd):
+                continue
+            level = access_level(cmd)
+            if level == OWNER and not owner:
+                hidden_owner_commands = True
+                continue
+            if not await self._visible(cmd, ctx, level, owner):
                 continue
             aliases = f" (`{'`, `'.join(cmd.aliases)}`)" if cmd.aliases else ""
+            marker = f" {_marker_md(level)}" if level != USER else ""
             summary = _short(cmd.description or cmd.short_doc)
-            lines.append(f"**{prefix}{cmd.name}**{aliases}" + (f" — {summary}" if summary else ""))
+            lines.append(f"**{prefix}{cmd.name}**{marker}{aliases}" + (f" — {summary}" if summary else ""))
 
         title = f"📖 {_pretty(cog.qualified_name)}"
         if not lines:
+            if hidden_owner_commands:
+                return None
             return [discord.Embed(title=title, description="No commands available.", color=BRAND_COLOR)]
-        return self._text_pages(title, lines, footer=f"Use {prefix}help <command> for details.")
+        legend = " • ".join(LEGEND[level] for level in (ADMIN, OWNER) if any(_marker_md(level) in line for line in lines))
+        footer = f"Use {prefix}help <command> for details."
+        return self._text_pages(title, lines, footer=f"{footer} • {legend}" if legend else footer)
 
     @staticmethod
     def _text_pages(title: str, lines: list[str], *, footer: str | None = None, intro: str = "") -> list[discord.Embed]:
@@ -200,11 +339,12 @@ class Help(commands.Cog):
             pages.append(embed)
         return pages
 
-    async def _command_pages(self, ctx: commands.Context, cmd: commands.Command) -> list[discord.Embed]:
+    async def _command_pages(self, ctx: commands.Context, cmd: commands.Command, owner: bool) -> list[discord.Embed]:
         prefix = ctx.clean_prefix
         descriptions = _param_descriptions(cmd)
+        level = access_level(cmd)
 
-        embed = discord.Embed(title=f"{prefix}{cmd.qualified_name}", color=BRAND_COLOR)
+        embed = discord.Embed(title=f"{prefix}{cmd.qualified_name}{_marker(level)}", color=BRAND_COLOR)
         summary = (cmd.description or cmd.help or "").strip()
         body = [summary] if summary else []
         if not await _can_use(cmd, ctx):
@@ -237,28 +377,38 @@ class Help(commands.Cog):
             embed.add_field(name="Examples", value=text[:1024], inline=False)
 
         subcommands = []
+        used_levels: set[int] = set()
         if isinstance(cmd, commands.Group):
             for sub in sorted(cmd.commands, key=lambda c: c.name):
-                if sub.hidden or not await _can_use(sub, ctx):
+                if sub.hidden:
                     continue
+                sub_level = access_level(sub)
+                if not await self._visible(sub, ctx, sub_level, owner):
+                    continue
+                marker = ""
+                if sub_level != level:
+                    marker = f" {_marker_md(sub_level)}"
+                    used_levels.add(sub_level)
                 subs_summary = _short(sub.description or sub.short_doc)
-                subcommands.append(f"`{_usage_line(sub, prefix)}`" + (f"\n{subs_summary}" if subs_summary else ""))
+                subcommands.append(f"`{_usage_line(sub, prefix)}`{marker}" + (f"\n{subs_summary}" if subs_summary else ""))
 
+        notes = []
         if argument_lines or not subcommands:
-            embed.set_footer(text="<required> [optional]")
+            notes.append("<required> [optional]")
+        if level != USER:
+            notes.append(LEGEND[level])
+        if notes:
+            embed.set_footer(text=" • ".join(notes))
 
         if not subcommands:
             return [embed]
 
         # Subcommands can be many: first page = the command, following pages = its subcommands.
-        pages = [embed]
-        pages.extend(
-            self._text_pages(
-                f"{prefix}{cmd.qualified_name} — subcommands",
-                subcommands,
-                footer=f"Use {prefix}help {cmd.qualified_name} <subcommand> for details.",
-            )
+        sub_footer = " • ".join(
+            [f"Use {prefix}help {cmd.qualified_name} <subcommand> for details.", *(LEGEND[l] for l in sorted(used_levels))]
         )
+        pages = [embed]
+        pages.extend(self._text_pages(f"{prefix}{cmd.qualified_name} — subcommands", subcommands, footer=sub_footer))
         for number, page in enumerate(pages, start=1):
             existing = page.footer.text if page.footer and page.footer.text else ""
             page.set_footer(text=f"{existing} • Page {number}/{len(pages)}" if existing else f"Page {number}/{len(pages)}")
@@ -269,7 +419,6 @@ class Help(commands.Cog):
     # ------------------------------------------------------------------
 
     @commands.command(name="help", description="Shows all commands, or details and arguments of one command.")
-    @loading
     async def help(
         self,
         ctx: commands.Context,
@@ -280,19 +429,24 @@ class Help(commands.Cog):
         ),
     ):
         query = (query or "").strip().removeprefix(ctx.clean_prefix).strip()
+        owner = await self.bot.is_owner(ctx.author)
 
         if not query:
-            pages = await self._overview_pages(ctx)
+            pages = await self._overview_pages(ctx, owner)
         else:
             command = self.bot.get_command(query)
-            if command is not None and not command.hidden:
-                pages = await self._command_pages(ctx, command)
+            if command is not None and not _is_hidden(command):
+                if access_level(command) == OWNER and not owner:
+                    return
+                pages = await self._command_pages(ctx, command, owner)
             else:
                 cog = self._find_cog(query)
                 if cog is not None:
-                    pages = await self._cog_pages(ctx, cog)
+                    pages = await self._cog_pages(ctx, cog, owner)
+                    if pages is None:
+                        return
                 else:
-                    close = difflib.get_close_matches(query.lower(), self._all_names(), n=3, cutoff=0.6)
+                    close = difflib.get_close_matches(query.lower(), self._all_names(owner), n=3, cutoff=0.6)
                     hint = f" Did you mean {', '.join(f'`{ctx.clean_prefix}{name}`' for name in close)}?" if close else ""
                     return await ctx.reply(
                         embed=self._error(f"No command or cog called `{query}`.{hint}"),
