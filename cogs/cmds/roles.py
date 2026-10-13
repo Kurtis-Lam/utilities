@@ -8,6 +8,7 @@ from discord.ext import commands, tasks
 # Import ConfirmView from views/common.py
 from views.common_views import confirm
 from views.embeds import ok_embed, err_embed, handle_common_error, send_usage
+from views.loading import loading
 
 
 _DURATION_FULL = re.compile(r"^(?:\d+[smhdw])+$")
@@ -115,7 +116,13 @@ class Role(commands.Cog):
     )
     @commands.has_permissions(manage_roles=True)
     @commands.bot_has_permissions(manage_roles=True)
-    async def giverole(self, ctx, member: discord.Member, role: discord.Role, duration: typing.Optional[str] = None):
+    async def giverole(
+        self,
+        ctx,
+        member: discord.Member = commands.parameter(description="The member to give the role to (mention or ID)."),
+        role: discord.Role = commands.parameter(description="The role to give (mention, ID or name)."),
+        duration: typing.Optional[str] = commands.parameter(default=None, description="How long they keep it, e.g. 30m, 2h, 1d, 1d12h. Leave blank for permanent."),
+    ):
         if role >= ctx.guild.me.top_role:
             return await ctx.reply(embed=err_embed("Action Denied", "I cannot assign a role that is higher than or equal to my highest role."), mention_author=False)
         if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
@@ -161,7 +168,12 @@ class Role(commands.Cog):
     )
     @commands.has_permissions(manage_roles=True)
     @commands.bot_has_permissions(manage_roles=True)
-    async def removerole(self, ctx, member: discord.Member, role: discord.Role):
+    async def removerole(
+        self,
+        ctx,
+        member: discord.Member = commands.parameter(description="The member to remove the role from (mention or ID)."),
+        role: discord.Role = commands.parameter(description="The role to remove (mention, ID or name)."),
+    ):
         if role >= ctx.guild.me.top_role:
             return await ctx.reply(embed=err_embed("Action Denied", "I cannot remove a role that is higher than or equal to my highest role."), mention_author=False)
         if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
@@ -176,7 +188,13 @@ class Role(commands.Cog):
         description="Set permissions for multiple roles/members (admin, member, or blocked)."
     )
     @commands.has_permissions(administrator=True)
-    async def setperms(self, ctx, level: str, targets: commands.Greedy[discord.Role | discord.Member]):
+    @loading
+    async def setperms(
+        self,
+        ctx,
+        level: str = commands.parameter(description="Access level to set: admin, member or blocked."),
+        targets: commands.Greedy[discord.Role | discord.Member] = commands.parameter(description="One or more roles or members (mentions or IDs), separated by spaces."),
+    ):
         level = level.lower()
         if level not in ["admin", "member", "blocked"]:
             return await send_usage(ctx, note="Invalid level! Please choose **admin**, **member**, or **blocked**.")
@@ -237,6 +255,7 @@ class Role(commands.Cog):
     )
     @commands.has_permissions(manage_roles=True)
     @commands.bot_has_permissions(manage_roles=True)
+    @loading
     async def createrole(
         self, 
         ctx, 
@@ -380,7 +399,7 @@ class Role(commands.Cog):
     )
     @commands.has_permissions(manage_roles=True)
     @commands.bot_has_permissions(manage_roles=True)
-    async def deleterole(self, ctx, role: discord.Role):
+    async def deleterole(self, ctx, role: discord.Role = commands.parameter(description="The role to delete (mention, ID or name).")):
         if role >= ctx.guild.me.top_role:
             return await ctx.reply(embed=err_embed("Action Denied", "I cannot delete a role that is higher than or equal to my highest role."), mention_author=False)
         if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
