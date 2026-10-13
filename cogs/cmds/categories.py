@@ -10,6 +10,7 @@ from views.categories_views import CategorySelectView
 from views.common_views import confirm
 from views.embeds import handle_common_error, send_usage
 from views.prompts import ask, is_skip, one_line
+from views.loading import loading
 
 
 class Categories(commands.Cog):
@@ -93,6 +94,48 @@ class Categories(commands.Cog):
 
         return None
 
+    # Mentions and raw IDs that end the category name in `.createcategory`.
+    _NAME_END = re.compile(r"<@!?(\d+)>|<@&(\d+)>|(?<!\d)(\d{17,20})(?!\d)")
+
+    async def _parse_prefix_args(self, ctx):
+        """Splits the raw `.ccat` text into (name, user_or_role, prelock, prehide, error)."""
+        raw = ctx.message.content[len(ctx.prefix):].lstrip()
+        args_str = raw[len(ctx.invoked_with):].strip()
+
+        prelock = bool(re.search(r"(?i)--prelock", args_str))
+        prehide = bool(re.search(r"(?i)--prehide", args_str))
+        args_str = re.sub(r"(?i)--(prelock|prehide)", "", args_str)
+
+        user = None
+        match = self._NAME_END.search(args_str)
+        if match:
+            name_part = args_str[:match.start()]
+            user_mention, role_mention, raw_id = match.groups()
+            if role_mention:
+                user = ctx.guild.get_role(int(role_mention))
+            else:
+                target_id = int(user_mention or raw_id)
+                user = ctx.guild.get_role(target_id)
+                if user is None:
+                    user = next((m for m in ctx.message.mentions if m.id == target_id), None)
+                if user is None:
+                    user = ctx.guild.get_member(target_id)
+                if user is None:
+                    try:
+                        user = await ctx.guild.fetch_member(target_id)
+                    except discord.HTTPException:
+                        user = None
+            if user is None:
+                return "", None, prelock, prehide, "❌ Couldn't find that user or role. Cancelled."
+        else:
+            name_part = args_str
+
+        name = name_part.strip()
+        if len(name) >= 2 and name[0] == name[-1] and name[0] in "\"'":
+            name = name[1:-1]
+        name = name.replace("-", " ").strip()
+        return name, user, prelock, prehide, None
+
     @commands.hybrid_command(
         aliases=["ccat"],
         name="createcategory",
@@ -129,29 +172,11 @@ class Categories(commands.Cog):
         prehide = False
 
         if ctx.interaction is None:
-            content = ctx.message.content
-            parts = content.split(maxsplit=1)
-            args_str = parts[1] if len(parts) > 1 else ""
-
-            # Consume --prelock flag
-            if "--prelock" in args_str.lower():
-                prelock = True
-                args_str = re.sub(r"(?i)--prelock", "", args_str)
-
-            # Consume --prehide flag
-            if "--prehide" in args_str.lower():
-                prehide = True
-                args_str = re.sub(r"(?i)--prehide", "", args_str)
-
-            # Extract user / role mention if present
-            if ctx.message.mentions:
-                user = ctx.message.mentions[-1]
-                args_str = re.sub(rf"<@!?{user.id}>", "", args_str)
-            elif ctx.message.role_mentions:
-                user = ctx.message.role_mentions[-1]
-                args_str = re.sub(rf"<@&{user.id}>", "", args_str)
-
-            name = args_str.replace("-", " ").strip()
+            # Prefix command: read the raw text so the name can contain spaces. The name ends
+            # where the first user mention / user ID / role mention begins.
+            name, user, prelock, prehide, error = await self._parse_prefix_args(ctx)
+            if error:
+                return await ctx.reply(one_line(error), mention_author=False)
         else:
             name = (name or "").replace("-", " ").strip()
             if preaction in ("prelock", "both"):
@@ -411,6 +436,7 @@ class Categories(commands.Cog):
         ),
     )
     @commands.has_permissions(manage_channels=True)
+    @loading
     async def lockcategory(
         self,
         ctx,
@@ -465,6 +491,7 @@ class Categories(commands.Cog):
         ),
     )
     @commands.has_permissions(manage_channels=True)
+    @loading
     async def unlockcategory(
         self,
         ctx,
@@ -519,6 +546,7 @@ class Categories(commands.Cog):
         ),
     )
     @commands.has_permissions(manage_channels=True)
+    @loading
     async def hidecategory(
         self,
         ctx,
@@ -573,6 +601,7 @@ class Categories(commands.Cog):
         ),
     )
     @commands.has_permissions(manage_channels=True)
+    @loading
     async def unhidecategory(
         self,
         ctx,
