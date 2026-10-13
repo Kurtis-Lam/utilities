@@ -1236,7 +1236,7 @@ class AIChat(commands.Cog):
         usage="<#channel> [#channel ...]",
         description="Enable the AI chatbot in one or more channels (administrators only).",
     )
-    async def ai_add(self, ctx: commands.Context, *, channels: str = None):
+    async def ai_add(self, ctx: commands.Context, *, channels: str = commands.parameter(default=None, description="One or more channel mentions to enable the AI chatbot in.")):
         if not await self._require_admin(ctx):
             return
 
@@ -1276,7 +1276,7 @@ class AIChat(commands.Cog):
         usage="<#channel> [#channel ...]",
         description="Disable the AI chatbot in one or more channels (administrators only).",
     )
-    async def ai_remove(self, ctx: commands.Context, *, channels: str = None):
+    async def ai_remove(self, ctx: commands.Context, *, channels: str = commands.parameter(default=None, description="One or more channel mentions to disable the AI chatbot in.")):
         if not await self._require_admin(ctx):
             return
 
