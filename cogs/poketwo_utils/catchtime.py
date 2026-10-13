@@ -12,8 +12,8 @@ class CatchTime(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command(name="catchtime", aliases=["ct"])
-    async def catchtime(self, ctx: commands.Context, object_id: str = ""):
+    @commands.command(name="catchtime", aliases=["ct"], description="Shows the creation time hidden inside a MongoDB ObjectId.")
+    async def catchtime(self, ctx: commands.Context, object_id: str = commands.parameter(default="", description="The MongoDB ObjectId (24 hex characters) to read the creation time from.")):
         """Extract the creation timestamp from a MongoDB ObjectId.
         Usage: .ct xxxxxxx
         """
