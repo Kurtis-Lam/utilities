@@ -1,5 +1,6 @@
 import gc
 
+from discord import app_commands
 from discord.ext import commands
 
 from cogs.owner_cmds.utils import OwnerCog, safe_edit, safe_send
@@ -9,7 +10,8 @@ class Reload(OwnerCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot)
 
-    @commands.command(name="reload")
+    @commands.hybrid_command(name="reload", description="Reloads one cog, or every cog (owner only).")
+    @app_commands.describe(cog_name="The cog to reload. Leave blank to reload all cogs.")
     @commands.is_owner()
     async def reload(self, ctx: commands.Context, cog_name: str = commands.parameter(default=None, description="The cog to reload. Leave blank to reload all cogs.")):
         bot = self.bot
@@ -52,6 +54,20 @@ class Reload(OwnerCog):
         if failed:
             final_msg += f"\n❌ **Failed ({len(failed)}):**\n" + "\n".join(failed)
         await safe_edit(msg, final_msg)
+
+    @commands.hybrid_command(
+        name="sync",
+        description="Syncs the slash commands with Discord (owner only). Run it after reloading cogs.",
+    )
+    @commands.is_owner()
+    async def sync(self, ctx: commands.Context):
+        msg = await safe_send(ctx, "🔄 Syncing slash commands...")
+        try:
+            count = await self.bot.sync_slash_commands()
+        except Exception as e:
+            await safe_edit(msg, f"❌ Sync failed: `{e}`")
+            return
+        await safe_edit(msg, f"✅ Synced **{count}** slash command(s).")
 
 
 async def setup(bot: commands.Bot):
