@@ -8,14 +8,20 @@ import psutil
 from discord.ext import commands
 
 from cogs.owner_cmds.utils import OwnerCog, get_dir_size
+from views.loading import loading
 
 
 class Stats(OwnerCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot)
 
-    @commands.command(name="stats", aliases=["botinfo", "system", "info"])
+    @commands.hybrid_command(
+        name="stats",
+        aliases=["botinfo", "system", "info"],
+        description="Shows bot, process and host system statistics (owner only).",
+    )
     @commands.is_owner()
+    @loading
     async def stats(self, ctx: commands.Context):
         bot = self.bot
         now = datetime.now(timezone.utc)
@@ -97,4 +103,4 @@ class Stats(OwnerCog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(Stats(bot))
+    await bot.add_cog(Stats(bot)) 
