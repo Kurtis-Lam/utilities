@@ -3,11 +3,13 @@ import json
 import socket    
 import gc    
 import re
+import typing
 from pathlib import Path    
 from collections import OrderedDict    
 
 import aiohttp    
 import discord    
+from discord import app_commands
 from discord.ext import commands    
 
 from views.common_views import EMBED_COLOR, error_embed
@@ -344,14 +346,25 @@ class Recognize(commands.Cog):
     async def cog_command_error(self, ctx: commands.Context, error: Exception):
         await handle_command_error(ctx, error)
 
-    @commands.command(name="rec", aliases=["recognize"], description="Identify a Pokémon from an image.")    
-    async def manual_recognize(self, ctx: commands.Context):    
+    @commands.hybrid_command(name="rec", aliases=["recognize"], description="Identify a Pokémon from an image.")
+    @app_commands.describe(image="The image to identify. Text commands can also attach an image or reply to one.")    
+    async def manual_recognize(
+        self,
+        ctx: commands.Context,
+        image: typing.Optional[discord.Attachment] = commands.parameter(
+            default=None,
+            description="The image to identify. Text commands can also attach an image or reply to one.",
+        ),
+    ):    
         image_url = None    
 
-        if ctx.message.attachments:    
+        if image is not None:
+            image_url = image.url
+
+        elif ctx.interaction is None and ctx.message.attachments:    
             image_url = ctx.message.attachments[0].url    
 
-        elif ctx.message.reference and ctx.message.reference.message_id:    
+        elif ctx.interaction is None and ctx.message.reference and ctx.message.reference.message_id:    
             try:
                 ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)    
                 if ref_msg.attachments:    
