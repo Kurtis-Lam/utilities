@@ -760,13 +760,18 @@ class Messages(commands.Cog):
 
         await ctx.reply(embed=embed, mention_author=False)
 
-    @commands.command(name="echo", description="Repeats whatever text message is supplied.")
+    @commands.hybrid_command(name="echo", description="Repeats whatever text message is supplied.")
+    @app_commands.describe(msg="The message to mirror back.")
     @commands.has_permissions(administrator=True)
     async def echo(self, ctx, *, msg: str = commands.parameter(description="The message to mirror back.")):
-        try:
-            await ctx.message.delete()
-        except (discord.HTTPException, AttributeError):
-            pass
+        if ctx.interaction is not None:
+            # Slash command: acknowledge privately so only the echoed text shows up in the channel.
+            await ctx.interaction.response.send_message("✅ Sent.", ephemeral=True)
+        else:
+            try:
+                await ctx.message.delete()
+            except (discord.HTTPException, AttributeError):
+                pass
         # Plain text on purpose: echo's whole job is to repeat your text as-is.
         await ctx.channel.send(msg)
 
@@ -811,6 +816,9 @@ class Messages(commands.Cog):
     @commands.hybrid_command(name="unstick", description="Unsticks the sticky message in the current channel.")
     @commands.has_permissions(manage_messages=True)
     @commands.bot_has_permissions(manage_messages=True)
+    @app_commands.describe(
+        channel='The channel to unstick (mention or ID). Defaults to the current channel.',
+    )
     async def unstick(self, ctx, channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to unstick (mention or ID). Defaults to the current channel.")):
         target_channel = channel or ctx.channel
         channel_id_str = str(target_channel.id)
