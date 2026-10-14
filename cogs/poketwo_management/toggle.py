@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from cogs.poketwo_helper.lockcommon import format_duration, split_scope_flags
@@ -76,8 +77,9 @@ class Toggle(commands.Cog):
     # Unknown sub-command names fall through to this callback, so `.toggle shlock`,
     # `.toggle cllock`, `.toggle reslock`, ... are all handled here.
 
-    @commands.group(
+    @commands.hybrid_group(
         name="toggle",
+        fallback="locks",
         invoke_without_command=True,
         usage="<lock...> [--global]",
         description="Toggle locks, Pokémon naming, lock delays, lock times and restrict unlockers.",
@@ -85,8 +87,11 @@ class Toggle(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def toggle_group(self, ctx: commands.Context, *args: str):
-        locks, global_flag, standard_flag = split_scope_flags(args)
+    @app_commands.describe(
+        args='Locks to toggle (sh, cl, rp, tp, res) and/or naming, plus optional --global for the server.',
+    )
+    async def toggle_group(self, ctx: commands.Context, *, args: str = ""):
+        locks, global_flag, standard_flag = split_scope_flags(args.split())
         if await self._flag_error(ctx, locks, global_flag, standard_flag, allow_standard=False):
             return
         if not locks:
@@ -135,8 +140,11 @@ class Toggle(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def toggle_naming(self, ctx: commands.Context, *flags: str):
-        extra, global_flag, standard_flag = split_scope_flags(flags)
+    @app_commands.describe(
+        flags='Optional --global to toggle naming for the whole server instead of this channel.',
+    )
+    async def toggle_naming(self, ctx: commands.Context, *, flags: str = ""):
+        extra, global_flag, standard_flag = split_scope_flags(flags.split())
         if await self._flag_error(ctx, extra, global_flag, standard_flag, allow_standard=False):
             return
         if extra:
@@ -159,8 +167,11 @@ class Toggle(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def toggle_lockdelay(self, ctx: commands.Context, *args: str):
-        locks, global_flag, standard_flag = split_scope_flags(args)
+    @app_commands.describe(
+        args='Locks (sh, cl, rp, tp, res), plus --global (server) or --standard (the standard delay).',
+    )
+    async def toggle_lockdelay(self, ctx: commands.Context, *, args: str = ""):
+        locks, global_flag, standard_flag = split_scope_flags(args.split())
         if await self._flag_error(ctx, locks, global_flag, standard_flag, allow_standard=True):
             return
         if not locks and not standard_flag:
@@ -211,8 +222,11 @@ class Toggle(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def toggle_locktime(self, ctx: commands.Context, *args: str):
-        locks, global_flag, standard_flag = split_scope_flags(args)
+    @app_commands.describe(
+        args='Locks (sh, cl, rp, tp, res), plus --global (server) or --standard (the standard lock time).',
+    )
+    async def toggle_locktime(self, ctx: commands.Context, *, args: str = ""):
+        locks, global_flag, standard_flag = split_scope_flags(args.split())
         if await self._flag_error(ctx, locks, global_flag, standard_flag, allow_standard=True):
             return
         if not locks and not standard_flag:
@@ -262,8 +276,11 @@ class Toggle(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def toggle_restrictunlockers(self, ctx: commands.Context, *locks_and_flags: str):
-        locks, global_flag, standard_flag = split_scope_flags(locks_and_flags)
+    @app_commands.describe(
+        locks_and_flags='Locks (res, sh, cl, tp, rp), plus --global (server) or --standard (the standard value).',
+    )
+    async def toggle_restrictunlockers(self, ctx: commands.Context, *, locks_and_flags: str = ""):
+        locks, global_flag, standard_flag = split_scope_flags(locks_and_flags.split())
         if await self._flag_error(ctx, locks, global_flag, standard_flag, allow_standard=True):
             return
         if not locks and not standard_flag:
