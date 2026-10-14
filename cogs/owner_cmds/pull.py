@@ -1,5 +1,6 @@
 import time
 
+from discord import app_commands
 from discord.ext import commands
 
 from cogs.owner_cmds.utils import OwnerCog, Progress, run_cmd, safe_edit, safe_send
@@ -9,9 +10,13 @@ class Pull(OwnerCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot)
 
-    @commands.command(name="pull")
+    @commands.hybrid_command(
+        name="pull",
+        description="Pulls the latest code from git, shows progress and restarts the bot (owner only).",
+    )
+    @app_commands.describe(mode="Optional: force (restart even if nothing changed) or hard (reset to origin).")
     @commands.is_owner()
-    async def pull(self, ctx: commands.Context, mode: str = commands.parameter(default="", description="Type `force` to restart even when nothing changed.")):
+    async def pull(self, ctx: commands.Context, mode: str = commands.parameter(default="", description="Optional: `force` restarts even when nothing changed, `hard` resets to origin.")):
         """Pull the latest code, show progress, and restart.
         Use `update force` to restart even if nothing changed."""
         bot = self.bot
