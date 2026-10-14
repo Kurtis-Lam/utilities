@@ -4,6 +4,7 @@ import re
 import time
 from typing import NamedTuple, Optional
 import discord
+from discord import app_commands
 from discord.ext import commands
 import firebase_admin
 from firebase_admin import credentials, db
@@ -867,7 +868,13 @@ async def refresh_config_embed(interaction: discord.Interaction, override_page: 
 
 
 # --- CONFIG GROUP SUBCOMMANDS ---
-@config_group.group(name="grinder", aliases=["g", "grind"], invoke_without_command=True)
+@config_group.group(
+    name="grinder",
+    aliases=["g", "grind"],
+    fallback="view",
+    invoke_without_command=True,
+    description="Shows the grinder mode configurations of this server (owner only).",
+)
 @commands.is_owner()
 async def grindconfig(ctx: commands.Context):
     """Shows mode configurations for the current server."""
@@ -885,7 +892,13 @@ async def grindconfig(ctx: commands.Context):
         await ctx.reply(view=ConfigView(page="modes", embed=embed), mention_author=False)
 
 
-@grindconfig.command(name="add", aliases=["a"])
+@grindconfig.command(name="add", aliases=["a"], description="Adds a grinder mode configuration (owner only).")
+@app_commands.describe(
+    mode="Mode to add (autocatch, spam, dotcatch, commaedit or periodicmsg).",
+    acc_idx="Account number to use (1-based).",
+    args="Mode arguments separated by commas (channel ID, message, times...).",
+)
+@app_commands.choices(mode=[app_commands.Choice(name=m, value=m) for m in VALID_MODES])
 @commands.is_owner()
 async def grindconfig_add(
     ctx: commands.Context,
@@ -965,7 +978,8 @@ async def grindconfig_add(
     await ctx.reply(embed=success_embed(desc), mention_author=False)
 
 
-@grindconfig.command(name="remove", aliases=["r"])
+@grindconfig.command(name="remove", aliases=["r"], description="Removes a grinder mode configuration (owner only).")
+@app_commands.describe(index="Number of the config to remove (shown by the config grinder view).")
 @commands.is_owner()
 async def grindconfig_remove(
     ctx: commands.Context,
@@ -1025,14 +1039,26 @@ class GrinderCog(commands.Cog):
         """Every command in this cog: embeds for errors, how-to-use embed for missing arguments."""
         await handle_command_error(ctx, error)
 
-    @commands.group(name="grindconfig", aliases=["gc", "g"], invoke_without_command=True)
+    @commands.hybrid_group(
+        name="grindconfig",
+        aliases=["gc", "g"],
+        fallback="view",
+        invoke_without_command=True,
+        description="Shows the grinder mode configurations of this server (owner only).",
+    )
     @commands.is_owner()
     async def grindconfig_cog(self, ctx: commands.Context):
         """Top-level command alias for viewing server configs."""
         if ctx.invoked_subcommand is None:
             await grindconfig(ctx)
 
-    @grindconfig_cog.command(name="add", aliases=["a"])
+    @grindconfig_cog.command(name="add", aliases=["a"], description="Adds a grinder mode configuration (owner only).")
+    @app_commands.describe(
+        mode="Mode to add (autocatch, spam, dotcatch, commaedit or periodicmsg).",
+        acc_idx="Account number to use (1-based).",
+        args="Mode arguments separated by commas (channel ID, message, times...).",
+    )
+    @app_commands.choices(mode=[app_commands.Choice(name=m, value=m) for m in VALID_MODES])
     @commands.is_owner()
     async def grindconfig_cog_add(
         self,
@@ -1045,7 +1071,8 @@ class GrinderCog(commands.Cog):
         """Add a mode configuration."""
         await grindconfig_add(ctx, mode, acc_idx, args=args)
 
-    @grindconfig_cog.command(name="remove", aliases=["r"])
+    @grindconfig_cog.command(name="remove", aliases=["r"], description="Removes a grinder mode configuration (owner only).")
+    @app_commands.describe(index="Number of the config to remove (shown by the grindconfig view).")
     @commands.is_owner()
     async def grindconfig_cog_remove(
         self,
@@ -1055,7 +1082,12 @@ class GrinderCog(commands.Cog):
         """Remove a mode configuration by its index."""
         await grindconfig_remove(ctx, index)
 
-    @commands.command(name="pause", aliases=["p"])
+    @commands.hybrid_command(
+        name="pause",
+        aliases=["p"],
+        description="Pauses grinder configs: all, or the numbers you list (owner only).",
+    )
+    @app_commands.describe(raw_args="Config numbers and/or a duration (30s, 2h, 1d). Leave blank to pause all.")
     @commands.is_owner()
     async def pause(
         self,
@@ -1188,7 +1220,12 @@ class GrinderCog(commands.Cog):
                 description=f"⏸️ Paused Config **#{idx}** (`{mode}` | {acc_str}) indefinitely."
             ), mention_author=False)
 
-    @commands.command(name="resume", aliases=["r"])
+    @commands.hybrid_command(
+        name="resume",
+        aliases=["r"],
+        description="Resumes grinder configs: all, or the numbers you list (owner only).",
+    )
+    @app_commands.describe(raw_args="Config numbers to resume. Leave blank to resume all.")
     @commands.is_owner()
     async def resume(
         self,
@@ -1301,7 +1338,15 @@ class GrinderCog(commands.Cog):
         acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
         await ctx.reply(embed=make_embed(description=f"▶️ Resumed Config **#{idx}** (`{mode}` | {acc_str})."), mention_author=False)
 
-    @commands.command(name="syncguilds", aliases=["sg"])
+    @commands.hybrid_command(
+        name="syncguilds",
+        aliases=["sg"],
+        description="Copies grinder configs, excludes and logs to another server (owner only).",
+    )
+    @app_commands.describe(
+        from_guild="ID of the server to copy from.",
+        to_guild="ID of the server to copy to.",
+    )
     @commands.is_owner()
     async def syncguilds(
         self,
