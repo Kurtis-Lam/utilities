@@ -5,6 +5,7 @@ import secrets
 import time
 import typing
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from views.embeds import (
@@ -106,7 +107,11 @@ class Utilities(commands.Cog):
     async def before_check_reminders(self):
         await self.bot.wait_until_ready()
 
-    @commands.command(name="remind", aliases=["rm", "remindme"], description="Sets a reminder.")
+    @commands.hybrid_command(name="remind", aliases=["rm", "remindme"], description="Sets a reminder.")
+    @app_commands.describe(
+        time_str="When to remind you: a number plus s, m, h or d (e.g. 10m, 2h, 1d). Max 30 days.",
+        message="What to remind you about.",
+    )
     @commands.is_owner()
     async def remind(
         self,
@@ -180,7 +185,11 @@ class Utilities(commands.Cog):
             except Exception as e:
                 print(f"Failed to delete timer {doc['id']}: {e}")
 
-    @commands.command(name="timer", description="Starts a timer and pings you in this channel when it ends.")
+    @commands.hybrid_command(name="timer", description="Starts a timer and pings you in this channel when it ends.")
+    @app_commands.describe(
+        time_str="How long to wait, e.g. 30s, 10m, 1h30m (s, m, h, d can be combined). Max 30 days.",
+        name="Optional name shown in the timer (e.g. Pizza).",
+    )
     @commands.is_owner()
     @commands.guild_only()
     async def timer(
@@ -217,7 +226,12 @@ class Utilities(commands.Cog):
             print(f"Failed to save timer {doc['id']}: {e}")
         self._schedule_timer(doc)
 
-    @commands.group(name="reminders", invoke_without_command=True, description="View your active reminders.")
+    @commands.hybrid_group(
+        name="reminders",
+        fallback="list",
+        invoke_without_command=True,
+        description="View your active reminders.",
+    )
     @commands.is_owner()
     @loading
     async def reminders(self, ctx):
@@ -251,6 +265,7 @@ class Utilities(commands.Cog):
         await ctx.reply(embed=embed, mention_author=False)
 
     @reminders.command(name="remove", aliases=["r"], description="Remove a reminder by its ID.")
+    @app_commands.describe(reminder_id="The ID of the reminder to remove (shown by /reminders and when you set it).")
     @commands.is_owner()
     async def reminders_remove(
         self,
