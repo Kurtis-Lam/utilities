@@ -124,6 +124,16 @@ USAGE_EXAMPLES = {
     "messages": ["{p}messages", "{p}messages @user", "{p}messages 123456789012345678"],
     "echo": ["{p}echo Hello everyone!"],
     "stick": ["{p}stick Please read the rules!"],
+    # giveaway
+    "giveaway create": [
+        "{p}giveaway create 1h 1 Nitro",
+        "{p}gw create 2d 3 \"Discord Nitro\" #giveaways",
+        "{p}giveaway create 30m 1 Pizza",
+    ],
+    "giveaway end": ["{p}giveaway end 123456789012345678"],
+    "giveaway list": ["{p}giveaway list"],
+    "giveaway participants": ["{p}giveaway participants 123456789012345678"],
+    "giveaway reroll": ["{p}giveaway reroll 123456789012345678", "{p}giveaway reroll 123456789012345678 2"],
     # utilities
     "addprefix": ["{p}addprefix 10"],
     "remind": ["{p}remind 10m Take a break", "{p}rm 2h Check the oven", "{p}remindme 1d Pay rent"],
@@ -250,7 +260,11 @@ USAGE_EXAMPLES = {
     "channelsettings": ["{p}channelsettings", "{p}chsettings"],
     # poketwo-utils
     "dex": ["{p}dex pikachu", "{p}dex 25", "{p}pokedex #25"],
-    "extract": ["Reply to a Pokétwo embed with: {p}extract", "Reply to a Pokétwo embed with: {p}ex"],
+    "extract": [
+        "Reply to a Pokétwo embed with: {p}extract",
+        "Reply to a Pokétwo embed with: {p}ex",
+        "{p}extract 123456789012345678",
+    ],
     "checkflee": ["{p}checkflee"],
 }
 
