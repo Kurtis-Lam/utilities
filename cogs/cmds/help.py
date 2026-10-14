@@ -32,6 +32,7 @@ import re
 import typing
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from cogs.owner_cmds.utils import OwnerCog
@@ -100,6 +101,7 @@ HELP_CATEGORIES: dict[str, list[str]] = {
         "snipe", "messages", "timediff", "purge", "forward", "pin", "unpin", "pins",
         "echo", "stick", "unstick", "sticks",
     ],
+    "Giveaway": ["giveaway"],
     "AI Chatbot": ["ai"],
     "Configurations": ["config"],
     "Pokétwo Pings": ["sh", "cl", "tp", "rp", "reserves"],
@@ -111,7 +113,7 @@ HELP_CATEGORIES: dict[str, list[str]] = {
     "Pokétwo Utils": ["catchtime", "dex", "extract"],
     "Utilities": ["remind", "timer", "reminders"],
     "Grinder": ["grindconfig", "pause", "resume", "syncguilds"],
-    "Bot": ["stats", "gitstats", "pull", "reload", "restart"],
+    "Bot": ["stats", "gitstats", "pull", "reload", "restart", "sync"],
 }
 OTHER_CATEGORY = "Other"
 
@@ -472,7 +474,8 @@ class Help(commands.Cog):
     # Command
     # ------------------------------------------------------------------
 
-    @commands.command(name="help", description="Shows all commands, or details and arguments of one command.")
+    @commands.hybrid_command(name="help", description="Shows all commands, or details and arguments of one command.")
+    @app_commands.describe(query="A command (e.g. ccat, set lockdelay) or a cog name. Leave blank to list every command.")
     async def help(
         self,
         ctx: commands.Context,
