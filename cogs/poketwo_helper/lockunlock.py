@@ -209,8 +209,9 @@ class LockUnlock(commands.Cog):
             upsert=True,
         )
 
+    @commands.hybrid_command(name="unlockallchannels", aliases=["uac"], description="Unlocks all channels in the server.")
+    @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    @commands.command(name="unlockallchannels", aliases=["uac"], description="Unlocks all channels in the server.")
     async def unlockallchannels(self, ctx):
         poketwo = await get_poketwo_target(self.bot, ctx.guild)
         if poketwo is None:
