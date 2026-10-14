@@ -32,7 +32,10 @@ class GitStats(OwnerCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot)
 
-    @commands.command(name="gitstats")
+    @commands.hybrid_command(
+        name="gitstats",
+        description="Shows the current git branch and commit, and how far ahead or behind it is (owner only).",
+    )
     @commands.is_owner()
     @loading
     async def gitstats(self, ctx: commands.Context):
