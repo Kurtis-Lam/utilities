@@ -8,7 +8,9 @@ import sys
 import time
 import traceback
 
+from discord import app_commands
 from discord.ext import commands
+from discord.ext.commands.hybrid import HybridAppCommand
 from datetime import datetime, timezone
 
 import certifi
@@ -231,6 +233,42 @@ class Utilities(commands.Bot):
             print()
 
         gc.collect()
+
+        # Register every hybrid command as a slash command with Discord.
+        if self.config.get("SYNC_SLASH_COMMANDS", True):
+            try:
+                count = await self.sync_slash_commands()
+                print(f"🔁 Synced {count} slash command(s).")
+            except Exception as e:
+                print(f"⚠️ Could not sync slash commands: {e}")
+
+        self.tree.on_error = self.on_app_command_error
+
+    async def sync_slash_commands(self) -> int:
+        """Pushes the app command tree to Discord (global). Returns how many top-level commands exist."""
+        synced = await self.tree.sync()
+        return len(synced)
+
+    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        """Errors raised before a hybrid command runs (checks...) end up here.
+
+        Failed checks (e.g. a non-owner using an owner-only command) stay completely silent."""
+        error = getattr(error, "original", error)
+        if isinstance(error, (app_commands.CheckFailure, commands.CheckFailure, commands.NotOwner)):
+            return
+        if isinstance(error, app_commands.CommandNotFound):
+            return
+        if isinstance(interaction.command, HybridAppCommand):
+            return  # hybrid commands report errors through on_command_error below
+        print(f"Unhandled error in slash command '{getattr(interaction.command, 'qualified_name', '?')}':")
+        traceback.print_exception(type(error), error, error.__traceback__)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ Something went wrong running that command.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ Something went wrong running that command.", ephemeral=True)
+        except discord.HTTPException:
+            pass
 
     async def close(self):
         try:
