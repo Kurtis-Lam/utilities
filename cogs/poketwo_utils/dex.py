@@ -4,6 +4,7 @@ import unicodedata
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from views.dex_views import ShinyView
@@ -193,12 +194,13 @@ class Dex(commands.Cog):
             self.pokedex = {}
             self.alt_index = {}
 
-    @commands.command(
+    @commands.hybrid_command(
         name="dex",
         aliases=["pokedex"],
         usage="<name or dex number>",
         description="Look up a Pokémon by name or dex number.",
     )
+    @app_commands.describe(query="Pokémon name or Pokédex number (e.g. pikachu, 25, #25).")
     @loading
     async def dex_cmd(self, ctx: commands.Context, *, query: str = commands.parameter(default=None, description="Pokémon name or Pokédex number (e.g. pikachu, 25, #25).")):
         if query is None or not query.strip():
