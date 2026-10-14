@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from pymongo import ASCENDING, DESCENDING, UpdateOne
 
@@ -246,6 +247,10 @@ class Catches(commands.Cog):
     )
     @commands.has_permissions(administrator=True)
     @loading
+    @app_commands.describe(
+        guild_id_1='ID of the first server to link.',
+        guild_id_2='ID of the second server to link.',
+    )
     async def catches_link(
         self,
         ctx,
@@ -325,6 +330,9 @@ class Catches(commands.Cog):
         name="catches", description="View your catch stats."
     )
     @loading
+    @app_commands.describe(
+        timeframe='Timeframe: daily, weekly, monthly or alltime.',
+    )
     async def view_catches(
         self,
         ctx,
@@ -406,6 +414,9 @@ class Catches(commands.Cog):
         description="Server catch leaderboard.",
     )
     @loading
+    @app_commands.describe(
+        timeframe='Timeframe: daily, weekly, monthly or alltime.',
+    )
     async def catch_leaderboard(
         self,
         ctx,
