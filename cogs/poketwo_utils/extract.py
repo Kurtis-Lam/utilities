@@ -1,5 +1,8 @@
 import re
+import typing
+
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from views.embeds import err_embed, handle_command_error, info_embed, send_usage
@@ -18,19 +21,41 @@ class PokemonExtractor(commands.Cog):
     async def cog_command_error(self, ctx: commands.Context, error):
         await handle_command_error(ctx, error)
 
-    @commands.command(
+    @commands.hybrid_command(
         name="extract",
         aliases=["ex"],
-        description="Reply to a Pokétwo embed to extract names, numbers or IDs.",
+        description="Extracts names, numbers or IDs from a Pokétwo embed (reply to it, or give its ID).",
     )
+    @app_commands.describe(message="ID or link of the Pokétwo message. Not needed when replying to it with a text command.")
     @loading
-    async def extract(self, ctx):
-        if not ctx.message.reference:
-            await send_usage(ctx, note="Reply to a Pokétwo message.")
+    async def extract(
+        self,
+        ctx,
+        message: typing.Optional[str] = commands.parameter(
+            default=None,
+            description="ID or link of the Pokétwo message. Not needed when replying to it.",
+        ),
+    ):
+        target_id = None
+        if ctx.interaction is None and ctx.message.reference:
+            target_id = ctx.message.reference.message_id
+        elif message:
+            found = re.findall(r"\d{15,25}", message)
+            target_id = int(found[-1]) if found else None
+
+        if target_id is None:
+            await send_usage(ctx, note="Reply to a Pokétwo message, or give its message ID or link.")
             return
 
+        async def send_result(embed: discord.Embed):
+            # Text commands answer on the Pokétwo message itself; slash commands answer the interaction.
+            if ctx.interaction is not None:
+                await ctx.reply(embed=embed, mention_author=False)
+            else:
+                await replied_message.reply(embed=embed, mention_author=False)
+
         try:
-            replied_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+            replied_message = await ctx.channel.fetch_message(target_id)
         except discord.HTTPException:
             await ctx.reply(
                 embed=err_embed("Couldn't fetch that message."),
@@ -80,7 +105,7 @@ class PokemonExtractor(commands.Cog):
                 emoji="📋",
             )
             result.set_footer(text=f"{len(names)} Pokémon extracted")
-            await replied_message.reply(embed=result, mention_author=False)
+            await send_result(result)
         elif list_matches:
             pokemon_ids = []
             names = []
@@ -110,12 +135,9 @@ class PokemonExtractor(commands.Cog):
                 emoji="📋",
             )
             result.set_footer(text=f"{len(names)} Pokémon extracted")
-            await replied_message.reply(embed=result, mention_author=False)
+            await send_result(result)
         else:
-            await replied_message.reply(
-                embed=err_embed("No Pokémon found in that embed."),
-                mention_author=False,
-            )
+            await send_result(err_embed("No Pokémon found in that embed."))
 
 
 async def setup(bot):
