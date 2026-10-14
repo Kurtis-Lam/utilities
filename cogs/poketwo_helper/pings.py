@@ -4,6 +4,7 @@ import unicodedata
 from pathlib import Path
 from typing import List, Tuple, Optional
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from views.common_views import EMBED_COLOR, confirm, error_embed, info_embed, make_embed, success_embed, warning_embed
@@ -355,7 +356,9 @@ class PokePings(commands.Cog):
 
     # --- Shiny Hunt Command ---
 
-    @commands.command(name="sh", description="View or set your Shiny Hunt target.")
+    @commands.hybrid_command(name="sh", description="View or set your Shiny Hunt target.")
+    @app_commands.describe(pokemon="Pokémon (optionally prefixed with all / only), or clear / reset. Leave blank to view.")
+    @commands.guild_only()
     async def shiny_hunt(
         self,
         ctx: commands.Context,
@@ -434,7 +437,8 @@ class PokePings(commands.Cog):
 
     # --- Collection List Commands ---
 
-    @commands.group(name="cl", invoke_without_command=True, description="Manage your collection list pings.")
+    @commands.hybrid_group(name="cl", invoke_without_command=True, description="Manage your collection list pings.")
+    @commands.guild_only()
     async def cl_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             passed = getattr(ctx, "subcommand_passed", None)
@@ -455,6 +459,8 @@ class PokePings(commands.Cog):
                 await ctx.reply(embed=embed, mention_author=False)
 
     @cl_group.command(name="add", aliases=["a"], description="Add Pokémon to your collection list.")
+    @app_commands.describe(pokemon="Pokémon name(s), comma separated.")
+    @commands.guild_only()
     async def cl_add(
         self,
         ctx: commands.Context,
@@ -494,6 +500,8 @@ class PokePings(commands.Cog):
         await ctx.reply(embed=make_embed(description="\n".join(msg_parts)), mention_author=False)
 
     @cl_group.command(name="remove", aliases=["r"], description="Remove Pokémon from your collection list.")
+    @app_commands.describe(pokemon="Pokémon name(s), comma separated.")
+    @commands.guild_only()
     async def cl_remove(
         self,
         ctx: commands.Context,
@@ -539,10 +547,12 @@ class PokePings(commands.Cog):
         await ctx.reply(embed=make_embed(description="\n".join(msg_parts)), mention_author=False)
 
     @cl_group.command(name="clear", aliases=["c", "reset"], description="Clear your whole collection list.")
+    @commands.guild_only()
     async def cl_clear(self, ctx: commands.Context):
         await self._confirm_clear(ctx, "cl", "collection list", "Pokémon")
 
     @cl_group.command(name="list", aliases=["l"], description="Show your collection list.")
+    @commands.guild_only()
     @loading
     async def cl_list(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
@@ -581,12 +591,19 @@ class PokePings(commands.Cog):
 
     # --- Reserves Commands ---
 
-    @commands.group(
+    @commands.hybrid_group(
         name="reserves",
         aliases=["reserve", "res", "re"],
+        fallback="show",
         invoke_without_command=True,
         description="Show your reserves or view all server reserves.",
     )
+    @app_commands.describe(scope="Optional: all (every reserve in the server, admins only) or list (your reserves).")
+    @app_commands.choices(scope=[
+        app_commands.Choice(name="all", value="all"),
+        app_commands.Choice(name="list", value="list"),
+    ])
+    @commands.guild_only()
     async def reserves(
         self,
         ctx: commands.Context,
@@ -622,6 +639,7 @@ class PokePings(commands.Cog):
         await ctx.reply(embed=embed, mention_author=False)
 
     @reserves.command(name="list", aliases=["l"], description="Show your reserves.")
+    @commands.guild_only()
     @loading
     async def re_list(self, ctx: commands.Context):
         g_id = str(ctx.guild.id)
@@ -658,6 +676,7 @@ class PokePings(commands.Cog):
             await ctx.reply(embed=pages[0], view=view, mention_author=False)
 
     @reserves.command(name="all", description="View all user reserves in this server (admin only).")
+    @commands.guild_only()
     @loading
     async def re_all(self, ctx: commands.Context):
         if not ctx.author.guild_permissions.administrator:
@@ -706,6 +725,8 @@ class PokePings(commands.Cog):
             await ctx.reply(embed=pages[0], view=view, mention_author=False)
 
     @reserves.command(name="add", aliases=["a"], description="Reserve Pokémon for a member (admin only).")
+    @app_commands.describe(member="The member to reserve for (mention or ID).", pokemon="Pokémon name(s), comma separated.")
+    @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def re_add(
         self,
@@ -747,6 +768,8 @@ class PokePings(commands.Cog):
         await ctx.reply(embed=make_embed(description="\n".join(msg_parts)), mention_author=False)
 
     @reserves.command(name="remove", aliases=["r"], description="Remove reserved Pokémon from a member (admin only).")
+    @app_commands.describe(member="The member to remove reserves from (mention or ID).", pokemon="Pokémon name(s), comma separated.")
+    @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def re_remove(
         self,
@@ -794,6 +817,8 @@ class PokePings(commands.Cog):
         await ctx.reply(embed=make_embed(description="\n".join(msg_parts)), mention_author=False)
 
     @reserves.command(name="clear", aliases=["c"], description="Clear reserves for one member, or the whole server (admin only).")
+    @app_commands.describe(member="The member to clear reserves for. Leave blank to clear everyone.")
+    @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def re_clear(
         self,
@@ -815,7 +840,9 @@ class PokePings(commands.Cog):
 
     # --- Type & Region Commands ---
 
-    @commands.command(name="tp", description="View or toggle your Type Pings.")
+    @commands.hybrid_command(name="tp", description="View or toggle your Type Pings.")
+    @app_commands.describe(target="Type(s) to toggle, or clear / reset to turn all off. Leave blank for the menu.")
+    @commands.guild_only()
     async def type_pings(
         self,
         ctx: commands.Context,
@@ -878,7 +905,9 @@ class PokePings(commands.Cog):
 
         await ctx.reply(embed=make_embed(description="\n".join(msg)), mention_author=False)
 
-    @commands.command(name="rp", description="View or toggle your Region Pings.")
+    @commands.hybrid_command(name="rp", description="View or toggle your Region Pings.")
+    @app_commands.describe(target="Region(s) or Gmax / Paradox / Eevos, or clear / reset to turn all off. Blank = menu.")
+    @commands.guild_only()
     async def region_pings(
         self,
         ctx: commands.Context,
