@@ -9,7 +9,7 @@ class Restart(OwnerCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot)
 
-    @commands.command(name="restart")
+    @commands.hybrid_command(name="restart", description="Restarts the bot (owner only).")
     @commands.is_owner()
     async def restart(self, ctx: commands.Context):
         bot = self.bot
