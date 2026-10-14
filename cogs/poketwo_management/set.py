@@ -1,6 +1,7 @@
 import re
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from cogs.poketwo_helper.lockcommon import (
@@ -57,12 +58,12 @@ class Set(commands.Cog):
     async def cog_before_invoke(self, ctx: commands.Context):
         # --standard is only meaningful for lockdelay / locktime / whitelist / restrictunlockers.
         # Without this guard the timer / role / use-standard commands would silently ignore it.
-        if ctx.command and ctx.command.qualified_name in NO_STANDARD_COMMANDS:
+        if ctx.interaction is None and ctx.command and ctx.command.qualified_name in NO_STANDARD_COMMANDS:
             if any(word.lower() in STANDARD_FLAGS for word in ctx.message.content.split()):
                 raise commands.BadArgument(f"`--standard` can only be used with {STANDARD_COMMANDS}.")
 
     # --- group command ---------------------------------------------------------
-    @commands.group(
+    @commands.hybrid_group(
         name="set",
         invoke_without_command=True,
         description="Configure lock delays, lock times, whitelists, restrict unlockers, timers and ping roles.",
@@ -174,8 +175,11 @@ class Set(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @loading
-    async def set_lockdelay(self, ctx: commands.Context, *args: str):
-        tokens, is_global, is_standard = split_scope_flags(args)
+    @app_commands.describe(
+        args='Delay in seconds, then optional locks (sh, cl, rp, tp, res, all) and --global or --standard.',
+    )
+    async def set_lockdelay(self, ctx: commands.Context, *, args: str = ""):
+        tokens, is_global, is_standard = split_scope_flags(args.split())
         if not tokens:
             return await send_usage(ctx, title="Missing arg: `time`")
         value, locks = tokens[0], tokens[1:]
@@ -224,8 +228,11 @@ class Set(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @loading
-    async def set_locktime(self, ctx: commands.Context, *args: str):
-        tokens, is_global, is_standard = split_scope_flags(args)
+    @app_commands.describe(
+        args='Time (30m, 2h, 1h30m) or on/off, then optional locks (or all) and --global or --standard.',
+    )
+    async def set_locktime(self, ctx: commands.Context, *, args: str = ""):
+        tokens, is_global, is_standard = split_scope_flags(args.split())
         if not tokens:
             return await send_usage(ctx, title="Missing arg: `time`")
         value, locks = tokens[0], tokens[1:]
@@ -282,8 +289,11 @@ class Set(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @loading
-    async def set_whitelist(self, ctx: commands.Context, *args: str):
-        tokens, is_global, is_standard = split_scope_flags(args)
+    @app_commands.describe(
+        args='add / remove / clear, then channels (mentions, IDs or *), then optional locks (--standard too).',
+    )
+    async def set_whitelist(self, ctx: commands.Context, *, args: str = ""):
+        tokens, is_global, is_standard = split_scope_flags(args.split())
 
         actions = ADD_WORDS | REMOVE_WORDS | CLEAR_WORDS
         if not tokens or tokens[0].lower() not in actions:
@@ -361,8 +371,11 @@ class Set(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @loading
-    async def set_restrictunlockers(self, ctx: commands.Context, *args: str):
-        tokens, is_global, is_standard = split_scope_flags(args)
+    @app_commands.describe(
+        args='true or false, then optional locks (res, sh, cl, tp, rp, all) and --global or --standard.',
+    )
+    async def set_restrictunlockers(self, ctx: commands.Context, *, args: str = ""):
+        tokens, is_global, is_standard = split_scope_flags(args.split())
         if not tokens:
             return await send_usage(ctx, title="Missing arg: `true|false`")
         value, locks = tokens[0].lower(), tokens[1:]
@@ -426,7 +439,11 @@ class Set(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @loading
-    async def set_use_standard(self, ctx: commands.Context, *locks: str):
+    @app_commands.describe(
+        locks='Locks to apply the standard to: sh, cl, rp, tp, res or all.',
+    )
+    async def set_use_standard(self, ctx: commands.Context, *, locks: str = ""):
+        locks = locks.split()
         if not locks:
             return await send_usage(ctx, title="Missing arg: `lock`")
         cog = await self._cog(ctx)
@@ -486,6 +503,9 @@ class Set(commands.Cog):
     @set_group.command(name="shtimer", usage="<timer>", description="Set the SH timer length in seconds.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        timer='Timer length in seconds, e.g. 15 or 30s.',
+    )
     async def set_shtimer(
         self,
         ctx: commands.Context,
@@ -496,6 +516,9 @@ class Set(commands.Cog):
     @set_group.command(name="cltimer", usage="<timer>", description="Set the CL timer length in seconds.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        timer='Timer length in seconds, e.g. 15 or 30s.',
+    )
     async def set_cltimer(
         self,
         ctx: commands.Context,
@@ -506,6 +529,9 @@ class Set(commands.Cog):
     @set_group.command(name="rptimer", usage="<timer>", description="Set the RP timer length in seconds.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        timer='Timer length in seconds, e.g. 15 or 30s.',
+    )
     async def set_rptimer(
         self,
         ctx: commands.Context,
@@ -516,6 +542,9 @@ class Set(commands.Cog):
     @set_group.command(name="tptimer", usage="<timer>", description="Set the TP timer length in seconds.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        timer='Timer length in seconds, e.g. 15 or 30s.',
+    )
     async def set_tptimer(
         self,
         ctx: commands.Context,
@@ -552,6 +581,9 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        role='The role to ping for Rare spawns (mention or ID).',
+    )
     async def set_rarerole(
         self,
         ctx: commands.Context,
@@ -565,6 +597,9 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        role='The role to ping for Regional spawns (mention or ID).',
+    )
     async def set_regionalrole(
         self,
         ctx: commands.Context,
@@ -578,6 +613,9 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        role='The role to ping for Gigantamax spawns (mention or ID).',
+    )
     async def set_gigantamaxrole(
         self,
         ctx: commands.Context,
@@ -591,6 +629,9 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        role='The role to ping for Paradox spawns (mention or ID).',
+    )
     async def set_paradoxrole(
         self,
         ctx: commands.Context,
@@ -604,6 +645,9 @@ class Set(commands.Cog):
     )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        role='The role to ping for Eeveelutions spawns (mention or ID).',
+    )
     async def set_eeveelutionsrole(
         self,
         ctx: commands.Context,
