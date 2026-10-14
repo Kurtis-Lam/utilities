@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from views.ai_views import AIConfigView, AIInfoView
@@ -1122,9 +1123,18 @@ class AIChat(commands.Cog):
     # -- commands -------------------------------------------------------
 
     @staticmethod
-    def _unique_mentioned_channels(ctx: commands.Context) -> list:
+    def _unique_mentioned_channels(ctx: commands.Context, raw: str | None = None) -> list:
+        """Channels mentioned in the command, from `#channel` mentions or raw channel IDs.
+
+        Works for text commands and slash commands (a slash command has no message mentions,
+        so the argument text itself is parsed)."""
         seen, result = set(), []
-        for ch in ctx.message.channel_mentions:
+        candidates = list(getattr(ctx.message, "channel_mentions", None) or [])
+        for found in re.findall(r"\d{15,25}", raw or ""):
+            channel = ctx.guild.get_channel(int(found)) if ctx.guild else None
+            if channel is not None:
+                candidates.append(channel)
+        for ch in candidates:
             if ch.id in seen or getattr(ch, "guild", None) != ctx.guild:
                 continue
             seen.add(ch.id)
@@ -1144,8 +1154,9 @@ class AIChat(commands.Cog):
             return False
         return True
 
-    @commands.group(
+    @commands.hybrid_group(
         name="ai",
+        fallback="help",
         invoke_without_command=True,
         description="Learn how to use the AI chatbot and its commands.",
     )
@@ -1236,11 +1247,12 @@ class AIChat(commands.Cog):
         usage="<#channel> [#channel ...]",
         description="Enable the AI chatbot in one or more channels (administrators only).",
     )
-    async def ai_add(self, ctx: commands.Context, *, channels: str = commands.parameter(default=None, description="One or more channel mentions to enable the AI chatbot in.")):
+    @app_commands.describe(channels="One or more channels (mentions or IDs, separated by spaces) to enable the AI chatbot in.")
+    async def ai_add(self, ctx: commands.Context, *, channels: str = commands.parameter(default=None, description="One or more channels (mentions or IDs) to enable the AI chatbot in.")):
         if not await self._require_admin(ctx):
             return
 
-        targets = self._unique_mentioned_channels(ctx)
+        targets = self._unique_mentioned_channels(ctx, channels)
         if not targets:
             return await send_usage(ctx, note="Mention a channel, e.g. `#general`.")
 
@@ -1276,11 +1288,12 @@ class AIChat(commands.Cog):
         usage="<#channel> [#channel ...]",
         description="Disable the AI chatbot in one or more channels (administrators only).",
     )
-    async def ai_remove(self, ctx: commands.Context, *, channels: str = commands.parameter(default=None, description="One or more channel mentions to disable the AI chatbot in.")):
+    @app_commands.describe(channels="One or more channels (mentions or IDs, separated by spaces) to disable the AI chatbot in.")
+    async def ai_remove(self, ctx: commands.Context, *, channels: str = commands.parameter(default=None, description="One or more channels (mentions or IDs) to disable the AI chatbot in.")):
         if not await self._require_admin(ctx):
             return
 
-        targets = self._unique_mentioned_channels(ctx)
+        targets = self._unique_mentioned_channels(ctx, channels)
         if not targets:
             return await send_usage(ctx, note="Mention a channel, e.g. `#general`.")
 
@@ -1309,7 +1322,11 @@ class AIChat(commands.Cog):
         await ctx.reply(embed=make_embed(title="AI Channels Updated", description="\n".join(lines)),
                         mention_author=False)
 
-    @ai_group.command(name="reset", help="Clears your AI chatbot memory for this channel.")
+    @ai_group.command(
+        name="reset",
+        description="Clears your AI chatbot memory for this channel.",
+        help="Clears your AI chatbot memory for this channel.",
+    )
     async def reset_memory(self, ctx: commands.Context):
         if not self._is_ai_channel(ctx.channel):
             await ctx.reply(embed=err_embed(" AI not enabled", "", emoji="🚫"), mention_author=False)
@@ -1379,7 +1396,11 @@ class AIChat(commands.Cog):
             pages.append(embed)
         return pages
 
-    @ai_group.command(name="memory", help="Displays your AI chatbot memory for this channel.")
+    @ai_group.command(
+        name="memory",
+        description="Displays your AI chatbot memory for this channel.",
+        help="Displays your AI chatbot memory for this channel.",
+    )
     async def show_memory(self, ctx: commands.Context):
         if not self._is_ai_channel(ctx.channel):
             await ctx.reply(embed=err_embed(" AI not enabled", "", emoji="🚫"), mention_author=False)
@@ -1502,6 +1523,7 @@ class AIChat(commands.Cog):
 
     @ai_group.command(
         name="info",
+        description="Owner only: view model status and daily usage, and manage OpenRouter API keys.",
         help="Owner only: view model status and daily usage, and add / edit / delete OpenRouter API keys.",
     )
     @is_bot_owner()
