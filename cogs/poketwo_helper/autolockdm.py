@@ -239,7 +239,7 @@ class AutoLockDM(commands.Cog):
 
     # --- .autolockdm -------------------------------------------------------------------
 
-    @commands.command(
+    @commands.hybrid_command(
         name="autolockdm",
         aliases=["aldm"],
         description="See and change your autolock DM settings.",
