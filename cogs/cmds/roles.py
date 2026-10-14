@@ -183,17 +183,26 @@ class Role(commands.Cog):
         await self.timed_roles.delete_one({"guild_id": ctx.guild.id, "user_id": member.id, "role_id": role.id})
         await ctx.reply(embed=ok_embed("Role Removed", f"Successfully removed **{role.name}** from {member.mention}."), mention_author=False)
 
-    @commands.command(
-        name="setperms", 
-        description="Set permissions for multiple roles/members (admin, member, or blocked)."
+    @commands.hybrid_command(
+        name="setperms",
+        description="Set permissions for roles/members (admin, member, or blocked)."
     )
+    @app_commands.describe(
+        level="Access level to set: admin, member or blocked.",
+        targets="A role or member (mention or ID). Text commands accept several, separated by spaces.",
+    )
+    @app_commands.choices(level=[
+        app_commands.Choice(name="admin", value="admin"),
+        app_commands.Choice(name="member", value="member"),
+        app_commands.Choice(name="blocked", value="blocked"),
+    ])
     @commands.has_permissions(administrator=True)
     @loading
     async def setperms(
         self,
         ctx,
         level: str = commands.parameter(description="Access level to set: admin, member or blocked."),
-        targets: commands.Greedy[discord.Role | discord.Member] = commands.parameter(description="One or more roles or members (mentions or IDs), separated by spaces."),
+        targets: commands.Greedy[typing.Union[discord.Role, discord.Member]] = commands.parameter(description="One or more roles or members (mentions or IDs), separated by spaces."),
     ):
         level = level.lower()
         if level not in ["admin", "member", "blocked"]:
