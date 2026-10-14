@@ -38,7 +38,7 @@ class Settings(commands.Cog):
 
     # --- .settings -----------------------------------------------------------
     # Just lists the two real commands (plain usage embed, no Example button).
-    @commands.command(
+    @commands.hybrid_command(
         name="settings",
         description="Show the autolock settings commands.",
     )
@@ -48,7 +48,7 @@ class Settings(commands.Cog):
         await ctx.reply(embed=commands_usage_embed(ctx, "channelsettings", "serversettings"), mention_author=False)
 
     # --- .channelsettings ----------------------------------------------------
-    @commands.command(
+    @commands.hybrid_command(
         name="channelsettings",
         aliases=["chsettings"],
         description="This channel's autolock settings.",
@@ -81,7 +81,7 @@ class Settings(commands.Cog):
         await ctx.reply(embed=embed, mention_author=False)
 
     # --- .serversettings -----------------------------------------------------
-    @commands.command(
+    @commands.hybrid_command(
         name="serversettings",
         aliases=["svsettings", "ssettings"],
         description="This server's autolock settings.",
