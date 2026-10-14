@@ -300,6 +300,7 @@ class Starboard(commands.Cog):
 
     @commands.hybrid_group(
         name="starboard",
+        fallback="view",
         invoke_without_command=True,
         description="View or configure the notable-catch starboard channel.",
     )
