@@ -907,7 +907,13 @@ async def grindconfig_add(
         await ctx.reply(embed=error_embed(f"Missing required argument: Channel ID for `{mode_lower}` mode."), mention_author=False)
         return
 
-    target_str = arg_list[0] if mode_lower == "spam" else ", ".join(arg_list)
+    if mode_lower == "spam":
+        target_str = arg_list[0]
+    else:
+        # autocatch with no guild / channel id given -> default to the current server
+        if mode_lower == "autocatch" and not parse_catch_target(", ".join(arg_list))["ids"]:
+            arg_list.insert(0, str(ctx.guild.id))
+        target_str = ", ".join(arg_list)
 
     guild_id = str(ctx.guild.id)
     configs = await get_guild_configs(guild_id)

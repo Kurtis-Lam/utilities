@@ -248,7 +248,7 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
     )
     target = ui.TextInput(
         label="Target / Arguments / Channel IDs",
-        placeholder="chid (required for spam)  •  autocatch: chid, pikachu, list.json",
+        placeholder="spam: chid  •  autocatch: [guild/chid (default: this server)], pikachu, list.json",
         required=False,
     )
 
@@ -293,6 +293,10 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
 
         guild_id = str(interaction.guild_id)
         configs = await config.get_guild_configs(guild_id)
+
+        # autocatch with no guild / channel id -> default to the current server
+        if mode_val == "autocatch" and not config.parse_catch_target(raw_target)["ids"]:
+            raw_target = f"{guild_id}, {raw_target}" if raw_target else guild_id
 
         if mode_val in ["spam", "autocatch"] or not raw_target:
             targets_list = [raw_target]
