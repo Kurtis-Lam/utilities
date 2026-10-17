@@ -47,6 +47,56 @@ def _fmt_nums(nums) -> str:
     return ", ".join(f"#{n}" for n in nums)
 
 
+class BulkConfirmView(ui.View):
+    """
+    Self-contained Confirm / Cancel buttons for the multi-config `.p` / `.r` commands.
+    Send it with an embed:  view.message = await ctx.reply(embed=embed, view=view)
+    then `await view.wait()`; view.value is True (confirmed), False (cancelled) or None (timed out).
+    After applying the change call `await view.finish(embed)` to replace the prompt with the result.
+    """
+
+    def __init__(self, author, *, confirm_label: str = "Confirm", timeout: float = 60):
+        super().__init__(timeout=timeout)
+        self.author = author
+        self.value: bool | None = None
+        self.message: discord.Message | None = None
+        self.confirm_button.label = confirm_label
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.author.id:
+            return True
+        await interaction.response.send_message(
+            embed=error_embed("Only the person who ran the command can use these buttons."), ephemeral=True
+        )
+        return False
+
+    @ui.button(label="Confirm", style=discord.ButtonStyle.green, emoji="✅")
+    async def confirm_button(self, interaction: discord.Interaction, button: ui.Button):
+        self.value = True
+        await interaction.response.defer()  # acknowledge now; finish() edits the message afterwards
+        self.stop()
+
+    @ui.button(label="Cancel", style=discord.ButtonStyle.grey, emoji="❌")
+    async def cancel_button(self, interaction: discord.Interaction, button: ui.Button):
+        self.value = False
+        await interaction.response.edit_message(embed=info_embed("Cancelled."), view=None)
+        self.stop()
+
+    async def finish(self, embed: discord.Embed):
+        if self.message:
+            try:
+                await self.message.edit(embed=embed, view=None)
+            except discord.HTTPException:
+                pass
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(embed=info_embed("Timed out."), view=None)
+            except discord.HTTPException:
+                pass
+
+
 # =============================================================================
 #  ACCOUNTS
 # =============================================================================
@@ -188,7 +238,7 @@ class AccountsView(EmbedLayout):
 class AddConfigModal(ui.Modal, title="Add Configuration"):
     mode = ui.TextInput(
         label="Mode",
-        placeholder="autocatch, spam, dotcatch, commaedit or periodicmsg",
+        placeholder="autocatch, spam, dotcatch or commaedit",
         required=True,
     )
     acc_index = ui.TextInput(
@@ -198,7 +248,7 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
     )
     target = ui.TextInput(
         label="Target / Arguments / Channel IDs",
-        placeholder="chid1, pikachu test.json  —or—  chid; msg; t1; t2",
+        placeholder="chid (required for spam)  •  autocatch: chid, pikachu, list.json",
         required=False,
     )
 
@@ -219,6 +269,15 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
                 embed=error_embed("Enter account number(s), e.g. 1, 2."), ephemeral=True
             )
 
+        raw_target = self.target.value.strip() if self.target.value else ""
+
+        # spam needs a channel id (chid)
+        if mode_val == "spam" and not raw_target.isdigit():
+            return await interaction.response.send_message(
+                embed=error_embed("`spam` mode requires a channel ID (chid) as the target, e.g. `123456789012345678`."),
+                ephemeral=True,
+            )
+
         await interaction.response.defer(ephemeral=True)
 
         g_data = await config.get_global_data()
@@ -235,9 +294,7 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
         guild_id = str(interaction.guild_id)
         configs = await config.get_guild_configs(guild_id)
 
-        raw_target = self.target.value.strip() if self.target.value else ""
-
-        if mode_val in ["spam", "autocatch", "periodicmsg"] or not raw_target:
+        if mode_val in ["spam", "autocatch"] or not raw_target:
             targets_list = [raw_target]
         else:
             targets_list = [t.strip() for t in raw_target.split(",") if t.strip()]
@@ -324,9 +381,9 @@ class DynamicConfigEditModal(ui.Modal):
                     embed=error_embed(f"Account must be a number from 1 to {len(accounts)}."), ephemeral=True
                 )
             acc_number = int(val)
-        if self.mode == "periodicmsg" and new.get("time2") and not new.get("time1"):
+        if self.mode == "spam" and not str(new.get("chid", "")).strip().isdigit():
             return await interaction.followup.send(
-                embed=error_embed("Time 2 needs a Time 1 (start delay) too."), ephemeral=True
+                embed=error_embed("`spam` mode requires a channel ID (chid), digits only."), ephemeral=True
             )
 
         changed = new != current
