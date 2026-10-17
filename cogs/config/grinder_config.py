@@ -9,20 +9,19 @@ from discord.ext import commands
 import firebase_admin
 from firebase_admin import credentials, db
 
-from views.common_views import ConfirmLayout, error_embed, first_text, make_embed, success_embed
+from views.common_views import error_embed, first_text, make_embed, success_embed
 from views.embeds import handle_command_error, send_usage
-from views.grinder_views import ConfigView
+from views.grinder_views import BulkConfirmView, ConfigView
 from .baseconfigs import config_group
 
 # --- CONSTANTS ---
-VALID_MODES = ["autocatch", "spam", "dotcatch", "commaedit", "periodicmsg"]
+VALID_MODES = ["autocatch", "spam", "dotcatch", "commaedit"]
 
 MODE_PARAMS_INFO = {
     "autocatch": {"required": ["Account Index"], "optional": ["Target ID"]},
-    "spam": {"required": ["Account Index", "Target / Channel ID"], "optional": []},
+    "spam": {"required": ["Account Index", "Channel ID"], "optional": []},
     "dotcatch": {"required": ["Account Index", "Channel ID"], "optional": []},
     "commaedit": {"required": ["Account Index", "Channel ID"], "optional": []},
-    "periodicmsg": {"required": ["Account Index", "Channel ID", "Message"], "optional": ["Time 1 (Delay)", "Time 2 (Interval)"]},
 }
 
 # --- FIREBASE SETUP ---
@@ -209,6 +208,30 @@ def format_id_with_name(id_str: str, guild: Optional[discord.Guild] = None) -> s
     return raw_id
 
 
+# --- HELPER: SPLIT AN AUTOCATCH-STYLE TARGET BY CONTENT ---
+def parse_catch_target(target: str) -> dict:
+    """
+    'ids, pokemon names, xxx.json' -> {"ids": [...], "pokemons": [...], "datafiles": [...]}
+    Decided by what each token IS, never by its position:
+      * all-digit token  -> guild / channel id
+      * ends with .json  -> datafile
+      * anything else    -> part of a pokemon name (so 'galarian ponyta' stays a pokemon)
+    """
+    ids, pokemons, datafiles = [], [], []
+    for part in [p.strip() for p in re.split(r"[,;]", target or "") if p.strip()]:
+        name_tokens = []
+        for tok in part.split():
+            if tok.isdigit():
+                ids.append(tok)
+            elif tok.lower().endswith(".json"):
+                datafiles.append(tok)
+            else:
+                name_tokens.append(tok)
+        if name_tokens:
+            pokemons.append(" ".join(name_tokens))
+    return {"ids": ids, "pokemons": pokemons, "datafiles": datafiles}
+
+
 # --- HELPER: PARSE TARGET ASPECTS FOR DISPLAY ---
 def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] = None) -> list[tuple[str, str]]:
     if not target:
@@ -236,7 +259,20 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
         sep = ", " if (has_resolved or all_ids) else " "
         return sep.join(fmt_tokens), has_guild
 
-    # 1) Key-Value style targets ("chid=123, pokes=abc")
+    # 1) autocatch, dotcatch, commaedit: ids / pokemons / datafiles, told apart by content
+    if mode_lower in ["autocatch", "dotcatch", "commaedit"]:
+        parsed = parse_catch_target(target)
+        aspects = []
+        if parsed["ids"]:
+            val, has_guild = format_tokens_and_detect_type(" ".join(parsed["ids"]))
+            aspects.append(("Guild ID" if has_guild else "Chid", val))
+        if parsed["pokemons"]:
+            aspects.append(("Pokemons", ", ".join(parsed["pokemons"])))
+        if parsed["datafiles"]:
+            aspects.append(("Datafile", ", ".join(parsed["datafiles"])))
+        return aspects
+
+    # 2) Key-Value style targets ("chid=123, pokes=abc")
     if "=" in target or ":" in target:
         subparts = [p.strip() for p in re.split(r'[,;]', target) if p.strip()]
         if all("=" in p or ":" in p for p in subparts):
@@ -253,41 +289,8 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
                 aspects.append((label, val if val else val_clean))
             return aspects
 
-    # 2) autocatch, dotcatch, commaedit
-    if mode_lower in ["autocatch", "dotcatch", "commaedit"]:
-        parts = [p.strip() for p in target.split(',') if p.strip()]
-        aspects = []
-        for i, p in enumerate(parts):
-            val, has_guild = format_tokens_and_detect_type(p)
-            if i == 0:
-                label = "Guild ID" if has_guild else "Chid"
-                aspects.append((label, val))
-            elif i == 1:
-                aspects.append(("Pokemons", val))
-            elif i == 2:
-                aspects.append(("Datafile", val))
-            else:
-                aspects.append((f"Arg{i+1}", val))
-        return aspects
-
-    # 3) periodicmsg
-    elif mode_lower == "periodicmsg":
-        parts = [p.strip() for p in re.split(r'[,;]', target) if p.strip()]
-        labels = ["Chid", "Message", "Time1", "Time2"]
-        aspects = []
-        for i, part in enumerate(parts):
-            lbl = labels[i] if i < len(labels) else f"Arg{i+1}"
-            if i == 0 or lbl.lower() in ["chid", "channel"]:
-                val, has_guild = format_tokens_and_detect_type(part)
-                if has_guild and lbl == "Chid":
-                    lbl = "Guild ID"
-            else:
-                val = part
-            aspects.append((lbl, val))
-        return aspects
-
-    # 4) spam
-    elif mode_lower == "spam":
+    # 3) spam (channel id only)
+    if mode_lower == "spam":
         parts = [p.strip() for p in re.split(r'[,;]', target) if p.strip()]
         if not parts:
             parts = [p.strip() for p in target.split() if p.strip()]
@@ -298,7 +301,7 @@ def parse_target_aspects(mode: str, target: str, guild: Optional[discord.Guild] 
             aspects.append((lbl, val))
         return aspects
 
-    # 5) Custom / Other modes
+    # 4) Custom / Other modes
     else:
         parts = [p.strip() for p in re.split(r'[,;]', target) if p.strip()]
         if not parts:
@@ -325,16 +328,11 @@ def get_config_details(cfg: dict) -> dict:
         "chid": aspects.get("chid", aspects.get("guild id", aspects.get("target id", ""))),
         "pokemons": aspects.get("pokemons", ""),
         "datafile": aspects.get("datafile", ""),
-        "message": aspects.get("message", ""),
-        "time1": aspects.get("time1", ""),
-        "time2": aspects.get("time2", ""),
         "target": target_str
     }
 
     if mode == "spam" and not details["chid"]:
         details["chid"] = target_str
-    elif mode == "periodicmsg" and not details["message"] and "args" in aspects:
-        details["message"] = aspects["args"]
 
     return details
 
@@ -360,19 +358,6 @@ def build_target_string_for_mode(mode: str, fields: dict) -> tuple[str, bool]:
 
         return ", ".join(parts), False
 
-    elif mode_lower == "periodicmsg":
-        chid = str(fields.get("chid", "") or "").strip()
-        msg = str(fields.get("message", "") or "").strip()
-        t1 = str(fields.get("time1", "") or "").strip()
-        t2 = str(fields.get("time2", "") or "").strip()
-
-        parts = [chid, msg]
-        if t1:
-            parts.append(t1)
-        if t2:
-            parts.append(t2)
-        return " ; ".join([p for p in parts if p]), False
-
     elif mode_lower == "spam":
         target = str(fields.get("chid", fields.get("target", "")) or "").strip()
         return target, False
@@ -395,23 +380,13 @@ class EditField(NamedTuple):
 
 
 def _split_catch_target(target: str) -> dict:
-    """Raw split of 'chid, pokemons, datafile' (no name lookups, safe to write back)."""
-    parts = [p.strip() for p in target.split(",") if p.strip()]
-    chid = parts[0] if parts else ""
-    rest = parts[1:]
-    datafile = ""
-    if rest:
-        tokens = rest[-1].split()
-        tail = []
-        while tokens and tokens[-1].lower().endswith(".json"):
-            tail.insert(0, tokens.pop())
-        if tail:
-            datafile = " ".join(tail)
-            rest[-1] = " ".join(tokens)
-            rest = [p for p in rest if p]
-        elif len(rest) >= 2:
-            datafile = rest.pop()
-    return {"chid": chid, "pokemons": ", ".join(rest), "datafile": datafile}
+    """Raw split into chid / pokemons / datafile by content (no name lookups, safe to write back)."""
+    p = parse_catch_target(target)
+    return {
+        "chid": " ".join(p["ids"]),
+        "pokemons": ", ".join(p["pokemons"]),
+        "datafile": " ".join(p["datafiles"]),
+    }
 
 
 def get_editable_fields(cfg: dict, accounts: list) -> list[EditField]:
@@ -429,19 +404,8 @@ def get_editable_fields(cfg: dict, accounts: list) -> list[EditField]:
         if mode == "autocatch" or p["datafile"]:
             fields.append(EditField("datafile", "Datafile(s)", p["datafile"]))
 
-    elif mode == "periodicmsg":
-        sep = ";" if ";" in target else ","
-        parts = [p.strip() for p in target.split(sep)]
-        parts += [""] * (4 - len(parts))
-        fields += [
-            EditField("chid", "Channel ID", parts[0]),
-            EditField("message", "Message", parts[1], paragraph=True),
-            EditField("time1", "Start Delay (Time 1)", parts[2]),
-            EditField("time2", "Interval (Time 2)", parts[3]),
-        ]
-
     elif mode == "spam":
-        fields.append(EditField("target", "Target / Channel ID", target))
+        fields.append(EditField("chid", "Channel ID (required)", target))
 
     else:
         parts = [p.strip() for p in re.split(r"[,;]", target) if p.strip()]
@@ -465,7 +429,7 @@ def build_target_from_values(mode: str, values: dict) -> str:
         files = [f for f in re.split(r"[,\s]+", str(v.get("datafile", ""))) if f]
         v["datafile"] = " ".join(f if f.lower().endswith(".json") else f"{f}.json" for f in files)
         return build_target_string_for_mode(mode, v)[0]
-    if mode in ("periodicmsg", "spam"):
+    if mode == "spam":
         return build_target_string_for_mode(mode, values)[0]
     arg_keys = sorted(k for k in values if k.startswith("arg"))
     return ", ".join(str(values[k]).strip() for k in arg_keys if str(values[k]).strip())
@@ -894,15 +858,15 @@ async def grindconfig(ctx: commands.Context):
 
 @grindconfig.command(name="add", aliases=["a"], description="Adds a grinder mode configuration (owner only).")
 @app_commands.describe(
-    mode="Mode to add (autocatch, spam, dotcatch, commaedit or periodicmsg).",
+    mode="Mode to add (autocatch, spam, dotcatch or commaedit).",
     acc_idx="Account number to use (1-based).",
-    args="Mode arguments separated by commas (channel ID, message, times...).",
+    args="Mode arguments separated by commas (channel ID, pokemons, datafile.json...).",
 )
 @app_commands.choices(mode=[app_commands.Choice(name=m, value=m) for m in VALID_MODES])
 @commands.is_owner()
 async def grindconfig_add(
     ctx: commands.Context,
-    mode: str = commands.parameter(description="Mode name (autocatch, spam, dotcatch, commaedit, periodicmsg)."),
+    mode: str = commands.parameter(description="Mode name (autocatch, spam, dotcatch, commaedit)."),
     acc_idx: int = commands.parameter(description="Account index (1-based)."),
     *,
     args: str = commands.parameter(default="", description="Arguments separated by commas.")
@@ -936,22 +900,14 @@ async def grindconfig_add(
     arg_list = [a.strip() for a in args.split(",") if a.strip()]
 
     # Validate mode-specific required arguments
-    if mode_lower == "spam" and not arg_list:
-        await ctx.reply(embed=error_embed("Missing required argument: Target / Channel ID for `spam` mode."), mention_author=False)
+    if mode_lower == "spam" and (not arg_list or not arg_list[0].isdigit()):
+        await ctx.reply(embed=error_embed("`spam` mode requires a channel ID (chid), e.g. `.c g a spam 1 123456789012345678`."), mention_author=False)
         return
     elif mode_lower in ["dotcatch", "commaedit"] and not arg_list:
         await ctx.reply(embed=error_embed(f"Missing required argument: Channel ID for `{mode_lower}` mode."), mention_author=False)
         return
-    elif mode_lower == "periodicmsg" and len(arg_list) < 2:
-        await ctx.reply(embed=error_embed(
-            "Missing required arguments for `periodicmsg` mode. Format: `{channel_id}, {message}, [time1], [time2]`"
-        ), mention_author=False)
-        return
 
-    if mode_lower == "periodicmsg":
-        target_str = " ; ".join(arg_list)
-    else:
-        target_str = ", ".join(arg_list)
+    target_str = arg_list[0] if mode_lower == "spam" else ", ".join(arg_list)
 
     guild_id = str(ctx.guild.id)
     configs = await get_guild_configs(guild_id)
@@ -1054,9 +1010,9 @@ class GrinderCog(commands.Cog):
 
     @grindconfig_cog.command(name="add", aliases=["a"], description="Adds a grinder mode configuration (owner only).")
     @app_commands.describe(
-        mode="Mode to add (autocatch, spam, dotcatch, commaedit or periodicmsg).",
+        mode="Mode to add (autocatch, spam, dotcatch or commaedit).",
         acc_idx="Account number to use (1-based).",
-        args="Mode arguments separated by commas (channel ID, message, times...).",
+        args="Mode arguments separated by commas (channel ID, pokemons, datafile.json...).",
     )
     @app_commands.choices(mode=[app_commands.Choice(name=m, value=m) for m in VALID_MODES])
     @commands.is_owner()
@@ -1169,13 +1125,8 @@ class GrinderCog(commands.Cog):
             if duration:
                 embed.add_field(name="⏱️ Duration", value=f"**{duration}** (resumes <t:{int(pause_until / 1000)}:R>)", inline=False)
 
-            confirm_view = ConfirmLayout(
-                ctx.author,
-                embed=embed,
-                cancel_text="❌ Cancelled.",
-                timeout_text="⏰ Timed out.",
-            )
-            await confirm_view.send(ctx)
+            confirm_view = BulkConfirmView(ctx.author, confirm_label="Pause")
+            confirm_view.message = await ctx.reply(embed=embed, view=confirm_view, mention_author=False)
             await confirm_view.wait()
 
             if confirm_view.value is True:
@@ -1186,7 +1137,7 @@ class GrinderCog(commands.Cog):
                 await save_guild_configs(guild_id, configs)
 
                 dur_str = f" for **{duration}** (resumes <t:{int(pause_until / 1000)}:R>)" if duration else " indefinitely"
-                await confirm_view.show(make_embed(description=f"⏸️ Paused **{len(target_indices)}** configuration(s){dur_str}."))
+                await confirm_view.finish(make_embed(description=f"⏸️ Paused **{len(target_indices)}** configuration(s){dur_str}."))
             return
 
         idx = target_indices[0]
@@ -1297,13 +1248,8 @@ class GrinderCog(commands.Cog):
                 color=discord.Color.green()
             )
 
-            confirm_view = ConfirmLayout(
-                ctx.author,
-                embed=embed,
-                cancel_text="❌ Cancelled.",
-                timeout_text="⏰ Timed out.",
-            )
-            await confirm_view.send(ctx)
+            confirm_view = BulkConfirmView(ctx.author, confirm_label="Resume")
+            confirm_view.message = await ctx.reply(embed=embed, view=confirm_view, mention_author=False)
             await confirm_view.wait()
 
             if confirm_view.value is True:
@@ -1313,7 +1259,7 @@ class GrinderCog(commands.Cog):
 
                 await save_guild_configs(guild_id, configs)
 
-                await confirm_view.show(make_embed(description=f"▶️ Resumed **{len(target_indices)}** configuration(s)."))
+                await confirm_view.finish(make_embed(description=f"▶️ Resumed **{len(target_indices)}** configuration(s)."))
             return
 
         idx = target_indices[0]
