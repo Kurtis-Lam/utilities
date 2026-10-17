@@ -1176,7 +1176,7 @@ class GrinderCog(commands.Cog):
         aliases=["r"],
         description="Resumes grinder configs: all, or the numbers you list (owner only).",
     )
-    @app_commands.describe(raw_args="Config numbers to resume. Leave blank to resume all.")
+    @app_commands.describe(raw_args="Config numbers and/or a delay (30s, 2h, 1d) to resume after. Blank = resume all now.")
     @commands.is_owner()
     async def resume(
         self,
@@ -1196,7 +1196,10 @@ class GrinderCog(commands.Cog):
             await ctx.reply(embed=error_embed("No configs in this server."), mention_author=False)
             return
 
-        indices, _ = parse_indices_and_duration(raw_args)
+        indices, duration = parse_indices_and_duration(raw_args)
+        resume_at = None
+        if duration is not None:
+            resume_at = int((time.time() + parse_duration(duration)) * 1000)
 
         if not indices:
             target_indices = list(range(1, len(configs) + 1))
@@ -1214,8 +1217,16 @@ class GrinderCog(commands.Cog):
             await ctx.reply(embed=error_embed("No valid configs."), mention_author=False)
             return
 
+        # A delayed resume only makes sense for configs that are paused right now.
+        if resume_at is not None:
+            target_indices = [i for i in target_indices if configs[i - 1].get("paused")]
+            if not target_indices:
+                await ctx.reply(embed=error_embed("None of those configs are paused."), mention_author=False)
+                return
+
         g_data = await get_global_data()
         accounts = g_data.get("accounts", [])
+        when_str = f" in **{duration}** (<t:{int(resume_at / 1000)}:R>)" if resume_at is not None else ""
 
         if len(target_indices) > 1:
             lines = []
@@ -1244,7 +1255,7 @@ class GrinderCog(commands.Cog):
 
             embed = discord.Embed(
                 title="⚠️ Resume",
-                description=f"Resume **{len(target_indices)}** config(s)?\n\n" + "\n".join(lines),
+                description=f"Resume **{len(target_indices)}** config(s){when_str}?\n\n" + "\n".join(lines),
                 color=discord.Color.green()
             )
 
@@ -1254,18 +1265,28 @@ class GrinderCog(commands.Cog):
 
             if confirm_view.value is True:
                 for idx in target_indices:
-                    configs[idx - 1]["paused"] = False
-                    configs[idx - 1]["pauseUntil"] = None
+                    if resume_at is not None:
+                        # stay paused; the pauseUntil timer auto-resumes it at resume_at
+                        configs[idx - 1]["paused"] = True
+                        configs[idx - 1]["pauseUntil"] = resume_at
+                    else:
+                        configs[idx - 1]["paused"] = False
+                        configs[idx - 1]["pauseUntil"] = None
 
                 await save_guild_configs(guild_id, configs)
 
-                await confirm_view.finish(make_embed(description=f"▶️ Resumed **{len(target_indices)}** configuration(s)."))
+                verb = "Will resume" if resume_at is not None else "Resumed"
+                await confirm_view.finish(make_embed(description=f"▶️ {verb} **{len(target_indices)}** configuration(s){when_str}."))
             return
 
         idx = target_indices[0]
         cfg_idx = idx - 1
-        configs[cfg_idx]["paused"] = False
-        configs[cfg_idx]["pauseUntil"] = None
+        if resume_at is not None:
+            configs[cfg_idx]["paused"] = True
+            configs[cfg_idx]["pauseUntil"] = resume_at
+        else:
+            configs[cfg_idx]["paused"] = False
+            configs[cfg_idx]["pauseUntil"] = None
 
         await save_guild_configs(guild_id, configs)
 
@@ -1282,7 +1303,8 @@ class GrinderCog(commands.Cog):
                 tok = accounts[acc_idx - 1]
 
         acc_str = f"Acc #{acc_idx}" if acc_idx > 0 else "Removed Acc"
-        await ctx.reply(embed=make_embed(description=f"▶️ Resumed Config **#{idx}** (`{mode}` | {acc_str})."), mention_author=False)
+        verb = "Will resume" if resume_at is not None else "Resumed"
+        await ctx.reply(embed=make_embed(description=f"▶️ {verb} Config **#{idx}** (`{mode}` | {acc_str}){when_str}."), mention_author=False)
 
     @commands.hybrid_command(
         name="syncguilds",
