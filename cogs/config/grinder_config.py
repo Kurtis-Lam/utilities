@@ -871,7 +871,7 @@ async def grindconfig_add(
     *,
     args: str = commands.parameter(default="", description="Arguments separated by commas.")
 ):
-    """Add a mode configuration: .c g a {mode} {account index} {args separated by commas}"""
+    """Add a mode configuration: .config grinder add {mode} {account index} {args separated by commas}"""
     if not ctx.guild:
         await ctx.reply(embed=error_embed("Server only."), mention_author=False)
         return
@@ -901,7 +901,7 @@ async def grindconfig_add(
 
     # Validate mode-specific required arguments
     if mode_lower == "spam" and (not arg_list or not arg_list[0].isdigit()):
-        await ctx.reply(embed=error_embed("`spam` mode requires a channel ID (chid), e.g. `.c g a spam 1 123456789012345678`."), mention_author=False)
+        await ctx.reply(embed=error_embed("`spam` mode requires a channel ID (chid), e.g. `.config grinder add spam 1 123456789012345678`."), mention_author=False)
         return
     elif mode_lower in ["dotcatch", "commaedit"] and not arg_list:
         await ctx.reply(embed=error_embed(f"Missing required argument: Channel ID for `{mode_lower}` mode."), mention_author=False)
@@ -939,9 +939,9 @@ async def grindconfig_add(
 @commands.is_owner()
 async def grindconfig_remove(
     ctx: commands.Context,
-    index: int = commands.parameter(description="Index displayed in .c g.")
+    index: int = commands.parameter(description="Index shown by `.config grinder`.")
 ):
-    """Remove a mode configuration: .c g r {index}"""
+    """Remove a mode configuration: .config grinder remove {index}"""
     if not ctx.guild:
         await ctx.reply(embed=error_embed("Server only."), mention_author=False)
         return
@@ -977,66 +977,67 @@ async def grindconfig_remove(
     ), mention_author=False)
 
 
-async def _config_command_error(ctx: commands.Context, error: Exception):
-    await handle_command_error(ctx, error)
+@grindconfig.command(
+    name="syncguilds",
+    aliases=["sync", "sg"],
+    description="Copies grinder configs, excludes and logs to another server (owner only).",
+)
+@app_commands.describe(
+    from_guild="ID of the server to copy from.",
+    to_guild="ID of the server to copy to.",
+)
+@commands.is_owner()
+async def grindconfig_syncguilds(
+    ctx: commands.Context,
+    from_guild: str = commands.parameter(description="Source server ID."),
+    to_guild: str = commands.parameter(description="Target server ID."),
+):
+    """Copy configs (except SPAM), excludes and logs to another server."""
+    from_id = re.sub(r'\D', '', str(from_guild))
+    to_id = re.sub(r'\D', '', str(to_guild))
+
+    if not from_id or not to_id:
+        await send_usage(ctx, note="Give two valid server IDs.")
+        return
+
+    if from_id == to_id:
+        await ctx.reply(embed=error_embed("IDs must differ."), mention_author=False)
+        return
+
+    source_configs = await get_guild_configs(from_id)
+    source_excludes = await get_guild_excludes(from_id)
+    source_logs = await get_guild_logs(from_id)
+
+    if not source_configs and not source_excludes and not source_logs:
+        await ctx.reply(embed=error_embed(f"Nothing to sync from {from_id}."), mention_author=False)
+        return
+
+    if source_configs:
+        source_non_spam = [cfg for cfg in source_configs if cfg.get("mode", "").lower() != "spam"]
+        target_configs = await get_guild_configs(to_id)
+        target_spam = [cfg for cfg in target_configs if cfg.get("mode", "").lower() == "spam"]
+        
+        merged_configs = target_spam + source_non_spam
+        await save_guild_configs(to_id, merged_configs)
+
+    if source_excludes:
+        await save_guild_excludes(to_id, source_excludes)
+
+    if source_logs:
+        await save_guild_logs(to_id, source_logs)
+
+    await ctx.reply(embed=success_embed(
+        f"Synced configs (no SPAM), excludes and logs: `{from_id}` → `{to_id}`."
+    ), mention_author=False)
 
 
-grindconfig.error(_config_command_error)
-grindconfig_add.error(_config_command_error)
-grindconfig_remove.error(_config_command_error)
-
-
-# --- COG DEFINITION ---
+# --- STANDALONE COMMANDS (.pause / .resume work without `.config grinder`) ---
 class GrinderCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     async def cog_command_error(self, ctx: commands.Context, error: Exception):
-        """Every command in this cog: embeds for errors, how-to-use embed for missing arguments."""
         await handle_command_error(ctx, error)
-
-    @commands.hybrid_group(
-        name="grindconfig",
-        aliases=["gc", "g"],
-        fallback="view",
-        invoke_without_command=True,
-        description="Shows the grinder mode configurations of this server (owner only).",
-    )
-    @commands.is_owner()
-    async def grindconfig_cog(self, ctx: commands.Context):
-        """Top-level command alias for viewing server configs."""
-        if ctx.invoked_subcommand is None:
-            await grindconfig(ctx)
-
-    @grindconfig_cog.command(name="add", aliases=["a"], description="Adds a grinder mode configuration (owner only).")
-    @app_commands.describe(
-        mode="Mode to add (autocatch, spam, dotcatch or commaedit).",
-        acc_idx="Account number to use (1-based).",
-        args="Mode arguments separated by commas (channel ID, pokemons, datafile.json...).",
-    )
-    @app_commands.choices(mode=[app_commands.Choice(name=m, value=m) for m in VALID_MODES])
-    @commands.is_owner()
-    async def grindconfig_cog_add(
-        self,
-        ctx: commands.Context,
-        mode: str = commands.parameter(description="Mode name."),
-        acc_idx: int = commands.parameter(description="Account index."),
-        *,
-        args: str = commands.parameter(default="", description="Arguments separated by commas.")
-    ):
-        """Add a mode configuration."""
-        await grindconfig_add(ctx, mode, acc_idx, args=args)
-
-    @grindconfig_cog.command(name="remove", aliases=["r"], description="Removes a grinder mode configuration (owner only).")
-    @app_commands.describe(index="Number of the config to remove (shown by the grindconfig view).")
-    @commands.is_owner()
-    async def grindconfig_cog_remove(
-        self,
-        ctx: commands.Context,
-        index: int = commands.parameter(description="Index displayed in .c g.")
-    ):
-        """Remove a mode configuration by its index."""
-        await grindconfig_remove(ctx, index)
 
     @commands.hybrid_command(
         name="pause",
@@ -1098,7 +1099,7 @@ class GrinderCog(commands.Cog):
                 cfg = configs[idx - 1]
                 tok = cfg.get("token")
                 acc_idx = 0
-                
+            
                 if tok and tok in accounts:
                     acc_idx = accounts.index(tok) + 1
                 elif not tok and "accIndex" in cfg:
@@ -1148,7 +1149,7 @@ class GrinderCog(commands.Cog):
         await save_guild_configs(guild_id, configs)
 
         mode = configs[cfg_idx].get("mode", "unknown")
-        
+    
         cfg = configs[cfg_idx]
         tok = cfg.get("token")
         acc_idx = 0
@@ -1170,6 +1171,7 @@ class GrinderCog(commands.Cog):
             await ctx.reply(embed=make_embed(
                 description=f"⏸️ Paused Config **#{idx}** (`{mode}` | {acc_str}) indefinitely."
             ), mention_author=False)
+
 
     @commands.hybrid_command(
         name="resume",
@@ -1234,7 +1236,7 @@ class GrinderCog(commands.Cog):
                 cfg = configs[idx - 1]
                 tok = cfg.get("token")
                 acc_idx = 0
-                
+            
                 if tok and tok in accounts:
                     acc_idx = accounts.index(tok) + 1
                 elif not tok and "accIndex" in cfg:
@@ -1291,7 +1293,7 @@ class GrinderCog(commands.Cog):
         await save_guild_configs(guild_id, configs)
 
         mode = configs[cfg_idx].get("mode", "unknown")
-        
+    
         cfg = configs[cfg_idx]
         tok = cfg.get("token")
         acc_idx = 0
@@ -1306,59 +1308,18 @@ class GrinderCog(commands.Cog):
         verb = "Will resume" if resume_at is not None else "Resumed"
         await ctx.reply(embed=make_embed(description=f"▶️ {verb} Config **#{idx}** (`{mode}` | {acc_str}){when_str}."), mention_author=False)
 
-    @commands.hybrid_command(
-        name="syncguilds",
-        aliases=["sg"],
-        description="Copies grinder configs, excludes and logs to another server (owner only).",
-    )
-    @app_commands.describe(
-        from_guild="ID of the server to copy from.",
-        to_guild="ID of the server to copy to.",
-    )
-    @commands.is_owner()
-    async def syncguilds(
-        self,
-        ctx: commands.Context,
-        from_guild: str = commands.parameter(description="Source server ID."),
-        to_guild: str = commands.parameter(description="Target server ID."),
-    ):
-        """Copy configs (except SPAM), excludes and logs to another server."""
-        from_id = re.sub(r'\D', '', str(from_guild))
-        to_id = re.sub(r'\D', '', str(to_guild))
 
-        if not from_id or not to_id:
-            await send_usage(ctx, note="Give two valid server IDs.")
-            return
+async def _config_command_error(ctx: commands.Context, error: Exception):
+    await handle_command_error(ctx, error)
 
-        if from_id == to_id:
-            await ctx.reply(embed=error_embed("IDs must differ."), mention_author=False)
-            return
 
-        source_configs = await get_guild_configs(from_id)
-        source_excludes = await get_guild_excludes(from_id)
-        source_logs = await get_guild_logs(from_id)
-
-        if not source_configs and not source_excludes and not source_logs:
-            await ctx.reply(embed=error_embed(f"Nothing to sync from {from_id}."), mention_author=False)
-            return
-
-        if source_configs:
-            source_non_spam = [cfg for cfg in source_configs if cfg.get("mode", "").lower() != "spam"]
-            target_configs = await get_guild_configs(to_id)
-            target_spam = [cfg for cfg in target_configs if cfg.get("mode", "").lower() == "spam"]
-            
-            merged_configs = target_spam + source_non_spam
-            await save_guild_configs(to_id, merged_configs)
-
-        if source_excludes:
-            await save_guild_excludes(to_id, source_excludes)
-
-        if source_logs:
-            await save_guild_logs(to_id, source_logs)
-
-        await ctx.reply(embed=success_embed(
-            f"Synced configs (no SPAM), excludes and logs: `{from_id}` → `{to_id}`."
-        ), mention_author=False)
+for _cmd in (
+    grindconfig,
+    grindconfig_add,
+    grindconfig_remove,
+    grindconfig_syncguilds,
+):
+    _cmd.error(_config_command_error)
 
 
 async def setup(bot: commands.Bot):
