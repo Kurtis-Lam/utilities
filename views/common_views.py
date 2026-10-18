@@ -223,7 +223,18 @@ def container_from_embed(
         head.append(f"## {embed.title}")
     if embed.description:
         head.append(embed.description)
-    body = [f"**{field.name}**\n{field.value}" for field in embed.fields]
+    body: list[str] = []
+    inline_run: list[str] = []
+    for field in embed.fields:
+        if field.inline:
+            inline_run.append(f"**{field.name}:** {field.value}")
+            continue
+        if inline_run:
+            body.append("  \u2022  ".join(inline_run))
+            inline_run = []
+        body.append(f"**{field.name}**\n{field.value}")
+    if inline_run:
+        body.append("  \u2022  ".join(inline_run))
     footer = f"-# {embed.footer.text}" if embed.footer and embed.footer.text else ""
 
     budget = 3900 - len(footer)
