@@ -197,7 +197,7 @@ class VerificationConfigView(EmbedLayout):
     def __init__(self, cog, config: dict, guild: discord.Guild, author_id: int):
         super().__init__(verification_config_embed(config, guild), author_id=author_id, timeout=300)
         self.cog, self.config, self.guild = cog, config, guild
-        self.channel_select = ChannelSelect(channel_types=[discord.ChannelType.text], placeholder="Choose verification channel")
+        self.channel_select = ChannelSelect(channel_types=[discord.ChannelType.text, discord.ChannelType.news], placeholder="Choose verification channel")
         self.channel_select.callback = self.select_channel
         self.role_select = RoleSelect(placeholder="Choose unverified role", min_values=1, max_values=1)
         self.role_select.callback = self.select_role
@@ -300,7 +300,7 @@ class VerificationConfigView(EmbedLayout):
     async def post_panel(self, interaction: discord.Interaction):
         config = await self.cog.get_config(interaction.guild.id)
         channel = interaction.guild.get_channel(int(config.get("verify_channel_id") or 0))
-        if not isinstance(channel, (discord.TextChannel, discord.NewsChannel)):
+        if not isinstance(channel, discord.TextChannel):
             return await interaction.response.send_message(embed=error_embed("Set a text verification channel first."), ephemeral=True)
         message = await self.cog.post_verification_panel(interaction.guild, channel, config)
         if message is None:
