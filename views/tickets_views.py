@@ -357,11 +357,11 @@ class TicketMessageSettingsModal(Modal, title="Ticket Messages"):
 
 
 class TicketSecuritySettingsModal(Modal, title="Ticket Limits & Controls"):
-    max_open = TextInput(label="Maximum open tickets per member (0 = unlimited)", required=True, max_length=3)
+    max_open = TextInput(label="Max open tickets per member (0 = unlimited)", required=True, max_length=3)
     allow_user_close = TextInput(label="Allow ticket creator to close? (true/false)", required=True, max_length=5)
     allow_claim = TextInput(label="Enable ticket claim button? (true/false)", required=True, max_length=5)
     transcripts = TextInput(label="Generate transcripts on close? (true/false)", required=True, max_length=5)
-    deletion_delay = TextInput(label="Delete closed ticket after minutes (0 = never)", required=True, max_length=4)
+    deletion_delay = TextInput(label="Delete closed ticket after min (0 = never)", required=True, max_length=4)
 
     def __init__(self, dashboard: TicketDashboardView):
         super().__init__()
