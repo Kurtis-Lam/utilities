@@ -833,7 +833,7 @@ async def refresh_config_embed(interaction: discord.Interaction, override_page: 
 # --- CONFIG GROUP SUBCOMMANDS ---
 @commands.hybrid_group(
     name="grinder",
-    aliases=["g", "grind"],
+    aliases=["grind"],
     fallback="view",
     invoke_without_command=True,
     description="Shows the grinder mode configurations of this server (owner only).",
