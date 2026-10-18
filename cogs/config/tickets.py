@@ -80,7 +80,7 @@ def _channel_slug(template: str, user: discord.abc.User, number: int, option_lab
 
 
 @app_commands.default_permissions(administrator=True)
-@commands.hybrid_command(name="tickets", aliases=["ticketsetup"], description="Configure and publish support ticket panels.")
+@commands.hybrid_command(name="tickets", aliases=["ticket", "ticketsetup"], description="Configure and publish support ticket panels.")
 @commands.guild_only()
 @commands.has_permissions(administrator=True)
 async def tickets_command(ctx: commands.Context):
