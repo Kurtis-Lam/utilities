@@ -44,20 +44,25 @@ FIELD_CHAR_LIMIT = 1000
 
 USER, ADMIN, OWNER = 0, 1, 2   # access levels
 POKETWO = 3                     # display section only (not an access level)
+AI = 4                          # display section only (not an access level)
 
 SECTIONS = {
     USER: ("", "User Commands"),
     ADMIN: ("", "Admin Commands"),
     POKETWO: ("", "Pokétwo Commands"),
+    AI: ("", "AI Commands"),
     OWNER: ("", "Owner Commands"),
 }
-SECTION_ORDER = (USER, ADMIN, POKETWO, OWNER)
+SECTION_ORDER = (USER, ADMIN, POKETWO, AI, OWNER)
 MARKERS = {USER: "", ADMIN: "*", OWNER: "***"}
 LEGEND = {ADMIN: "* Admin only", OWNER: "*** Owner only"}
 
 # Admin-only marker used inside the Poketwo section / on Poketwo commands.
 POKETWO_ADMIN_MARKER = "(admin)"
 POKETWO_ADMIN_LEGEND = f"{POKETWO_ADMIN_MARKER} Admin only"
+
+# Commands that never appear in .help (qualified names). Their subcommands are hidden too.
+HELP_HIDDEN = {"grinder", "pause", "resume", "config grinder"}
 
 # Show the Admin Commands section to everybody (False = only to people who can run them).
 SHOW_ADMIN_COMMANDS_TO_EVERYONE = True
@@ -102,7 +107,7 @@ HELP_CATEGORIES: dict[str, list[str]] = {
         "echo", "stick", "unstick", "sticks",
     ],
     "Giveaway": ["giveaway"],
-    "AI Chatbot": ["ai"],
+    "AI": ["ai"],
     "Configurations": ["config"],
     "Pokétwo Pings": ["sh", "cl", "tp", "rp", "reserves"],
     "Pokétwo Helper": [
@@ -112,13 +117,17 @@ HELP_CATEGORIES: dict[str, list[str]] = {
     "Pokétwo Management": ["set", "toggle", "settings", "channelsettings", "serversettings"],
     "Pokétwo Utils": ["catchtime", "dex", "extract"],
     "Utilities": ["remind", "timer", "reminders"],
-    "Grinder": ["grindconfig", "pause", "resume", "syncguilds"],
+    "Grinder": ["syncguilds"],
     "Bot": ["stats", "gitstats", "pull", "reload", "restart", "sync"],
 }
 OTHER_CATEGORY = "Other"
 
 # Categories that are shown in the "Poketwo Commands" section instead of User / Admin.
 POKETWO_CATEGORIES = {"Pokétwo Pings", "Pokétwo Helper", "Pokétwo Management", "Pokétwo Utils"}
+
+# Categories shown in their own section where every subcommand is listed individually and
+# admin-only ones are tagged "(admin)", just like the Poketwo section.
+AI_CATEGORIES = {"AI"}
 
 CATEGORY_OF = {name: title for title, names in HELP_CATEGORIES.items() for name in names}
 CATEGORY_ORDER = {title: index for index, title in enumerate(HELP_CATEGORIES)}
@@ -148,23 +157,31 @@ def _in_poketwo(cmd: commands.Command) -> bool:
     return CATEGORY_OF.get(root.name) in POKETWO_CATEGORIES
 
 
+def _in_ai(cmd: commands.Command) -> bool:
+    """True if the command belongs to one of the AI categories."""
+    root = cmd.root_parent or cmd
+    return CATEGORY_OF.get(root.name) in AI_CATEGORIES
+
+
 def section_of(cmd: commands.Command, level: int) -> int:
-    """Overview section: owner commands always stay under Owner, Poketwo commands go to Poketwo."""
+    """Overview section: owner commands always stay under Owner, Poketwo and AI commands go to their own section."""
     if level == OWNER:
         return OWNER
+    if _in_ai(cmd):
+        return AI
     return POKETWO if _in_poketwo(cmd) else level
 
 
 def _tag(cmd: commands.Command, level: int, *, md: bool = False) -> str:
     """Access marker of a command: '(admin)' for admin-only Poketwo commands, else '', '*' or '***'."""
-    if level == ADMIN and _in_poketwo(cmd):
+    if level == ADMIN and (_in_poketwo(cmd) or _in_ai(cmd)):
         return POKETWO_ADMIN_MARKER
     return _marker_md(level) if md else _marker(level)
 
 
 def _legend(cmd: commands.Command, level: int) -> str:
     """Legend text matching `_tag`."""
-    if level == ADMIN and _in_poketwo(cmd):
+    if level == ADMIN and (_in_poketwo(cmd) or _in_ai(cmd)):
         return POKETWO_ADMIN_LEGEND
     return LEGEND[level]
 
@@ -181,7 +198,7 @@ def _marker_md(level: int) -> str:
 
 def _is_hidden(cmd: commands.Command) -> bool:
     while cmd is not None:
-        if cmd.hidden:
+        if cmd.hidden or cmd.qualified_name in HELP_HIDDEN:
             return True
         cmd = cmd.parent
     return False
@@ -283,7 +300,10 @@ class Help(commands.Cog):
             if _is_hidden(cmd):
                 continue
             level = access_level(cmd)
-            if cmd.parent is not None and level == access_level(cmd.parent):
+            if _in_ai(cmd):
+                if cmd.parent is None:
+                    continue  # the AI group itself is replaced by its subcommands
+            elif cmd.parent is not None and level == access_level(cmd.parent):
                 continue  # already covered by its parent group
             if not await self._visible(cmd, ctx, level, owner):
                 continue
@@ -301,12 +321,12 @@ class Help(commands.Cog):
             for category in sorted(categories, key=lambda c: CATEGORY_ORDER.get(c, len(CATEGORY_ORDER))):
                 cmds = sorted(
                     categories[category],
-                    key=lambda c: (COMMAND_ORDER.get((c.root_parent or c).name, 10**6), c.qualified_name),
+                    key=lambda c: (COMMAND_ORDER.get((c.root_parent or c).name, 10**6), access_level(c), c.qualified_name),
                 )
                 names = []
                 for c in cmds:
                     entry = f"`{prefix}{c.qualified_name}`"
-                    if section == POKETWO and access_level(c) == ADMIN:
+                    if section in (POKETWO, AI) and access_level(c) == ADMIN:
                         entry += f" {POKETWO_ADMIN_MARKER}"
                     names.append(entry)
                 # Inside the Poketwo section the "Pokétwo " prefix is redundant.
@@ -436,7 +456,7 @@ class Help(commands.Cog):
         used_legends: dict[str, None] = {}
         if isinstance(cmd, commands.Group):
             for sub in sorted(cmd.commands, key=lambda c: c.name):
-                if sub.hidden:
+                if _is_hidden(sub):
                     continue
                 sub_level = access_level(sub)
                 if not await self._visible(sub, ctx, sub_level, owner):
