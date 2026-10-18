@@ -145,7 +145,7 @@ class Verification(commands.Cog):
         self,
         guild: discord.Guild,
         channel: object,
-    ) -> discord.TextChannel | discord.NewsChannel:
+    ) -> discord.TextChannel:
         """Resolve UI channel-select wrappers to a real guild channel object."""
         channel_id = getattr(channel, "id", None)
         if channel_id is None:
@@ -158,11 +158,11 @@ class Verification(commands.Cog):
             except discord.NotFound as exc:
                 raise ValueError("The selected channel no longer exists in this server.") from exc
 
-        if not isinstance(resolved, (discord.TextChannel, discord.NewsChannel)):
+        if not isinstance(resolved, discord.TextChannel):
             raise ValueError("The verification channel must be a server text or announcement channel.")
         return resolved
 
-    async def _snapshot_verify_channel(self, guild: discord.Guild, channel: discord.TextChannel | discord.NewsChannel, config: dict):
+    async def _snapshot_verify_channel(self, guild: discord.Guild, channel: discord.TextChannel, config: dict):
         backups = dict(config.get("verify_channel_backups", {}))
         key = str(channel.id)
         if key not in backups:
@@ -175,7 +175,7 @@ class Verification(commands.Cog):
 
     async def _restore_previous_verify_channel(self, guild: discord.Guild, previous_channel_id: int, config: dict, role: discord.Role | None):
         channel = guild.get_channel(previous_channel_id)
-        if not isinstance(channel, (discord.TextChannel, discord.NewsChannel)):
+        if not isinstance(channel, discord.TextChannel):
             return
         backups = config.get("verify_channel_backups", {})
         snapshot = backups.get(str(previous_channel_id))
@@ -281,7 +281,7 @@ class Verification(commands.Cog):
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"Verification Cog: could not migrate every member to the new unverified role: {exc}")
 
-    async def set_verification_channel(self, guild: discord.Guild, channel: object) -> discord.TextChannel | discord.NewsChannel:
+    async def set_verification_channel(self, guild: discord.Guild, channel: object) -> discord.TextChannel:
         # ChannelSelect may return an AppCommandChannel wrapper without permission overwrites.
         # Resolve it before any snapshot or permission-management operations.
         channel = await self._resolve_verification_channel(guild, channel)
@@ -333,7 +333,7 @@ class Verification(commands.Cog):
         role_id = config.get("unverified_role_id")
         channel = guild.get_channel(int(channel_id)) if channel_id else None
         role = guild.get_role(int(role_id)) if role_id else None
-        if not isinstance(channel, (discord.TextChannel, discord.NewsChannel)) or role is None:
+        if not isinstance(channel, discord.TextChannel) or role is None:
             raise ValueError("Select a valid verification text channel and unverified role first.")
         await self._backup_role_overwrites(guild, role, config)
         updated, failed = 0, 0
@@ -399,7 +399,7 @@ class Verification(commands.Cog):
                 failed += 1
         return {"updated": updated, "failed": failed}
 
-    async def post_verification_panel(self, guild: discord.Guild, channel: discord.TextChannel | discord.NewsChannel, config: dict) -> discord.Message | None:
+    async def post_verification_panel(self, guild: discord.Guild, channel: discord.TextChannel, config: dict) -> discord.Message | None:
         title = str(config.get("panel_title", "Verify to access the server"))
         description = str(config.get("panel_description", "Press Verify and enter the lowercase letters shown in the CAPTCHA to unlock the server."))
         embed = make_embed(title, description)
