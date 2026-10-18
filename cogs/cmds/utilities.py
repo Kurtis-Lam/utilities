@@ -112,7 +112,6 @@ class Utilities(commands.Cog):
         time_str="When to remind you: a number plus s, m, h or d (e.g. 10m, 2h, 1d). Max 30 days.",
         message="What to remind you about.",
     )
-    @commands.is_owner()
     async def remind(
         self,
         ctx,
@@ -190,7 +189,6 @@ class Utilities(commands.Cog):
         time_str="How long to wait, e.g. 30s, 10m, 1h30m (s, m, h, d can be combined). Max 30 days.",
         name="Optional name shown in the timer (e.g. Pizza).",
     )
-    @commands.is_owner()
     @commands.guild_only()
     async def timer(
         self,
@@ -232,7 +230,6 @@ class Utilities(commands.Cog):
         invoke_without_command=True,
         description="View your active reminders.",
     )
-    @commands.is_owner()
     @loading
     async def reminders(self, ctx):
         user_reminders = await self.collection.find({"user_id": ctx.author.id}).to_list(length=None)
@@ -266,7 +263,6 @@ class Utilities(commands.Cog):
 
     @reminders.command(name="remove", aliases=["r"], description="Remove a reminder by its ID.")
     @app_commands.describe(reminder_id="The ID of the reminder to remove (shown by /reminders and when you set it).")
-    @commands.is_owner()
     async def reminders_remove(
         self,
         ctx,
