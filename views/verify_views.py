@@ -165,7 +165,7 @@ def verification_config_embed(config: dict, guild: discord.Guild | None) -> disc
     embed = make_embed("🛡️ Verification System", "Set the verification channel and role, configure the CAPTCHA, then post the persistent verification panel.")
     embed.add_field(name="Channel", value=f"<#{channel_id}>" if channel_id else "*Not set*", inline=True)
     embed.add_field(name="Unverified", value=f"<@&{role_id}>" if role_id else "*Not set*", inline=True)
-    embed.add_field(name="Verified", value=f"<@&{verified_role_id}>" if verified_role_id else "*None*", inline=True)
+    embed.add_field(name="Verified", value=f"<@&{verified_role_id}>" if verified_role_id else "*Auto-created on panel post*", inline=True)
     embed.add_field(name="Panel title", value=str(config.get("panel_title", "Verify to access the server"))[:256], inline=False)
     embed.add_field(name="Code length", value=str(config.get("captcha_length", 6)), inline=True)
     embed.add_field(name="Attempts", value=str(config.get("max_attempts", 3)), inline=True)
@@ -344,7 +344,7 @@ class VerificationConfigView(EmbedLayout):
         self.config = await self.cog.get_config(interaction.guild.id)
         self.set_embed(verification_config_embed(self.config, interaction.guild))
         await interaction.edit_original_response(view=self)
-        await interaction.followup.send(embed=success_embed(f"Verification channel set to {channel.mention}; channel permissions were updated."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.followup.send(embed=success_embed(f"Verification channel set to {channel.mention}. Permissions are applied when you press Post / Refresh Panel."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def select_role(self, interaction: discord.Interaction):
         role = self.role_select.values[0]
@@ -374,7 +374,7 @@ class VerificationConfigView(EmbedLayout):
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self.cog.set_verified_role(interaction.guild, None)
         await self.refresh_message()
-        await interaction.followup.send(embed=success_embed("Verified role cleared. Members will only lose the unverified role."), ephemeral=True)
+        await interaction.followup.send(embed=success_embed("Verified role cleared. A new Verified role will be created when the panel is posted or permissions are applied."), ephemeral=True)
 
     async def create_role(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -411,7 +411,10 @@ class VerificationConfigView(EmbedLayout):
         channel = interaction.guild.get_channel(int(config.get("verify_channel_id") or 0))
         if not isinstance(channel, discord.TextChannel):
             return await interaction.followup.send(embed=error_embed("Set a text verification channel first."), ephemeral=True)
-        message = await self.cog.post_verification_panel(interaction.guild, channel, config)
+        try:
+            message = await self.cog.post_verification_panel(interaction.guild, channel, config)
+        except (ValueError, discord.Forbidden, discord.HTTPException) as exc:
+            return await interaction.followup.send(embed=error_embed(f"Could not lock down the server permissions: {exc}"), ephemeral=True)
         if message is None:
             return await interaction.followup.send(embed=error_embed("Could not post the verification panel. Check channel permissions."), ephemeral=True)
         await self.refresh_message()

@@ -40,6 +40,7 @@ def _defaults(guild_id: int) -> dict:
         "verification_initialized": False,
         "verify_channel_backups": {},
         "verify_role_backups": {},
+        "verify_everyone_view_backup": None,
     }
 
 
@@ -284,7 +285,7 @@ class Verification(commands.Cog):
         config = await self.get_config(guild.id)
         if old_role and old_role.id != role.id:
             await self._migrate_role_members(guild, old_role, role)
-        if config.get("verify_channel_id"):
+        if config.get("verify_channel_id") and config.get("verification_initialized"):
             await self.apply_verification_permissions(guild, config)
 
     async def _migrate_role_members(self, guild: discord.Guild, old_role: discord.Role, new_role: discord.Role):
@@ -318,17 +319,51 @@ class Verification(commands.Cog):
         await self._snapshot_verify_channel(guild, channel, config)
         await self.save_config_fields(guild.id, {"verify_channel_id": channel.id})
         config = await self.get_config(guild.id)
-        await self.apply_verification_permissions(guild, config)
-        if not config.get("verification_initialized"):
-            assigned = await self._assign_unverified_to_existing_members(guild, role)
-            await self.save_config_fields(guild.id, {"verification_initialized": True, "initial_members_assigned": assigned})
+        # Permissions are NOT touched until the verification panel is sent (see post_verification_panel),
+        # unless the gate is already live, in which case the new channel is switched over immediately.
+        if config.get("verification_initialized"):
+            await self.apply_verification_permissions(guild, config)
         return channel
 
-    async def _assign_unverified_to_existing_members(self, guild: discord.Guild, role: discord.Role) -> int:
+    async def ensure_verified_role(self, guild: discord.Guild, config: dict) -> discord.Role:
+        verified_id = config.get("verified_role_id")
+        role = guild.get_role(int(verified_id)) if verified_id else None
+        if role is not None:
+            return role
+        try:
+            role = await guild.create_role(
+                name="Verified",
+                permissions=discord.Permissions.none(),
+                mentionable=False,
+                reason="Create the role that grants server access after verification",
+            )
+        except discord.HTTPException as exc:
+            raise ValueError(f"Could not create the Verified role: {exc}") from exc
+        await self.save_config_fields(guild.id, {"verified_role_id": role.id})
+        config["verified_role_id"] = role.id
+        return role
+
+    async def _apply_base_gate(self, guild: discord.Guild, verified_role: discord.Role, config: dict):
+        """Move the server-wide 'View Channels' permission from @everyone to the Verified role."""
+        everyone = guild.default_role
+        if config.get("verify_everyone_view_backup") is None:
+            original = bool(everyone.permissions.view_channel)
+            await self.save_config_fields(guild.id, {"verify_everyone_view_backup": original})
+            config["verify_everyone_view_backup"] = original
+        if not verified_role.permissions.view_channel:
+            perms = verified_role.permissions
+            perms.view_channel = True
+            await verified_role.edit(permissions=perms, reason="Verified members can view channels")
+        if everyone.permissions.view_channel:
+            perms = everyone.permissions
+            perms.view_channel = False
+            await everyone.edit(permissions=perms, reason="Unverified members can only see the verification channel")
+
+    async def _assign_unverified_to_existing_members(self, guild: discord.Guild, role: discord.Role, verified_role: discord.Role | None = None) -> int:
         assigned = 0
         try:
             async for member in guild.fetch_members(limit=None):
-                if member.bot or member.guild_permissions.administrator or role in member.roles:
+                if member.bot or member.guild_permissions.administrator or role in member.roles or (verified_role is not None and verified_role in member.roles):
                     continue
                 try:
                     await member.add_roles(role, reason="Initialize the server verification gate")
@@ -338,7 +373,7 @@ class Verification(commands.Cog):
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"Verification Cog: could not enumerate all members for initial verification: {exc}")
             for member in guild.members:
-                if member.bot or member.guild_permissions.administrator or role in member.roles:
+                if member.bot or member.guild_permissions.administrator or role in member.roles or (verified_role is not None and verified_role in member.roles):
                     continue
                 try:
                     await member.add_roles(role, reason="Initialize the server verification gate")
@@ -355,7 +390,39 @@ class Verification(commands.Cog):
         if not isinstance(channel, discord.TextChannel) or role is None:
             raise ValueError("Select a valid verification text channel and unverified role first.")
         await self._backup_role_overwrites(guild, role, config)
+        verified_role = await self.ensure_verified_role(guild, config)
         updated, failed = 0, 0
+
+        # 1) Make the verification channel visible to @everyone BEFORE removing @everyone's global
+        #    View Channels permission, so brand-new members (who have no roles yet) can see it.
+        try:
+            everyone_overwrite = channel.overwrites_for(guild.default_role)
+            everyone_overwrite.view_channel = True
+            everyone_overwrite.read_message_history = True
+            everyone_overwrite.send_messages = False
+            await channel.set_permissions(guild.default_role, overwrite=everyone_overwrite, reason="Verification channel is the only channel visible before verifying")
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+        # 2) Global gate: @everyone can no longer view channels, the Verified role can. This closes the
+        #    window between joining and the Unverified role being assigned.
+        try:
+            await self._apply_base_gate(guild, verified_role, config)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            raise ValueError(f"Could not update the @everyone / Verified role permissions (needs Manage Roles and a role above them): {exc}") from exc
+
+        # 3) Clear explicit "allow view" overwrites for @everyone on other channels, as they would bypass the gate.
+        for target_channel in guild.channels:
+            if target_channel.id == channel.id:
+                continue
+            try:
+                ow = target_channel.overwrites_for(guild.default_role)
+                if ow.view_channel is True:
+                    ow.view_channel = None
+                    await target_channel.set_permissions(guild.default_role, overwrite=None if ow.is_empty() else ow, reason="Unverified members must not see this channel")
+            except (discord.Forbidden, discord.HTTPException):
+                failed += 1
+
         for target_channel in guild.channels:
             try:
                 overwrite = target_channel.overwrites_for(role)
@@ -371,13 +438,8 @@ class Verification(commands.Cog):
             except (discord.Forbidden, discord.HTTPException):
                 failed += 1
 
-        # Hide the verification channel from everyone except the unverified role and administrators.
-        try:
-            everyone_overwrite = channel.overwrites_for(guild.default_role)
-            everyone_overwrite.view_channel = False
-            await channel.set_permissions(guild.default_role, overwrite=everyone_overwrite, reason="Hide verification channel from verified members")
-        except (discord.Forbidden, discord.HTTPException):
-            failed += 1
+        # Hide the verification channel from every role except the unverified role (this includes the
+        # Verified role), so verified members see everything except the verification channel.
         for other_role in guild.roles:
             if other_role.is_default() or other_role.id == role.id or other_role.permissions.administrator:
                 continue
@@ -419,6 +481,21 @@ class Verification(commands.Cog):
         return {"updated": updated, "failed": failed}
 
     async def post_verification_panel(self, guild: discord.Guild, channel: discord.TextChannel, config: dict) -> discord.Message | None:
+        # Sending the panel is what turns the gate on: lock the server down first, then post.
+        role_id = config.get("unverified_role_id")
+        role = guild.get_role(int(role_id)) if role_id else None
+        if role is None:
+            role = await self.create_unverified_role(guild)
+            if role is None:
+                raise ValueError("The bot could not create the Unverified role.")
+            config = await self.get_config(guild.id)
+        config["verify_channel_id"] = channel.id
+        await self.apply_verification_permissions(guild, config)
+        if not config.get("verification_initialized"):
+            verified_id = config.get("verified_role_id")
+            verified_role = guild.get_role(int(verified_id)) if verified_id else None
+            assigned = await self._assign_unverified_to_existing_members(guild, role, verified_role)
+            await self.save_config_fields(guild.id, {"verification_initialized": True, "initial_members_assigned": assigned})
         title = str(config.get("panel_title", "Verify to access the server"))
         description = str(config.get("panel_description", "Press Verify and enter the letters and numbers shown in the CAPTCHA to unlock the server."))
         embed = make_embed(title, description)
@@ -454,7 +531,12 @@ class Verification(commands.Cog):
         if not test_only:
             if not config.get("verify_channel_id") or not role:
                 return await interaction.followup.send(embed=error_embed("Verification is not fully configured. Ask an administrator for help."), ephemeral=True)
-            if isinstance(interaction.user, discord.Member) and role not in interaction.user.roles:
+            verified_id = config.get("verified_role_id")
+            verified_role = interaction.guild.get_role(int(verified_id)) if verified_id else None
+            if isinstance(interaction.user, discord.Member) and (
+                (verified_role is not None and verified_role in interaction.user.roles)
+                or (verified_role is None and role not in interaction.user.roles)
+            ):
                 return await interaction.followup.send(embed=make_embed("Already Verified", "You already have access to the server."), ephemeral=True)
         else:
             config["_test_only"] = True
@@ -478,21 +560,20 @@ class Verification(commands.Cog):
             return
         role_id = config.get("unverified_role_id")
         role = guild.get_role(int(role_id)) if role_id else None
-        if role is None:
-            raise ValueError("The Unverified role no longer exists. Ask an administrator to configure it again.")
+        verified_id = config.get("verified_role_id")
+        verified_role = guild.get_role(int(verified_id)) if verified_id else None
+        if verified_role is None:
+            raise ValueError("The Verified role no longer exists. Ask an administrator to post the verification panel again.")
         member = user if isinstance(user, discord.Member) else guild.get_member(user.id)
         if member is None:
             member = await guild.fetch_member(user.id)
-        if role not in member.roles:
+        if verified_role in member.roles and (role is None or role not in member.roles):
             return
-        await member.remove_roles(role, reason="Completed CAPTCHA verification")
-        verified_id = config.get("verified_role_id")
-        verified_role = guild.get_role(int(verified_id)) if verified_id else None
-        if verified_role is not None and verified_role.id != role.id and verified_role not in member.roles:
-            try:
-                await member.add_roles(verified_role, reason="Completed CAPTCHA verification")
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                print(f"Verification Cog: could not assign verified role {verified_role.id} to {member.id}: {exc}")
+        # Grant access first, then drop the unverified role, so the member is never left with neither.
+        if verified_role not in member.roles:
+            await member.add_roles(verified_role, reason="Completed CAPTCHA verification")
+        if role is not None and role in member.roles:
+            await member.remove_roles(role, reason="Completed CAPTCHA verification")
 
 
 async def setup(bot: commands.Bot):
