@@ -157,21 +157,22 @@ class Tickets(commands.Cog):
             return await interaction.response.send_message(embed=error_embed("Tickets can only be created by server members."), ephemeral=True)
         if not self._db_ready():
             return await interaction.response.send_message(embed=error_embed("MongoDB is not configured; ticket creation is unavailable."), ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         config = await self.get_config(guild.id)
         option = next((item for item in config.get("options", []) if item.get("key") == option_key), None)
         if option is None:
-            return await interaction.response.send_message(embed=error_embed("That ticket option was removed. Open the panel again."), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed("That ticket option was removed. Open the panel again."), ephemeral=True)
         max_open = int(config.get("max_open_tickets", 3) or 0)
         if max_open > 0:
             count = await self.tickets_collection.count_documents({"guild_id": guild.id, "opener_id": interaction.user.id, "closed": False})
             if count >= max_open:
-                return await interaction.response.send_message(embed=error_embed(f"You already have the maximum of `{max_open}` open ticket(s)."), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed(f"You already have the maximum of `{max_open}` open ticket(s)."), ephemeral=True)
 
         category_id = option.get("category_id") or config.get("default_category_id")
         category = guild.get_channel(int(category_id)) if category_id else None
         if category_id and not isinstance(category, discord.CategoryChannel):
-            return await interaction.response.send_message(embed=error_embed("The configured ticket category no longer exists. Ask an administrator to update it."), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed("The configured ticket category no longer exists. Ask an administrator to update it."), ephemeral=True)
 
         support_ids = [int(x) for x in config.get("staff_role_ids", []) if str(x).isdigit()]
         ping_ids = list(dict.fromkeys(support_ids + [int(x) for x in config.get("ping_role_ids", []) if str(x).isdigit()] + [int(x) for x in option.get("ping_role_ids", []) if str(x).isdigit()]))
@@ -195,7 +196,6 @@ class Tickets(commands.Cog):
         open_count = await self.tickets_collection.count_documents({"guild_id": guild.id})
         channel_name = _channel_slug(str(config.get("channel_name_template", "ticket-{username}-{number}")), interaction.user, open_count + 1, str(option.get("label", "ticket")))
         topic = f"Ticket creator ID: {interaction.user.id} | Option: {option.get('label', 'Ticket')} | Opened: {int(time.time())}"
-        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             channel = await guild.create_text_channel(
                 channel_name,
@@ -266,9 +266,10 @@ class Tickets(commands.Cog):
             return await interaction.response.send_message(embed=error_embed("These controls only work in ticket text channels."), ephemeral=True)
         if not self._db_ready():
             return await interaction.response.send_message(embed=error_embed("Ticket storage is unavailable."), ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         ticket = await self.tickets_collection.find_one({"_id": channel.id, "guild_id": interaction.guild.id})
         if ticket is None:
-            return await interaction.response.send_message(embed=error_embed("This channel is not registered as a ticket."), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed("This channel is not registered as a ticket."), ephemeral=True)
         config = await self.get_config(interaction.guild.id)
         member = interaction.user if isinstance(interaction.user, discord.Member) else await interaction.guild.fetch_member(interaction.user.id)
         staff = self._is_staff(member, config)
@@ -276,32 +277,32 @@ class Tickets(commands.Cog):
 
         if action == "claim":
             if not config.get("allow_claim", True):
-                return await interaction.response.send_message(embed=error_embed("Ticket claiming is disabled by an administrator."), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("Ticket claiming is disabled by an administrator."), ephemeral=True)
             if not staff:
-                return await interaction.response.send_message(embed=error_embed("Only support staff can claim tickets."), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("Only support staff can claim tickets."), ephemeral=True)
             if ticket.get("claimed_by"):
-                return await interaction.response.send_message(embed=error_embed(f"This ticket is already claimed by <@{ticket['claimed_by']}>."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+                return await interaction.followup.send(embed=error_embed(f"This ticket is already claimed by <@{ticket['claimed_by']}>."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
             await self.tickets_collection.update_one({"_id": channel.id}, {"$set": {"claimed_by": member.id, "claimed_at": int(time.time())}})
             message = _format_ticket(str(config.get("claim_message", "Ticket claimed by {user}.")), user=member, guild=interaction.guild, channel=channel, option=ticket.get("option_label", "Ticket"), ticket_id=channel.id)
             await channel.send(embed=make_embed("🖐️ Ticket Claimed", message), allowed_mentions=discord.AllowedMentions.none())
-            return await interaction.response.send_message(embed=success_embed("You claimed this ticket."), ephemeral=True)
+            return await interaction.followup.send(embed=success_embed("You claimed this ticket."), ephemeral=True)
 
         if action == "close":
             if ticket.get("closed"):
-                return await interaction.response.send_message(embed=error_embed("This ticket is already closed."), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("This ticket is already closed."), ephemeral=True)
             if opener and not config.get("allow_user_close", True) and not staff:
-                return await interaction.response.send_message(embed=error_embed("Only support staff can close tickets in this server."), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("Only support staff can close tickets in this server."), ephemeral=True)
             if not opener and not staff:
-                return await interaction.response.send_message(embed=error_embed("Only the ticket creator or support staff can close this ticket."), ephemeral=True)
-            await interaction.response.send_message(embed=success_embed("Closing ticket…"), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("Only the ticket creator or support staff can close this ticket."), ephemeral=True)
+            await interaction.followup.send(embed=success_embed("Closing ticket…"), ephemeral=True)
             await self._close_ticket(channel, ticket, config, member)
             return
 
         if action == "reopen":
             if not staff:
-                return await interaction.response.send_message(embed=error_embed("Only support staff can reopen tickets."), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("Only support staff can reopen tickets."), ephemeral=True)
             if not ticket.get("closed"):
-                return await interaction.response.send_message(embed=error_embed("This ticket is already open."), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("This ticket is already open."), ephemeral=True)
             opener_member = interaction.guild.get_member(int(ticket["opener_id"]))
             if opener_member is None:
                 try:
@@ -322,14 +323,14 @@ class Tickets(commands.Cog):
                 pass
             message = _format_ticket(str(config.get("reopen_message", "Ticket reopened by {user}.")), user=member, guild=interaction.guild, channel=channel, option=ticket.get("option_label", "Ticket"), ticket_id=channel.id)
             await channel.send(embed=make_embed("🔓 Ticket Reopened", message), allowed_mentions=discord.AllowedMentions.none())
-            return await interaction.response.send_message(embed=success_embed("Ticket reopened."), ephemeral=True)
+            return await interaction.followup.send(embed=success_embed("Ticket reopened."), ephemeral=True)
 
         if action == "delete":
             if not staff:
-                return await interaction.response.send_message(embed=error_embed("Only support staff can delete tickets."), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("Only support staff can delete tickets."), ephemeral=True)
             if not ticket.get("closed"):
-                return await interaction.response.send_message(embed=error_embed("Close this ticket before deleting it."), ephemeral=True)
-            await interaction.response.send_message(embed=success_embed("Deleting closed ticket…"), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("Close this ticket before deleting it."), ephemeral=True)
+            await interaction.followup.send(embed=success_embed("Deleting closed ticket…"), ephemeral=True)
             try:
                 await channel.delete(reason=f"Ticket deleted by {member} ({member.id})")
             except discord.HTTPException as exc:
