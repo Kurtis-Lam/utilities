@@ -244,9 +244,16 @@ class VerificationConfigView(EmbedLayout):
                 pass
 
     async def select_channel(self, interaction: discord.Interaction):
-        channel = self.channel_select.values[0]
+        selected_channel = self.channel_select.values[0]
+        if interaction.guild is None:
+            return await interaction.response.send_message(
+                embed=error_embed("This setting can only be changed inside a server."),
+                ephemeral=True,
+            )
         try:
-            await self.cog.set_verification_channel(interaction.guild, channel)
+            # ChannelSelect values may be AppCommandChannel wrappers. The cog resolves
+            # the selected ID into a real GuildChannel before reading permission overwrites.
+            channel = await self.cog.set_verification_channel(interaction.guild, selected_channel)
         except (RuntimeError, ValueError, discord.Forbidden, discord.HTTPException) as exc:
             return await interaction.response.send_message(embed=error_embed(f"Could not set the verification channel: {exc}"), ephemeral=True)
         self.config = await self.cog.get_config(interaction.guild.id)
