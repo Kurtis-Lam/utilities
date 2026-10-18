@@ -200,7 +200,8 @@ class TicketDashboardView(EmbedLayout):
 
     async def refresh(self, interaction: discord.Interaction):
         await self.reload_config()
-        await interaction.response.edit_message(embed=self.embed, view=self)
+        # The refreshed embed is rendered within this Components V2 layout.
+        await interaction.response.edit_message(view=self)
 
     async def refresh_message(self):
         if self.message is None:
