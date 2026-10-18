@@ -13,28 +13,53 @@ from discord.ui import Button, ChannelSelect, Modal, RoleSelect, TextInput
 from views.common_views import EmbedLayout, error_embed, make_embed, success_embed
 
 # Characters that are difficult to confuse in small or distorted text are excluded.
-CAPTCHA_ALPHABET = "abcdefghjkmnprstuvwxyz"
+CAPTCHA_LETTERS = "abcdefghjkmnprstuvwxyz"
+CAPTCHA_DIGITS = "123456789"
+CAPTCHA_ALPHABET = CAPTCHA_LETTERS + CAPTCHA_DIGITS
+
+FONT_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/Library/Fonts/Arial Bold.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "DejaVuSans-Bold.ttf",
+    "Arial Bold.ttf",
+    "arialbd.ttf",
+)
+
+
+def _load_captcha_font(size: int):
+    for candidate in FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def generate_captcha_text(length: int) -> str:
     length = max(3, min(12, int(length)))
-    return "".join(random.SystemRandom().choice(CAPTCHA_ALPHABET) for _ in range(length))
+    rng = random.SystemRandom()
+    while True:
+        text = "".join(rng.choice(CAPTCHA_ALPHABET) for _ in range(length))
+        if any(c in CAPTCHA_DIGITS for c in text) and any(c in CAPTCHA_LETTERS for c in text):
+            return text
 
 
 def make_captcha_image(text: str) -> discord.File:
     rng = random.SystemRandom()
-    width, height = 620, 170
+    width, height = 700, 210
     image = Image.new("RGB", (width, height), (246, 248, 255))
     draw = ImageDraw.Draw(image)
     cell = (width - 48) / max(1, len(text))
-    font_size = max(34, min(80, int(cell * 0.72)))
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
-    except OSError:
-        try:
-            font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
-        except OSError:
-            font = ImageFont.load_default()
+    font_size = max(52, min(120, int(cell * 0.9)))
+    font = _load_captcha_font(font_size)
 
     # Keep the background distortion subtle enough that every letter remains readable.
     for _ in range(12):
@@ -82,9 +107,11 @@ def make_captcha_image(text: str) -> discord.File:
 def verification_config_embed(config: dict, guild: discord.Guild | None) -> discord.Embed:
     channel_id = config.get("verify_channel_id")
     role_id = config.get("unverified_role_id")
+    verified_role_id = config.get("verified_role_id")
     embed = make_embed("🛡️ Verification System", "Set the verification channel and role, configure the CAPTCHA, then post the persistent verification panel.")
     embed.add_field(name="Verification channel", value=f"<#{channel_id}>" if channel_id else "*Not set*", inline=True)
     embed.add_field(name="Unverified role", value=f"<@&{role_id}>" if role_id else "*Not set*", inline=True)
+    embed.add_field(name="Verified role (auto-assigned)", value=f"<@&{verified_role_id}>" if verified_role_id else "*None*", inline=True)
     embed.add_field(name="Code length", value=str(config.get("captcha_length", 6)), inline=True)
     embed.add_field(name="Attempts", value=str(config.get("max_attempts", 3)), inline=True)
     embed.add_field(name="Challenge expiry", value=f"{config.get('captcha_expiry_seconds', 180)} sec", inline=True)
@@ -143,7 +170,7 @@ class CaptchaPromptView(discord.ui.View):
 
 
 class CaptchaAnswerModal(Modal, title="Server Verification"):
-    answer = TextInput(label="Type the lowercase letters shown", required=True, min_length=3, max_length=12, placeholder="lowercase letters only")
+    answer = TextInput(label="Type the characters shown", required=True, min_length=3, max_length=12, placeholder="lowercase letters and numbers 1-9")
 
     def __init__(self, prompt_view: CaptchaPromptView):
         super().__init__()
@@ -157,9 +184,9 @@ class CaptchaAnswerModal(Modal, title="Server Verification"):
             prompt.stop()
             return await interaction.response.send_message(embed=error_embed("This CAPTCHA expired. Press Verify again to get a new one."), ephemeral=True)
         supplied = self.answer.value.strip()
-        if not supplied.isascii() or not supplied.isalpha() or supplied.lower() != supplied:
+        if not supplied.isascii() or not supplied.isalnum() or supplied.lower() != supplied:
             prompt.attempts += 1
-            return await self._wrong(interaction, "Use lowercase English letters only.")
+            return await self._wrong(interaction, "Use lowercase English letters and numbers 1-9 only.")
         if supplied != prompt.expected:
             prompt.attempts += 1
             return await self._wrong(interaction, "That text does not match. Check the CAPTCHA and try again.")
@@ -201,6 +228,10 @@ class VerificationConfigView(EmbedLayout):
         self.channel_select.callback = self.select_channel
         self.role_select = RoleSelect(placeholder="Choose unverified role", min_values=1, max_values=1)
         self.role_select.callback = self.select_role
+        self.verified_role_select = RoleSelect(placeholder="Role to give after verification (optional)", min_values=1, max_values=1)
+        self.verified_role_select.callback = self.select_verified_role
+        self.clear_verified_btn = Button(label="Clear Verified Role", emoji="🧹", style=discord.ButtonStyle.secondary)
+        self.clear_verified_btn.callback = self.clear_verified_role
         self.create_role_btn = Button(label="Create Unverified Role", emoji="➕", style=discord.ButtonStyle.primary)
         self.create_role_btn.callback = self.create_role
         self.settings_btn = Button(label="CAPTCHA Settings", emoji="⚙️", style=discord.ButtonStyle.secondary)
@@ -221,8 +252,9 @@ class VerificationConfigView(EmbedLayout):
         return [
             [self.channel_select],
             [self.role_select],
+            [self.verified_role_select],
             [self.create_role_btn, self.settings_btn, self.messages_btn, self.apply_btn],
-            [self.labels_btn, self.post_btn, self.test_btn],
+            [self.labels_btn, self.post_btn, self.test_btn, self.clear_verified_btn],
         ]
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -271,6 +303,24 @@ class VerificationConfigView(EmbedLayout):
         self.set_embed(verification_config_embed(self.config, interaction.guild))
         await interaction.edit_original_response(view=self)
         await interaction.followup.send(embed=success_embed(f"Unverified role set to {role.mention} and protected from autorole removal."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    async def select_verified_role(self, interaction: discord.Interaction):
+        role = self.verified_role_select.values[0]
+        await interaction.response.defer()
+        try:
+            await self.cog.set_verified_role(interaction.guild, role)
+        except (RuntimeError, ValueError, discord.Forbidden, discord.HTTPException) as exc:
+            return await interaction.followup.send(embed=error_embed(f"Could not set the verified role: {exc}"), ephemeral=True)
+        self.config = await self.cog.get_config(interaction.guild.id)
+        self.set_embed(verification_config_embed(self.config, interaction.guild))
+        await interaction.edit_original_response(view=self)
+        await interaction.followup.send(embed=success_embed(f"Members will now receive {role.mention} after completing verification."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    async def clear_verified_role(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self.cog.set_verified_role(interaction.guild, None)
+        await self.refresh_message()
+        await interaction.followup.send(embed=success_embed("Verified role cleared. Members will only lose the unverified role."), ephemeral=True)
 
     async def create_role(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -326,7 +376,7 @@ class VerificationConfigView(EmbedLayout):
 
 
 class VerificationCaptchaSettingsModal(Modal, title="CAPTCHA Settings"):
-    code_length = TextInput(label="Code length (3–12 lowercase letters)", required=True, max_length=2)
+    code_length = TextInput(label="Code length (3–12 characters)", required=True, max_length=2)
     attempts = TextInput(label="Maximum attempts (1–10)", required=True, max_length=2)
     expiry = TextInput(label="CAPTCHA expiry in seconds (30–600)", required=True, max_length=3)
     panel_title = TextInput(label="Public verification panel title", required=True, max_length=256)
@@ -370,8 +420,8 @@ class VerificationTextSettingsModal(Modal, title="Verification Messages & Labels
         super().__init__()
         self.view_instance = view
         c = view.config
-        self.panel_description.default = str(c.get("panel_description", "Press Verify and enter the lowercase letters shown in the CAPTCHA to unlock the server."))[:3000]
-        self.prompt_description.default = str(c.get("prompt_description", "Enter the lowercase letters shown. Similar-looking characters are excluded."))[:1000]
+        self.panel_description.default = str(c.get("panel_description", "Press Verify and enter the letters and numbers shown in the CAPTCHA to unlock the server."))[:3000]
+        self.prompt_description.default = str(c.get("prompt_description", "Enter the lowercase letters and numbers shown. Similar-looking characters (such as 0, o, i and l) are excluded."))[:1000]
         self.success_message.default = str(c.get("success_message", "Verification complete. You now have access to the server."))[:1000]
         self.failure_message.default = str(c.get("failure_message", "Too many incorrect attempts. Press Verify again for a new CAPTCHA."))[:1000]
 
