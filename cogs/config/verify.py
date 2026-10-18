@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 
 import discord
@@ -428,29 +429,31 @@ class Verification(commands.Cog):
             return await interaction.response.send_message(embed=error_embed("Use the Verify button inside the server."), ephemeral=True)
         if not self._db_ready():
             return await interaction.response.send_message(embed=error_embed("Verification storage is unavailable. Please contact an administrator."), ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         config = await self.get_config(interaction.guild.id)
         role_id = config.get("unverified_role_id")
         role = interaction.guild.get_role(int(role_id)) if role_id else None
         if not test_only:
             if not config.get("verify_channel_id") or not role:
-                return await interaction.response.send_message(embed=error_embed("Verification is not fully configured. Ask an administrator for help."), ephemeral=True)
+                return await interaction.followup.send(embed=error_embed("Verification is not fully configured. Ask an administrator for help."), ephemeral=True)
             if isinstance(interaction.user, discord.Member) and role not in interaction.user.roles:
-                return await interaction.response.send_message(embed=make_embed("Already Verified", "You already have access to the server."), ephemeral=True)
+                return await interaction.followup.send(embed=make_embed("Already Verified", "You already have access to the server."), ephemeral=True)
         else:
             config["_test_only"] = True
         length = max(3, min(12, int(config.get("captcha_length", 6))))
         expected = generate_captcha_text(length)
-        file = make_captcha_image(expected)
+        file = await asyncio.to_thread(make_captcha_image, expected)
         embed = make_embed(str(config.get("captcha_title", "Complete verification")), str(config.get("prompt_description", "Enter the lowercase letters shown. Similar-looking characters are excluded.")))
         embed.set_image(url="attachment://verification.png")
         view = CaptchaPromptView(self, expected, config, interaction.user.id, time.time() + max(30, min(600, int(config.get("captcha_expiry_seconds", 180)))))
         try:
-            await interaction.response.send_message(embed=embed, file=file, view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-            view.message = await interaction.original_response()
+            view.message = await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), wait=True)
         except discord.HTTPException as exc:
             print(f"Verification Cog: could not start CAPTCHA for {interaction.user.id}: {exc}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(embed=error_embed("Could not start verification. Please try again."), ephemeral=True)
+            try:
+                await interaction.followup.send(embed=error_embed("Could not start verification. Please try again."), ephemeral=True)
+            except discord.HTTPException:
+                pass
 
     async def complete_verification(self, guild: discord.Guild, user: discord.abc.User, config: dict):
         if config.get("_test_only"):
