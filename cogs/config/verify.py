@@ -24,13 +24,14 @@ def _defaults(guild_id: int) -> dict:
         "_id": str(guild_id),
         "verify_channel_id": None,
         "unverified_role_id": None,
+        "verified_role_id": None,
         "captcha_length": 6,
         "max_attempts": 3,
         "captcha_expiry_seconds": 180,
         "panel_title": "Verify to access the server",
-        "panel_description": "Press Verify and enter the lowercase letters shown in the CAPTCHA to unlock the server.",
+        "panel_description": "Press Verify and enter the letters and numbers shown in the CAPTCHA to unlock the server.",
         "captcha_title": "Complete verification",
-        "prompt_description": "Enter the lowercase letters shown. Similar-looking characters are excluded.",
+        "prompt_description": "Enter the lowercase letters and numbers shown. Similar-looking characters (such as 0, o, i and l) are excluded.",
         "enter_button_label": "Enter the text",
         "success_message": "Verification complete. You now have access to the server.",
         "failure_message": "Too many incorrect attempts. Press Verify again for a new CAPTCHA.",
@@ -236,6 +237,23 @@ class Verification(commands.Cog):
             except discord.HTTPException:
                 pass
 
+    async def set_verified_role(self, guild: discord.Guild, role: discord.Role | None):
+        if role is None:
+            await self.save_config_fields(guild.id, {"verified_role_id": None})
+            return
+        config = await self.get_config(guild.id)
+        if role.is_default():
+            raise ValueError("The @everyone role cannot be used as the verified role.")
+        if role.managed:
+            raise ValueError("Bot or integration managed roles cannot be assigned manually.")
+        unverified_id = config.get("unverified_role_id")
+        if unverified_id and int(unverified_id) == role.id:
+            raise ValueError("The verified role must be different from the unverified role.")
+        me = guild.me
+        if me is None or role >= me.top_role:
+            raise ValueError("Move the bot's highest role above this role so it can assign it.")
+        await self.save_config_fields(guild.id, {"verified_role_id": role.id})
+
     async def create_unverified_role(self, guild: discord.Guild) -> discord.Role | None:
         config = await self.get_config(guild.id)
         role_id = config.get("unverified_role_id")
@@ -402,7 +420,7 @@ class Verification(commands.Cog):
 
     async def post_verification_panel(self, guild: discord.Guild, channel: discord.TextChannel, config: dict) -> discord.Message | None:
         title = str(config.get("panel_title", "Verify to access the server"))
-        description = str(config.get("panel_description", "Press Verify and enter the lowercase letters shown in the CAPTCHA to unlock the server."))
+        description = str(config.get("panel_description", "Press Verify and enter the letters and numbers shown in the CAPTCHA to unlock the server."))
         embed = make_embed(title, description)
         old_id = config.get("verify_panel_message_id")
         old_message = None
@@ -443,7 +461,7 @@ class Verification(commands.Cog):
         length = max(3, min(12, int(config.get("captcha_length", 6))))
         expected = generate_captcha_text(length)
         file = await asyncio.to_thread(make_captcha_image, expected)
-        embed = make_embed(str(config.get("captcha_title", "Complete verification")), str(config.get("prompt_description", "Enter the lowercase letters shown. Similar-looking characters are excluded.")))
+        embed = make_embed(str(config.get("captcha_title", "Complete verification")), str(config.get("prompt_description", "Enter the lowercase letters and numbers shown. Similar-looking characters (such as 0, o, i and l) are excluded.")))
         embed.set_image(url="attachment://verification.png")
         view = CaptchaPromptView(self, expected, config, interaction.user.id, time.time() + max(30, min(600, int(config.get("captcha_expiry_seconds", 180)))))
         try:
@@ -468,6 +486,13 @@ class Verification(commands.Cog):
         if role not in member.roles:
             return
         await member.remove_roles(role, reason="Completed CAPTCHA verification")
+        verified_id = config.get("verified_role_id")
+        verified_role = guild.get_role(int(verified_id)) if verified_id else None
+        if verified_role is not None and verified_role.id != role.id and verified_role not in member.roles:
+            try:
+                await member.add_roles(verified_role, reason="Completed CAPTCHA verification")
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                print(f"Verification Cog: could not assign verified role {verified_role.id} to {member.id}: {exc}")
 
 
 async def setup(bot: commands.Bot):
