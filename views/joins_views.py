@@ -115,7 +115,7 @@ def get_welcome_embed(
     embed = make_embed("👋 Welcome", "Configure the welcome message and run live tests.")
     channel_id = config.get("welcome_channel")
     embed.add_field(name="📍 Channel", value=f"<#{channel_id}>" if channel_id else "*Not set*", inline=True)
-    embed.add_field(name="🎨 Format", value="Embed" if config.get("use_embed", True) else "Plain text", inline=True)
+    embed.add_field(name="📄 Format", value="Embed" if config.get("use_embed", True) else "Plain text", inline=True)
     embed.add_field(name="🔔 Member ping", value="Enabled" if config.get("welcome_ping_member", True) else "Disabled", inline=True)
     message = str(config.get("welcome_message", "Welcome {mention} to {server}!"))
     shown = message if len(message) <= 800 else message[:797] + "…"
@@ -123,13 +123,10 @@ def get_welcome_embed(
     if guild or member:
         preview = _render_preview(message, guild, member)
         embed.add_field(name="👀 Preview", value=(preview[:1000] or "*Empty*"), inline=False)
-    embed.add_field(
-        name="🖼️ Embed settings",
-        value=(f"Title: {config.get('welcome_embed_title', 'Welcome to {server}!')[:120]}\n"
-               f"Colour: `#{str(config.get('welcome_embed_color', '0414C7')).lstrip('#')}`\n"
-               f"Fields: `{len(config.get('welcome_embed_fields', []))}` · Timestamp: `{bool(config.get('welcome_show_timestamp', True))}`"),
-        inline=False,
-    )
+    embed.add_field(name="🖼️ Title", value=str(config.get("welcome_embed_title", "Welcome to {server}!"))[:120], inline=False)
+    embed.add_field(name="🎨 Colour", value=f"`#{str(config.get('welcome_embed_color', '0414C7')).lstrip('#')}`", inline=True)
+    embed.add_field(name="🧩 Fields", value=f"`{len(config.get('welcome_embed_fields', []))}`", inline=True)
+    embed.add_field(name="🕒 Timestamp", value="On" if config.get("welcome_show_timestamp", True) else "Off", inline=True)
     embed.set_footer(text=f"Page 1/{TOTAL_PAGES} • {PLACEHOLDER_HELP}")
     return embed
 
