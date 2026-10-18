@@ -53,7 +53,8 @@ async def verify_command(ctx: commands.Context):
         return await ctx.reply(embed=error_embed("MongoDB is not configured; verification settings are unavailable."), mention_author=False)
     config = await cog.get_config(ctx.guild.id)
     view = VerificationConfigView(cog, config, ctx.guild, ctx.author.id)
-    view.message = await ctx.reply(embed=view.embed, view=view, mention_author=False)
+    # EmbedLayout renders its embed inside a Components V2 container; do not pass embed= separately.
+    view.message = await ctx.reply(view=view, mention_author=False)
 
 
 @verify_command.error
