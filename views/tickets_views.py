@@ -133,9 +133,14 @@ class TicketOptionSelectView(discord.ui.View):
 class TicketControlView(discord.ui.View):
     """Persistent claim, close, reopen and delete controls for ticket channels."""
 
-    def __init__(self, cog):
+    def __init__(self, cog, mode: str = "open"):
         super().__init__(timeout=None)
         self.cog = cog
+        if mode == "open":
+            self.remove_item(self.reopen)
+        elif mode == "closed":
+            self.remove_item(self.claim)
+            self.remove_item(self.close)
 
     @discord.ui.button(label="Claim", emoji="🖐️", style=discord.ButtonStyle.primary, custom_id="tickets:claim")
     async def claim(self, interaction: discord.Interaction, button: Button):
