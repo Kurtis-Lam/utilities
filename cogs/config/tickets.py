@@ -115,7 +115,7 @@ class Tickets(commands.Cog):
 
     async def cog_load(self):
         self.bot.add_view(TicketPanelView(self))
-        self.bot.add_view(TicketControlView(self))
+        self.bot.add_view(TicketControlView(self, mode="all"))
         if self.bot.mongo_client is None:
             print("Tickets Cog: MongoDB is not configured; ticket creation will be unavailable.")
             return
@@ -379,9 +379,9 @@ class Tickets(commands.Cog):
                 opener = None
         if opener:
             overwrite = channel.overwrites_for(opener)
-            overwrite.view_channel = True
+            overwrite.view_channel = False
             overwrite.send_messages = False
-            overwrite.read_message_history = True
+            overwrite.read_message_history = False
             try:
                 await channel.set_permissions(opener, overwrite=overwrite, reason=f"Ticket closed by {closer}")
             except discord.HTTPException:
@@ -397,7 +397,7 @@ class Tickets(commands.Cog):
         except discord.HTTPException:
             pass
         close_text = _format_ticket(str(config.get("close_message", "Ticket closed by {user}.")), user=closer, guild=guild, channel=channel, option=ticket.get("option_label", "Ticket"), ticket_id=channel.id)
-        await channel.send(embed=make_embed("🔒 Ticket Closed", close_text), view=TicketControlView(self), allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(embed=make_embed("🔒 Ticket Closed", close_text), view=TicketControlView(self, mode="closed"), allowed_mentions=discord.AllowedMentions.none())
         delay_minutes = int(config.get("delete_after_close_minutes", 0) or 0)
         if delay_minutes > 0:
             task = asyncio.create_task(self._delete_channel_after(channel.id, delay_minutes * 60))
