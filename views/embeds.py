@@ -139,13 +139,14 @@ USAGE_EXAMPLES = {
     "remind": ["{p}remind 10m Take a break", "{p}rm 2h Check the oven", "{p}remindme 1d Pay rent"],
     "timer": ["{p}timer 10m", "{p}timer 1h30m Pizza", "{p}timer 45s Tea is ready"],
     "reminders remove": ["{p}reminders remove a1b2c3", "{p}reminders r a1b2c3"],
-    # config
-    "config": [
-        "{p}config autolock",
-        "{p}c al",
-        "{p}c spawns",
-        "{p}c joins",
-    ],
+    # administrator configuration
+    "autolock": ["{p}autolock", "{p}al"],
+    "spawns": ["{p}spawns", "{p}s"],
+    "joins": ["{p}joins", "{p}j"],
+    "timersetup": ["{p}timersetup", "{p}timerconfig"],
+    "tickets": ["{p}tickets"],
+    "verify": ["{p}verify"],
+    "grinder": ["{p}grinder", "{p}grinder add autocatch 1"],
     # grinder
     "edit": [
         "{p}edit @user datafile1",
