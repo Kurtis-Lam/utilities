@@ -18,19 +18,21 @@ def ticket_config_embed(config: dict, guild: discord.Guild | None) -> discord.Em
     options = config.get("options", [])
     panels = config.get("panels", [])
     embed = make_embed("🎫 Ticket System Configuration", "Configure panels, ticket options, channel permissions, support roles, messages, transcripts and close controls.")
-    embed.add_field(name="Default category", value=f"<#{category_id}>" if category_id else "*Not set*", inline=True)
-    embed.add_field(name="Transcript/log channel", value=f"<#{log_id}>" if log_id else "*Not set*", inline=True)
-    embed.add_field(name="Open-ticket limit", value=str(config.get("max_open_tickets", 3)), inline=True)
-    embed.add_field(name="Support roles", value=" ".join(f"<@&{r}>" for r in staff) if staff else "*None*", inline=False)
-    embed.add_field(name="Roles pinged on creation", value=" ".join(f"<@&{r}>" for r in ping) if ping else "*None*", inline=False)
+    embed.add_field(name="Category", value=f"<#{category_id}>" if category_id else "*Not set*", inline=True)
+    embed.add_field(name="Log channel", value=f"<#{log_id}>" if log_id else "*Not set*", inline=True)
+    embed.add_field(name="Max open", value=str(config.get("max_open_tickets", 3)), inline=True)
     option_lines = [f"`{o.get('key', '?')}` — **{o.get('label', 'Untitled')}**" for o in options[:12]]
     if len(options) > 12:
         option_lines.append(f"…and {len(options) - 12} more")
     embed.add_field(name=f"Creation options ({len(options)}/25)", value="\n".join(option_lines) if option_lines else "*No options configured yet*", inline=False)
-    embed.add_field(name="Published panels", value=str(len(panels)), inline=True)
-    embed.add_field(name="Allow opener to close", value=str(bool(config.get("allow_user_close", True))), inline=True)
-    embed.add_field(name="Claim tickets", value=str(bool(config.get("allow_claim", True))), inline=True)
-    embed.add_field(name="Transcripts", value=str(bool(config.get("transcripts_enabled", True))), inline=True)
+    embed.add_field(name="Support roles", value=" ".join(f"<@&{r}>" for r in staff) if staff else "*None*", inline=True)
+    embed.add_field(name="Pinged roles", value=" ".join(f"<@&{r}>" for r in ping) if ping else "*None*", inline=True)
+    on_off = lambda value: "On" if value else "Off"
+    settings = (
+        f"Panels: {len(panels)} • Opener close: {on_off(config.get('allow_user_close', True))} • "
+        f"Claiming: {on_off(config.get('allow_claim', True))} • Transcripts: {on_off(config.get('transcripts_enabled', True))}"
+    )
+    embed.add_field(name="Settings", value=settings, inline=False)
     embed.set_footer(text=f"Settings for {guild.name if guild else 'this server'} • IDs may be entered as raw IDs or channel/role mentions")
     return embed
 
