@@ -26,6 +26,8 @@ from pymongo import ReturnDocument
 from views.embeds import BRAND_COLOR, err_embed, handle_command_error, info_embed, ok_embed, send_usage, warn_embed
 from views.loading import loading
 from views.navigate import PaginatorView
+from views.giveaway_views import EnterView, LeaveView
+from views.common_views import EMBED_COLOR, make_embed
 
 ENTER_CUSTOM_ID = "giveaway:enter"
 
@@ -105,49 +107,6 @@ def build_embed(doc: dict, *, ended: bool = False) -> discord.Embed:
     )
     embed.set_footer(text=f"ID: {doc['_id']}")
     return embed
-
-
-class LeaveView(discord.ui.View):
-    """Ephemeral prompt shown to someone who presses Enter while already entered."""
-
-    def __init__(self, cog: "Giveaway", giveaway_id: int):
-        super().__init__(timeout=60)
-        self.cog = cog
-        self.giveaway_id = giveaway_id
-
-    @discord.ui.button(label="Leave giveaway", style=discord.ButtonStyle.danger)
-    async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
-        result = await self.cog.collection.update_one(
-            {"_id": self.giveaway_id, "ended": False},
-            {"$pull": {"participants": interaction.user.id}},
-        )
-        for child in self.children:
-            child.disabled = True
-        text = "You left the giveaway." if result.modified_count else "That giveaway is no longer running."
-        await interaction.response.edit_message(content=text, view=self)
-        self.cog.schedule_refresh(self.giveaway_id)
-        self.stop()
-
-
-class EnterView(discord.ui.View):
-    """The persistent "Enter" button under every giveaway message."""
-
-    def __init__(self, cog: "Giveaway", *, entries: int = 0, disabled: bool = False):
-        super().__init__(timeout=None)
-        self.cog = cog
-        label = f"Enter ({entries})" if entries else "Enter"
-        button = discord.ui.Button(
-            style=discord.ButtonStyle.success,
-            label=label,
-            emoji="🎉",
-            custom_id=ENTER_CUSTOM_ID,
-            disabled=disabled,
-        )
-        button.callback = self._on_enter
-        self.add_item(button)
-
-    async def _on_enter(self, interaction: discord.Interaction):
-        await self.cog.handle_enter(interaction)
 
 
 class Giveaway(commands.Cog):
@@ -234,11 +193,18 @@ class Giveaway(commands.Cog):
             {"_id": message.id, "participants": interaction.user.id}, limit=1
         )
         if already:
-            return await interaction.response.send_message(
+            leave_view = LeaveView(self, message.id)
+            await interaction.response.send_message(
                 content="You're already in this giveaway.",
-                view=LeaveView(self, message.id),
+                view=leave_view,
                 ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
+            try:
+                leave_view.message = await interaction.original_response()
+            except discord.HTTPException:
+                pass
+            return
 
         result = await self.collection.update_one(
             {"_id": message.id, "ended": False},
@@ -333,36 +299,60 @@ class Giveaway(commands.Cog):
             try:
                 channel = await self.bot.fetch_channel(doc["channel_id"])
             except discord.HTTPException:
-                return
+                channel = None
 
+        guild = self.bot.get_guild(doc.get("guild_id"))
+        jump_url = f"https://discord.com/channels/{doc.get('guild_id', '@me')}/{doc['channel_id']}/{doc['_id']}"
         if winners:
-            mentions = ", ".join(f"<@{user_id}>" for user_id in winners)
+            display_names = []
+            for user_id in winners:
+                user = self.bot.get_user(user_id)
+                if user is None:
+                    try:
+                        user = await self.bot.fetch_user(user_id)
+                    except discord.HTTPException:
+                        user = None
+                display_names.append(f"**{discord.utils.escape_markdown(user.display_name if isinstance(user, discord.Member) else user.name)}**" if user else f"user `{user_id}`")
+            names = ", ".join(display_names)
             if rerolled:
-                text = f"🎉 New winner{'s' if len(winners) != 1 else ''} for **{doc['prize']}**: {mentions}. Congratulations!"
+                text = f"🎉 New winner{'s' if len(winners) != 1 else ''} for **{doc['prize']}**: {names}. Congratulations!"
             else:
-                text = f"🎉 Congratulations {mentions}! You won **{doc['prize']}**."
+                text = f"🎉 Congratulations to {names}! You won **{doc['prize']}**."
         else:
             text = f"😔 Nobody won **{doc['prize']}**: there were no valid entries."
 
-        reference = discord.MessageReference(
-            message_id=doc["_id"],
-            channel_id=doc["channel_id"],
-            guild_id=doc.get("guild_id"),
-            fail_if_not_exists=False,
-        )
-        try:
-            await channel.send(
-                text,
-                reference=reference,
-                allowed_mentions=discord.AllowedMentions(
-                    everyone=False,
-                    roles=False,
-                    users=[discord.Object(id=user_id) for user_id in winners],
-                    replied_user=False,
-                ),
+        if channel is not None:
+            reference = discord.MessageReference(
+                message_id=doc["_id"],
+                channel_id=doc["channel_id"],
+                guild_id=doc.get("guild_id"),
+                fail_if_not_exists=False,
             )
-        except discord.HTTPException as e:
-            print(f"Giveaway Cog: could not announce giveaway {doc['_id']}: {e}")
+            try:
+                await channel.send(text, reference=reference, allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException as exc:
+                print(f"Giveaway Cog: could not announce giveaway {doc['_id']}: {exc}")
+
+        if winners:
+            guild_name = guild.name if guild else "the server"
+            for user_id in winners:
+                user = self.bot.get_user(user_id)
+                if user is None:
+                    try:
+                        user = await self.bot.fetch_user(user_id)
+                    except discord.HTTPException:
+                        user = None
+                if user is None:
+                    continue
+                dm_embed = make_embed(
+                    "🎉 You won a giveaway!",
+                    f"You won **{doc['prize']}** in **{guild_name}**.\n\n[View the giveaway message]({jump_url})",
+                )
+                dm_embed.set_footer(text="Congratulations!")
+                try:
+                    await user.send(embed=dm_embed, allowed_mentions=discord.AllowedMentions.none())
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    print(f"Giveaway Cog: could not DM winner {user_id} for giveaway {doc['_id']}: {exc}")
 
     async def end_giveaway(self, giveaway_id: int) -> typing.Optional[dict]:
         """Ends a running giveaway. Returns the final document, or None if it was not running."""
@@ -382,7 +372,7 @@ class Giveaway(commands.Cog):
         message = await self._partial_message(doc)
         if message is not None:
             try:
-                await message.edit(embed=build_embed(doc, ended=True), view=EnterView(self, entries=0, disabled=True))
+                await message.edit(embed=build_embed(doc, ended=True), view=EnterView(self, entries=0, disabled=True), allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException:
                 pass
         await self._announce(doc, winners)
