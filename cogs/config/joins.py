@@ -17,7 +17,7 @@ from views.joins_views import (
 
 
 @app_commands.default_permissions(administrator=True)
-@commands.hybrid_command(name="joins", aliases=["j"], description="Configure welcome messages, greet pings and autoroles.")
+@commands.hybrid_command(name="joins", description="Configure welcome messages, greet pings and autoroles.")
 @commands.guild_only()
 @commands.has_permissions(administrator=True)
 async def joinsconfig(ctx: commands.Context):
