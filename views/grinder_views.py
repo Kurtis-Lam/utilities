@@ -3,7 +3,7 @@ import re
 import discord
 from discord import ui
 
-from cogs.config import grinder_config as config
+from cogs.owner_cmds import grinder as config
 from views.common_views import (
     ConfirmLayout,
     EmbedLayout,
@@ -85,14 +85,14 @@ class BulkConfirmView(ui.View):
     async def finish(self, embed: discord.Embed):
         if self.message:
             try:
-                await self.message.edit(embed=embed, view=None)
+                await self.message.edit(embed=embed, view=None, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException:
                 pass
 
     async def on_timeout(self):
         if self.message:
             try:
-                await self.message.edit(embed=info_embed("Timed out."), view=None)
+                await self.message.edit(embed=info_embed("Timed out."), view=None, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException:
                 pass
 
