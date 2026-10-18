@@ -52,51 +52,105 @@ def generate_captcha_text(length: int) -> str:
             return text
 
 
+def _wave_columns(layer, amplitude: float, wavelength: float, phase: float):
+    width, height = layer.size
+    pad = int(math.ceil(amplitude)) + 1
+    out = Image.new("RGBA", (width, height + pad * 2), (0, 0, 0, 0))
+    for x in range(width):
+        offset = int(round(math.sin(x / wavelength * 2 * math.pi + phase) * amplitude))
+        out.paste(layer.crop((x, 0, x + 1, height)), (x, pad + offset))
+    return out
+
+
+def _shear(layer, shear: float, resampling):
+    width, height = layer.size
+    extra = int(abs(shear) * height) + 2
+    return layer.transform(
+        (width + extra, height),
+        Image.AFFINE,
+        (1, shear, -extra / 2 - shear * height / 2, 0, 1, 0),
+        resample=resampling.BICUBIC,
+    )
+
+
+def _wave_rows(image, amplitude: float, wavelength: float, phase: float, background):
+    width, height = image.size
+    out = Image.new("RGB", (width, height), background)
+    for y in range(height):
+        offset = int(round(math.sin(y / wavelength * 2 * math.pi + phase) * amplitude))
+        out.paste(image.crop((0, y, width, y + 1)), (offset, y))
+    return out
+
+
 def make_captcha_image(text: str) -> discord.File:
     rng = random.SystemRandom()
     width, height = 700, 210
-    image = Image.new("RGB", (width, height), (246, 248, 255))
+    background = (246, 248, 255)
+    ink = (18, 28, 78, 255)
+    image = Image.new("RGB", (width, height), background)
     draw = ImageDraw.Draw(image)
     cell = (width - 48) / max(1, len(text))
-    font_size = max(52, min(120, int(cell * 0.9)))
+    font_size = max(40, min(92, int(cell * 0.72)))
     font = _load_captcha_font(font_size)
 
-    # Keep the background distortion subtle enough that every letter remains readable.
-    for _ in range(12):
+    for _ in range(14):
         x1, y1 = rng.randrange(width), rng.randrange(height)
         x2 = min(width - 1, max(0, x1 + rng.randint(-150, 150)))
-        y2 = min(height - 1, max(0, y1 + rng.randint(-35, 35)))
-        draw.line((x1, y1, x2, y2), fill=(rng.randrange(155, 215), rng.randrange(155, 215), rng.randrange(155, 215)), width=1)
-    for _ in range(100):
+        y2 = min(height - 1, max(0, y1 + rng.randint(-45, 45)))
+        draw.line((x1, y1, x2, y2), fill=(rng.randrange(150, 215), rng.randrange(150, 215), rng.randrange(150, 215)), width=1)
+    for _ in range(140):
         x, y = rng.randrange(width), rng.randrange(height)
         draw.point((x, y), fill=(rng.randrange(115, 210), rng.randrange(115, 210), rng.randrange(115, 210)))
-    for phase in (0.0, 2.2):
-        points = [
-            (x, int(height / 2 + math.sin(x / rng.randint(45, 65) + phase) * rng.randint(9, 20)))
-            for x in range(0, width, 10)
-        ]
-        draw.line(points, fill=(145, 160, 195), width=1)
 
     resampling = getattr(Image, "Resampling", Image)
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
     for index, char in enumerate(text):
-        probe = ImageDraw.Draw(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
         try:
             bounds = probe.textbbox((0, 0), char, font=font, stroke_width=1)
         except Exception:
             bounds = (0, 0, font_size, font_size)
         glyph_width = max(1, bounds[2] - bounds[0])
         glyph_height = max(1, bounds[3] - bounds[1])
-        layer = Image.new("RGBA", (glyph_width + 18, glyph_height + 18), (0, 0, 0, 0))
+        layer = Image.new("RGBA", (glyph_width + 24, glyph_height + 24), (0, 0, 0, 0))
         layer_draw = ImageDraw.Draw(layer)
         try:
-            layer_draw.text((9 - bounds[0], 9 - bounds[1]), char, font=font, fill=(18, 28, 78, 255), stroke_width=1, stroke_fill=(18, 28, 78, 255))
+            layer_draw.text((12 - bounds[0], 12 - bounds[1]), char, font=font, fill=ink, stroke_width=1, stroke_fill=ink)
         except TypeError:
-            layer_draw.text((9 - bounds[0], 9 - bounds[1]), char, font=font, fill=(18, 28, 78, 255))
-        rotated = layer.rotate(rng.randint(-13, 13), resample=resampling.BICUBIC, expand=True)
+            layer_draw.text((12 - bounds[0], 12 - bounds[1]), char, font=font, fill=ink)
+
+        # Reshape each glyph: uneven stretch, slant and a wavy outline.
+        stretched = layer.resize(
+            (max(1, int(layer.width * rng.uniform(0.88, 1.15))), max(1, int(layer.height * rng.uniform(0.88, 1.18)))),
+            resample=resampling.BICUBIC,
+        )
+        slanted = _shear(stretched, rng.uniform(-0.26, 0.26), resampling)
+        warped = _wave_columns(slanted, rng.uniform(1.5, 3.0), rng.uniform(34, 55), rng.uniform(0, math.tau))
+        rotated = warped.rotate(rng.randint(-14, 14), resample=resampling.BICUBIC, expand=True)
+
         center_x = 24 + (index + 0.5) * cell
         x = int(center_x - rotated.width / 2)
-        y = int(height / 2 - rotated.height / 2 + rng.randint(-13, 13))
+        y = int(height / 2 - rotated.height / 2 + rng.randint(-14, 14))
         image.paste(rotated, (x, y), rotated)
+
+    # Strike-through curves drawn over the text so they warp together with it.
+    for _ in range(1):
+        phase = rng.uniform(0, math.tau)
+        wavelength = rng.randint(55, 95)
+        amplitude = rng.randint(10, 18)
+        base = height / 2 + rng.randint(-14, 14)
+        points = [(x, int(base + math.sin(x / wavelength * 2 * math.pi + phase) * amplitude)) for x in range(0, width, 6)]
+        draw.line(points, fill=(120, 135, 175), width=1)
+
+    # Whole-image distortion in both directions.
+    image = _wave_rows(image, rng.uniform(2, 3.5), rng.uniform(90, 130), rng.uniform(0, math.tau), background)
+    columns = Image.new("RGB", (width, height), background)
+    column_phase = rng.uniform(0, math.tau)
+    column_wavelength = rng.uniform(110, 170)
+    column_amplitude = rng.uniform(2.5, 4)
+    for x in range(width):
+        offset = int(round(math.sin(x / column_wavelength * 2 * math.pi + column_phase) * column_amplitude))
+        columns.paste(image.crop((x, 0, x + 1, height)), (x, offset))
+    image = columns
 
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
@@ -109,14 +163,14 @@ def verification_config_embed(config: dict, guild: discord.Guild | None) -> disc
     role_id = config.get("unverified_role_id")
     verified_role_id = config.get("verified_role_id")
     embed = make_embed("🛡️ Verification System", "Set the verification channel and role, configure the CAPTCHA, then post the persistent verification panel.")
-    embed.add_field(name="Verification channel", value=f"<#{channel_id}>" if channel_id else "*Not set*", inline=True)
-    embed.add_field(name="Unverified role", value=f"<@&{role_id}>" if role_id else "*Not set*", inline=True)
-    embed.add_field(name="Verified role (auto-assigned)", value=f"<@&{verified_role_id}>" if verified_role_id else "*None*", inline=True)
+    embed.add_field(name="Channel", value=f"<#{channel_id}>" if channel_id else "*Not set*", inline=True)
+    embed.add_field(name="Unverified", value=f"<@&{role_id}>" if role_id else "*Not set*", inline=True)
+    embed.add_field(name="Verified", value=f"<@&{verified_role_id}>" if verified_role_id else "*None*", inline=True)
+    embed.add_field(name="Panel title", value=str(config.get("panel_title", "Verify to access the server"))[:256], inline=False)
     embed.add_field(name="Code length", value=str(config.get("captcha_length", 6)), inline=True)
     embed.add_field(name="Attempts", value=str(config.get("max_attempts", 3)), inline=True)
-    embed.add_field(name="Challenge expiry", value=f"{config.get('captcha_expiry_seconds', 180)} sec", inline=True)
-    embed.add_field(name="Panel message", value="Configured" if config.get("verify_panel_message_id") else "Not posted", inline=True)
-    embed.add_field(name="Panel title", value=str(config.get("panel_title", "Verify to access the server"))[:256], inline=False)
+    embed.add_field(name="Expiry", value=f"{config.get('captcha_expiry_seconds', 180)}s", inline=True)
+    embed.add_field(name="Panel", value="Posted" if config.get("verify_panel_message_id") else "Not posted", inline=True)
     embed.add_field(name="Prompt", value=str(config.get("prompt_description", "Complete this CAPTCHA to receive access to the rest of the server."))[:1000], inline=False)
     embed.set_footer(text=f"{guild.name if guild else 'This server'} • Verification role is protected in autoroles")
     return embed
