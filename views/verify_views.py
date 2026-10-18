@@ -250,34 +250,35 @@ class VerificationConfigView(EmbedLayout):
                 embed=error_embed("This setting can only be changed inside a server."),
                 ephemeral=True,
             )
+        await interaction.response.defer()
         try:
-            # ChannelSelect values may be AppCommandChannel wrappers. The cog resolves
-            # the selected ID into a real GuildChannel before reading permission overwrites.
             channel = await self.cog.set_verification_channel(interaction.guild, selected_channel)
         except (RuntimeError, ValueError, discord.Forbidden, discord.HTTPException) as exc:
-            return await interaction.response.send_message(embed=error_embed(f"Could not set the verification channel: {exc}"), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed(f"Could not set the verification channel: {exc}"), ephemeral=True)
         self.config = await self.cog.get_config(interaction.guild.id)
         self.set_embed(verification_config_embed(self.config, interaction.guild))
-        await interaction.response.edit_message(view=self)
+        await interaction.edit_original_response(view=self)
         await interaction.followup.send(embed=success_embed(f"Verification channel set to {channel.mention}; channel permissions were updated."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def select_role(self, interaction: discord.Interaction):
         role = self.role_select.values[0]
+        await interaction.response.defer()
         try:
             await self.cog.set_unverified_role(interaction.guild, role)
         except (RuntimeError, ValueError, discord.Forbidden, discord.HTTPException) as exc:
-            return await interaction.response.send_message(embed=error_embed(f"Could not set the unverified role: {exc}"), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed(f"Could not set the unverified role: {exc}"), ephemeral=True)
         self.config = await self.cog.get_config(interaction.guild.id)
         self.set_embed(verification_config_embed(self.config, interaction.guild))
-        await interaction.response.edit_message(view=self)
+        await interaction.edit_original_response(view=self)
         await interaction.followup.send(embed=success_embed(f"Unverified role set to {role.mention} and protected from autorole removal."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def create_role(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         role = await self.cog.create_unverified_role(interaction.guild)
         if role is None:
-            return await interaction.response.send_message(embed=error_embed("Could not create the Unverified role. Check the bot's Manage Roles permission and role hierarchy."), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed("Could not create the Unverified role. Check the bot's Manage Roles permission and role hierarchy."), ephemeral=True)
         await self.refresh_message()
-        await interaction.response.send_message(embed=success_embed(f"Created {role.mention} and applied it as the protected unverified role."), ephemeral=True)
+        await interaction.followup.send(embed=success_embed(f"Created {role.mention} and applied it as the protected unverified role."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def settings(self, interaction: discord.Interaction):
         await interaction.response.send_modal(VerificationCaptchaSettingsModal(self))
@@ -289,24 +290,28 @@ class VerificationConfigView(EmbedLayout):
         await interaction.response.send_modal(VerificationButtonLabelsModal(self))
 
     async def apply_permissions(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         config = await self.cog.get_config(interaction.guild.id)
         if not config.get("verify_channel_id") or not config.get("unverified_role_id"):
-            return await interaction.response.send_message(embed=error_embed("Choose a verification channel and role first."), ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        result = await self.cog.apply_verification_permissions(interaction.guild, config)
+            return await interaction.followup.send(embed=error_embed("Choose a verification channel and role first."), ephemeral=True)
+        try:
+            result = await self.cog.apply_verification_permissions(interaction.guild, config)
+        except (ValueError, discord.Forbidden, discord.HTTPException) as exc:
+            return await interaction.followup.send(embed=error_embed(f"Could not apply permissions: {exc}"), ephemeral=True)
         await self.refresh_message()
         await interaction.followup.send(embed=success_embed(f"Permissions applied to {result['updated']} category/channel(s)." + (f"\nWarnings: {result['failed']} channel update(s) failed; check bot permissions." if result['failed'] else "")), ephemeral=True)
 
     async def post_panel(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         config = await self.cog.get_config(interaction.guild.id)
         channel = interaction.guild.get_channel(int(config.get("verify_channel_id") or 0))
         if not isinstance(channel, discord.TextChannel):
-            return await interaction.response.send_message(embed=error_embed("Set a text verification channel first."), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed("Set a text verification channel first."), ephemeral=True)
         message = await self.cog.post_verification_panel(interaction.guild, channel, config)
         if message is None:
-            return await interaction.response.send_message(embed=error_embed("Could not post the verification panel. Check channel permissions."), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed("Could not post the verification panel. Check channel permissions."), ephemeral=True)
         await self.refresh_message()
-        await interaction.response.send_message(embed=success_embed(f"Verification panel posted in {channel.mention}."), ephemeral=True)
+        await interaction.followup.send(embed=success_embed(f"Verification panel posted in {channel.mention}."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def test_captcha(self, interaction: discord.Interaction):
         await self.cog.start_captcha(interaction, test_only=True)
