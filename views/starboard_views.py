@@ -142,7 +142,7 @@ class StarboardView(discord.ui.View):
             item.disabled = True
         if self.message:
             try:
-                await self.message.edit(view=self)
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException:
                 pass
 
