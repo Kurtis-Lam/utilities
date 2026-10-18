@@ -141,6 +141,27 @@ class Verification(commands.Cog):
             setattr(current, field, snapshot.get(field))
         return current
 
+    async def _resolve_verification_channel(
+        self,
+        guild: discord.Guild,
+        channel: object,
+    ) -> discord.TextChannel | discord.NewsChannel:
+        """Resolve UI channel-select wrappers to a real guild channel object."""
+        channel_id = getattr(channel, "id", None)
+        if channel_id is None:
+            raise ValueError("Select a valid text channel from this server.")
+
+        resolved = guild.get_channel(int(channel_id))
+        if resolved is None:
+            try:
+                resolved = await guild.fetch_channel(int(channel_id))
+            except discord.NotFound as exc:
+                raise ValueError("The selected channel no longer exists in this server.") from exc
+
+        if not isinstance(resolved, (discord.TextChannel, discord.NewsChannel)):
+            raise ValueError("The verification channel must be a server text or announcement channel.")
+        return resolved
+
     async def _snapshot_verify_channel(self, guild: discord.Guild, channel: discord.TextChannel | discord.NewsChannel, config: dict):
         backups = dict(config.get("verify_channel_backups", {}))
         key = str(channel.id)
@@ -260,7 +281,10 @@ class Verification(commands.Cog):
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"Verification Cog: could not migrate every member to the new unverified role: {exc}")
 
-    async def set_verification_channel(self, guild: discord.Guild, channel: discord.TextChannel | discord.NewsChannel):
+    async def set_verification_channel(self, guild: discord.Guild, channel: object) -> discord.TextChannel | discord.NewsChannel:
+        # ChannelSelect may return an AppCommandChannel wrapper without permission overwrites.
+        # Resolve it before any snapshot or permission-management operations.
+        channel = await self._resolve_verification_channel(guild, channel)
         config = await self.get_config(guild.id)
         old_channel_id = int(config["verify_channel_id"]) if config.get("verify_channel_id") else None
         role_id = int(config["unverified_role_id"]) if config.get("unverified_role_id") else None
@@ -279,6 +303,7 @@ class Verification(commands.Cog):
         if not config.get("verification_initialized"):
             assigned = await self._assign_unverified_to_existing_members(guild, role)
             await self.save_config_fields(guild.id, {"verification_initialized": True, "initial_members_assigned": assigned})
+        return channel
 
     async def _assign_unverified_to_existing_members(self, guild: discord.Guild, role: discord.Role) -> int:
         assigned = 0
