@@ -139,7 +139,7 @@ class BaseView(discord.ui.View):
             return
         self.disable_all()
         try:
-            await self.message.edit(view=self)
+            await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
             pass
 
@@ -277,7 +277,7 @@ class BaseLayout(discord.ui.LayoutView):
             return
         self.disable_all()
         try:
-            await self.message.edit(view=self)
+            await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
             pass
 
@@ -390,7 +390,7 @@ class ConfirmLayout(BaseLayout):
         self.add_item(container_from_embed(embed))
         if self.message is not None:
             try:
-                await self.message.edit(view=self)
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException:
                 pass
 
@@ -411,7 +411,7 @@ class ConfirmLayout(BaseLayout):
         self.render("timeout")
         if self.message is not None:
             try:
-                await self.message.edit(view=self)
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException:
                 pass
 
