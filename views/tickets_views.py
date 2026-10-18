@@ -63,18 +63,18 @@ class TicketPanelView(discord.ui.View):
             return await interaction.response.send_message(embed=error_embed("Use this panel inside the server."), ephemeral=True)
         if not self.cog._db_ready():
             return await interaction.response.send_message(embed=error_embed("Ticket storage is unavailable. Please contact an administrator."), ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         config = await self.cog.get_config(interaction.guild.id)
         panel = next((p for p in config.get("panels", []) if int(p.get("message_id", 0)) == interaction.message.id), None)
         if panel is None:
-            return await interaction.response.send_message(embed=error_embed("This ticket panel is no longer configured. Ask an administrator to repost it."), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed("This ticket panel is no longer configured. Ask an administrator to repost it."), ephemeral=True)
         options = config.get("options", [])
         if not options:
-            return await interaction.response.send_message(embed=error_embed("No ticket options have been configured yet."), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed("No ticket options have been configured yet."), ephemeral=True)
         view = TicketOptionSelectView(self.cog, config, panel)
         embed = make_embed("🎫 Create a Ticket", str(config.get("choose_option_message", "Choose the category that best matches your request.")))
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         try:
-            view.message = await interaction.original_response()
+            view.message = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
         except discord.HTTPException:
             pass
 
@@ -199,9 +199,9 @@ class TicketDashboardView(EmbedLayout):
         self.set_embed(ticket_config_embed(self.config, self.guild))
 
     async def refresh(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         await self.reload_config()
-        # The refreshed embed is rendered within this Components V2 layout.
-        await interaction.response.edit_message(view=self)
+        await interaction.edit_original_response(view=self)
 
     async def refresh_message(self):
         if self.message is None:
@@ -508,19 +508,20 @@ class PostTicketPanelModal(Modal, title="Publish Ticket Panel"):
     async def on_submit(self, interaction: discord.Interaction):
         channel_ids = _ids(self.channel_id.value)
         channel = interaction.guild.get_channel(channel_ids[0]) if channel_ids and interaction.guild else None
-        if not isinstance(channel, (discord.TextChannel, discord.NewsChannel)):
+        if not isinstance(channel, discord.TextChannel):
             return await interaction.response.send_message(embed=error_embed("Choose a text channel ID or mention."), ephemeral=True)
         if not self.dashboard.config.get("options"):
             return await interaction.response.send_message(embed=error_embed("Add at least one ticket option before publishing a panel."), ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         label = self.button_label.value.strip() or "Create Ticket"
         embed = make_embed(self.title_input.value, self.description_input.value)
         try:
             message = await channel.send(embed=embed, view=TicketPanelView(self.dashboard.cog, label), allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException as exc:
-            return await interaction.response.send_message(embed=error_embed(f"Could not post the panel: {exc}"), ephemeral=True)
+            return await interaction.followup.send(embed=error_embed(f"Could not post the panel: {exc}"), ephemeral=True)
         config = await self.dashboard.cog.get_config(self.dashboard.guild.id)
         panels = list(config.get("panels", []))
         panels.append({"channel_id": channel.id, "message_id": message.id, "title": self.title_input.value, "description": self.description_input.value, "button_label": label, "created_at": int(time.time())})
         await self.dashboard.cog.save_config_fields(self.dashboard.guild.id, {"panels": panels, "panel_button_label": label})
-        await interaction.response.send_message(embed=success_embed(f"Ticket panel published in {channel.mention}.\n[Jump to panel]({message.jump_url})"), ephemeral=True)
+        await interaction.followup.send(embed=success_embed(f"Ticket panel published in {channel.mention}.\n[Jump to panel]({message.jump_url})"), ephemeral=True)
         await self.dashboard.refresh_message()
