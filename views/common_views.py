@@ -175,6 +175,7 @@ class ConfirmView(BaseView):
         super().__init__(author_id=author.id, timeout=timeout)
         self.author = author
         self.value: bool | None = None
+        self._sending = False
         self.confirm_button.label = confirm_label
         self.cancel_button.label = cancel_label
 
@@ -350,6 +351,7 @@ class ConfirmLayout(BaseLayout):
         super().__init__(author_id=author.id, timeout=timeout)
         self.author = author
         self.value: bool | None = None
+        self._sending = False
         self.cancel_text = cancel_text
         self.timeout_text = timeout_text
         self.embed = embed or discord.Embed(
@@ -397,11 +399,18 @@ class ConfirmLayout(BaseLayout):
         self.add_item(container)
 
     def __bool__(self) -> bool:
-        """Truthy only when the user pressed Confirm."""
-        return self.value is True
+        """Truthy only when the user pressed Confirm (and while the prompt is being sent)."""
+        return self._sending or self.value is True
 
     async def send(self, ctx) -> discord.Message:
-        self.message = await ctx.reply(view=self, mention_author=False)
+        # discord.py only registers a view for button clicks when `bool(view)` is true while
+        # sending. Without this the prompt is falsy (nothing confirmed yet), the view is never
+        # stored, and Confirm / Cancel do nothing.
+        self._sending = True
+        try:
+            self.message = await ctx.reply(view=self, mention_author=False)
+        finally:
+            self._sending = False
         return self.message
 
     async def show(self, embed: discord.Embed) -> None:
