@@ -2,6 +2,7 @@
 
 * ``gtn <lower> <upper> <prize>``  start a game in this channel; the secret number is DMed to you
 * ``gtn hint``                     narrow the public bounds around the secret number
+                                   (15 second cooldown, each hint shrinks the range by 13%)
 * ``gtn end``                      cancel the running game in this channel
 
 Anyone can guess by simply typing a number in the channel. The first correct guess wins: the bot
@@ -21,6 +22,8 @@ from views.embeds import BRAND_COLOR, err_embed, handle_command_error, ok_embed,
 TICKET_EMOJI = "🎫"
 MAX_PRIZE_LENGTH = 200
 MAX_ABS_NUMBER = 10 ** 12
+HINT_COOLDOWN = 15
+HINT_SHRINK = 0.13
 _GUESS = re.compile(r"^-?\d{1,13}$")
 _NO_PINGS = discord.AllowedMentions.none()
 
@@ -36,6 +39,7 @@ class GtnGame:
     high: int = 0
     guesses: int = 0
     hints: int = 0
+    last_hint: float = 0.0
     started_at: float = field(default_factory=time.time)
 
     def __post_init__(self):
@@ -156,17 +160,24 @@ class GuessTheNumber(commands.Cog):
         if game is None:
             return await ctx.reply(embed=err_embed("There's no game running in this channel."), mention_author=False)
 
+        remaining = HINT_COOLDOWN - (time.time() - game.last_hint)
+        if remaining > 0:
+            return await ctx.reply(
+                embed=err_embed(f"Hints have a cooldown. Try again in {int(remaining) + 1}s."),
+                mention_author=False,
+            )
+
         span = game.high - game.low
         if span <= 2:
             return await ctx.reply(embed=err_embed("The range can't be narrowed any further."), mention_author=False)
 
-        width = max(2, span // 2)
-        new_low = random.randint(max(game.low, game.secret - width), game.secret)
-        new_high = min(game.high, new_low + width)
-        if new_high < game.secret:
-            new_high = game.secret
-        game.low, game.high = new_low, new_high
+        width = min(span - 1, max(2, int(span * (1 - HINT_SHRINK))))
+        window_low = max(game.low, game.secret - width)
+        window_high = min(game.secret, game.high - width)
+        new_low = random.randint(window_low, window_high)
+        game.low, game.high = new_low, new_low + width
         game.hints += 1
+        game.last_hint = time.time()
 
         embed = discord.Embed(
             title="💡 Hint",
