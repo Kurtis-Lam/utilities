@@ -21,7 +21,7 @@ from cogs.poketwo_helper.lockcommon import (
 )
 from views.common_views import error_embed
 from views.embeds import handle_command_error
-from cogs.config.baseconfigs import config_group
+from .baseconfigs import config_group
 
 
 # Pseudo-category used to store the server's "standard" settings. It lives in the same
