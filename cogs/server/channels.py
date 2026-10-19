@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 # Import ConfirmView from views/common.py
-from views.common_views import confirm
+from views.common_views import confirm, confirm_and_run
 from views.embeds import handle_common_error, send_usage
 from views.loading import loading
 from views.prompts import ask, exact_category, is_skip, normalize_name, one_line, raw_args, split_name_and_target
@@ -205,25 +205,33 @@ class Channels(commands.Cog):
     )
     @commands.has_permissions(manage_channels=True)
     async def deletechannel(
-        self, 
-        ctx, 
-        channel: typing.Optional[discord.TextChannel] = commands.parameter(default=None, description="The channel to delete (mention or ID). Defaults to the current channel.")
+        self,
+        ctx,
+        channel: typing.Optional[discord.TextChannel] = commands.parameter(
+            default=None,
+            description="The channel to delete (mention or ID). Defaults to the current channel.",
+        ),
     ):
         target = channel or ctx.channel
-        confirmed = await self.confirm_action(ctx, f"Delete {target.mention}? This cannot be undone.")
-        if not confirmed:
-            return
-
         target_name = target.name
-        await target.delete(reason=f"Deleted by {ctx.author}")
-        # If the confirmation lived inside the deleted channel it is gone with it;
-        # show() swallows that error.
-        embed = discord.Embed(
-            title="🗑️ Channel Deleted",
-            description=f"Successfully deleted `{target_name}`.",
-            color=discord.Color.red()
+
+        async def perform_delete(_interaction):
+            await target.delete(reason=f"Deleted by {ctx.author}")
+            return discord.Embed(
+                title="🗑️ Channel Deleted",
+                description=f"Successfully deleted `{target_name}`.",
+                color=discord.Color.red(),
+            )
+
+        await confirm_and_run(
+            ctx,
+            f"Delete {target.mention}? This cannot be undone.",
+            perform_delete,
+            title="⚠️ Confirm",
+            cancel_text="❌ Cancelled",
+            timeout_text="⏱️ Timed out",
+            failure_text="❌ Channel deletion failed. Check the bot's permissions and confirm the channel still exists.",
         )
-        await confirmed.show(embed)
 
     @commands.hybrid_command(aliases=["rch"], name="renamechannel", description="Renames a text channel.", with_app_command=True)
     @app_commands.describe(
