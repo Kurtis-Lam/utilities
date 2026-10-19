@@ -10,7 +10,7 @@ import discord
 from PIL import Image, ImageDraw, ImageFont
 from discord.ui import Button, ChannelSelect, Modal, RoleSelect, TextInput
 
-from views.common_views import EmbedLayout, error_embed, make_embed, success_embed
+from views.common_views import EmbedLayout, container_from_embed, error_embed, make_embed, success_embed
 
 # Characters that are difficult to confuse in small or distorted text are excluded.
 CAPTCHA_LETTERS = "abcdefghjkmnprstuvwxyz"
@@ -176,13 +176,21 @@ def verification_config_embed(config: dict, guild: discord.Guild | None) -> disc
     return embed
 
 
-class VerificationPanelView(discord.ui.View):
-    def __init__(self, cog, button_label: str = "Verify"):
+class VerificationPanelView(discord.ui.LayoutView):
+    """The public verification message: the Verify button sits inside the embed itself.
+
+    Persistent: the cog registers one instance at startup and the button is matched by its
+    custom_id, so it keeps working after restarts (also on panels posted before this layout).
+    """
+
+    def __init__(self, cog, button_label: str = "Verify", embed: discord.Embed | None = None):
         super().__init__(timeout=None)
         self.cog = cog
         button = Button(label=(button_label or "Verify")[:80], style=discord.ButtonStyle.success, emoji="✅", custom_id="verify:start")
         button.callback = self.verify_callback
-        self.add_item(button)
+        if embed is None:
+            embed = make_embed("Verify to access the server", "Press Verify and enter the letters and numbers shown in the CAPTCHA to unlock the server.")
+        self.add_item(container_from_embed(embed, discord.ui.ActionRow(button)))
 
     async def verify_callback(self, interaction: discord.Interaction):
         await self.cog.start_captcha(interaction)
