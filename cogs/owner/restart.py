@@ -2,7 +2,7 @@ import time
 
 from discord.ext import commands
 
-from cogs.owner_cmds.utils import OwnerCog, safe_edit, safe_send
+from cogs.owner.utils import OwnerCog, safe_edit, safe_send
 
 
 class Restart(OwnerCog):
