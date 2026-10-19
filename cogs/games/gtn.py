@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import discord
 from discord.ext import commands
 
-from views.embeds import BRAND_COLOR, err_embed, handle_command_error, ok_embed, send_usage
+from views.embeds import BRAND_COLOR, ERROR_COLOR, err_embed, handle_command_error, ok_embed, send_usage
 
 TICKET_EMOJI = "🎫"
 MAX_PRIZE_LENGTH = 200
@@ -160,12 +160,13 @@ class GuessTheNumber(commands.Cog):
         if game is None:
             return await ctx.reply(embed=err_embed("There's no game running in this channel."), mention_author=False)
 
-        remaining = HINT_COOLDOWN - (time.time() - game.last_hint)
-        if remaining > 0:
-            return await ctx.reply(
-                embed=err_embed(f"Hints have a cooldown. Try again in {int(remaining) + 1}s."),
-                mention_author=False,
+        ready_at = game.last_hint + HINT_COOLDOWN
+        if time.time() < ready_at:
+            embed = discord.Embed(
+                description=f"❌ Hints have a cooldown. Try again <t:{int(ready_at) + 1}:R>.",
+                color=ERROR_COLOR,
             )
+            return await ctx.reply(embed=embed, mention_author=False)
 
         span = game.high - game.low
         if span <= 2:
