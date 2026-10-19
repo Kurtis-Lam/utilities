@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs.poketwo_helper.lockcommon import format_duration, split_scope_flags
+from views.timer_views import TIMER_CATEGORIES, TIMER_LABELS
 from views.embeds import (
     err_embed,
     handle_command_error,
@@ -46,7 +47,7 @@ class Toggle(commands.Cog):
         if is_global and is_standard:
             message = "`--global` and `--standard` can't be used together."
         elif is_standard and not allow_standard:
-            message = "`--standard` can only be used with lockdelay, locktime and restrictunlockers (and `.set whitelist`)."
+            message = "`--standard` can only be used with lockdelay, locktime, restrictunlockers and the timers."
         elif is_standard and locks:
             message = "`--standard` toggles the standard values, so don't list locks with it."
         if message:
@@ -325,6 +326,138 @@ class Toggle(commands.Cog):
             embed = warn_embed("Nothing Changed", description)
         self._unknown_field(embed, unknown)
         await ctx.reply(embed=embed, mention_author=False)
+
+    # --- .toggle shtimer|cltimer|rptimer|tptimer [--global|--standard] ---------------
+    # --- .toggle timer {sh|cl|rp|tp|all ...} [--global|--standard] -------------------
+
+    async def _toggle_timers(self, ctx: commands.Context, cats: list[str], is_global: bool, is_standard: bool):
+        timer = self.bot.get_cog("Timer")
+        if not timer:
+            return await ctx.reply(embed=err_embed("Timer is not loaded.", emoji="⚠️"), mention_author=False)
+
+        gid, cid = ctx.guild.id, ctx.channel.id
+        scope = "standard" if is_standard else ("whole server" if is_global else ctx.channel.mention)
+        lines = []
+        for cat in cats:
+            label = TIMER_LABELS.get(cat, cat.upper())
+            if is_standard:
+                new_state = await timer.toggle_timer(gid, STANDARD)
+                cfg = await timer.get_standard(gid)
+                label = "Standard timer (shared by all timers)"
+            elif is_global:
+                new_state = await timer.toggle_timer(gid, cat)
+                cfg = await timer.get_category_config(gid, cat)
+            else:
+                new_state = await timer.toggle_timer_channel(gid, cid, cat)
+                cfg = await timer.get_category_config_channel(gid, cid, cat)
+            state = f"**On ✅** (`{cfg.get('seconds', 15)}s`)" if new_state else "**Off ❌**"
+            lines.append(f"⏲️ **{label}**: {state} ({scope})")
+            if is_standard:
+                break  # the standard is a single shared value, not per timer
+
+        await ctx.reply(embed=ok_embed("Timer Toggled", "\n".join(lines)[:4096], emoji="⏲️"), mention_author=False)
+
+    @toggle_group.command(
+        name="timer",
+        aliases=["timers"],
+        usage="<sh|cl|rp|tp|all...> [--global|--standard]",
+        description="Turn catch timers on/off.",
+        extras={"args": {"args": "One or more timers (sh, cl, rp, tp or all), plus optional --global (whole server) or --standard (the standard value; no timers with it). No flag = this channel only."}},
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        args='Timers (sh, cl, rp, tp, all), plus --global (server) or --standard (the standard value).',
+    )
+    async def toggle_timer(self, ctx: commands.Context, *, args: str = ""):
+        tokens, global_flag, standard_flag = split_scope_flags(args.split())
+        if await self._flag_error(ctx, tokens, global_flag, standard_flag, allow_standard=True):
+            return
+        if not tokens and not standard_flag:
+            return await send_usage(ctx, title="Missing arg: `timer`")
+
+        cats, unknown = [], []
+        for tok in tokens:
+            low = tok.lower().removesuffix("timer")
+            if low == "all":
+                cats = list(TIMER_CATEGORIES)
+                break
+            if low in TIMER_CATEGORIES:
+                if low not in cats:
+                    cats.append(low)
+            else:
+                unknown.append(tok)
+        if not cats and not standard_flag:
+            return await ctx.reply(embed=err_embed(f"Unknown timer(s): {', '.join(unknown)}"), mention_author=False)
+        await self._toggle_timers(ctx, cats or ["sh"], global_flag, standard_flag)
+
+    @toggle_group.command(
+        name="shtimer",
+        usage="[--global|--standard]",
+        description="Turn the SH timer on/off.",
+        extras={"args": {"args": "Optional --global (whole server) or --standard (the standard value). No flag = this channel only."}},
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        args='Optional --global (server) or --standard (the standard value).',
+    )
+    async def toggle_shtimer(self, ctx: commands.Context, *, args: str = ""):
+        flags, global_flag, standard_flag = split_scope_flags(args.split())
+        if await self._flag_error(ctx, flags, global_flag, standard_flag, allow_standard=True):
+            return
+        await self._toggle_timers(ctx, ["sh"], global_flag, standard_flag)
+
+    @toggle_group.command(
+        name="cltimer",
+        usage="[--global|--standard]",
+        description="Turn the CL timer on/off.",
+        extras={"args": {"args": "Optional --global (whole server) or --standard (the standard value). No flag = this channel only."}},
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        args='Optional --global (server) or --standard (the standard value).',
+    )
+    async def toggle_cltimer(self, ctx: commands.Context, *, args: str = ""):
+        flags, global_flag, standard_flag = split_scope_flags(args.split())
+        if await self._flag_error(ctx, flags, global_flag, standard_flag, allow_standard=True):
+            return
+        await self._toggle_timers(ctx, ["cl"], global_flag, standard_flag)
+
+    @toggle_group.command(
+        name="rptimer",
+        usage="[--global|--standard]",
+        description="Turn the RP timer on/off.",
+        extras={"args": {"args": "Optional --global (whole server) or --standard (the standard value). No flag = this channel only."}},
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        args='Optional --global (server) or --standard (the standard value).',
+    )
+    async def toggle_rptimer(self, ctx: commands.Context, *, args: str = ""):
+        flags, global_flag, standard_flag = split_scope_flags(args.split())
+        if await self._flag_error(ctx, flags, global_flag, standard_flag, allow_standard=True):
+            return
+        await self._toggle_timers(ctx, ["rp"], global_flag, standard_flag)
+
+    @toggle_group.command(
+        name="tptimer",
+        usage="[--global|--standard]",
+        description="Turn the TP timer on/off.",
+        extras={"args": {"args": "Optional --global (whole server) or --standard (the standard value). No flag = this channel only."}},
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    @app_commands.describe(
+        args='Optional --global (server) or --standard (the standard value).',
+    )
+    async def toggle_tptimer(self, ctx: commands.Context, *, args: str = ""):
+        flags, global_flag, standard_flag = split_scope_flags(args.split())
+        if await self._flag_error(ctx, flags, global_flag, standard_flag, allow_standard=True):
+            return
+        await self._toggle_timers(ctx, ["tp"], global_flag, standard_flag)
 
 
 async def setup(bot: commands.Bot):
