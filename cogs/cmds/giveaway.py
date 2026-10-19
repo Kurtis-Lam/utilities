@@ -97,7 +97,6 @@ def build_embed(doc: dict, *, ended: bool = False) -> discord.Embed:
     embed = discord.Embed(
         title=f"🎉 {doc['prize']}",
         description=(
-            "**This giveaway has ended.**\n\n"
             f"**Winner{'s' if len(winners) != 1 else ''}:** {winner_text}\n"
             f"**Hosted by:** <@{doc['host_id']}>\n"
             f"**Ended:** <t:{int(doc.get('ended_at') or ends)}:R>\n"
@@ -293,6 +292,10 @@ class Giveaway(commands.Cog):
             winners.append(user_id)
         return winners
 
+    def _reroll_command(self, doc: dict) -> str:
+        prefix = getattr(self.bot, "prefix_str", ".")
+        return f"{prefix}gw reroll {doc['_id']}"
+
     async def _announce(self, doc: dict, winners: list[int], *, rerolled: bool = False):
         channel = self.bot.get_channel(doc["channel_id"])
         if channel is None:
@@ -314,10 +317,11 @@ class Giveaway(commands.Cog):
                         user = None
                 display_names.append(f"**{discord.utils.escape_markdown(user.display_name if isinstance(user, discord.Member) else user.name)}**" if user else f"user `{user_id}`")
             names = ", ".join(display_names)
+            reroll_hint = f"\n-# Reroll with `{self._reroll_command(doc)}`"
             if rerolled:
-                text = f"🎉 New winner{'s' if len(winners) != 1 else ''} for **{doc['prize']}**: {names}. Congratulations!"
+                text = f"🎉 New winner{'s' if len(winners) != 1 else ''} for **{doc['prize']}**: {names}. Congratulations!{reroll_hint}"
             else:
-                text = f"🎉 Congratulations to {names}! You won **{doc['prize']}**."
+                text = f"🎉 Congratulations to {names}! You won **{doc['prize']}**.{reroll_hint}"
         else:
             text = f"😔 Nobody won **{doc['prize']}**: there were no valid entries."
 
@@ -751,7 +755,7 @@ class Giveaway(commands.Cog):
 
         mentions = ", ".join(f"<@{user_id}>" for user_id in new_winners)
         await ctx.reply(
-            embed=ok_embed("Giveaway Rerolled", f"**{doc['prize']}**\nNew winners: {mentions}", emoji="🔄"),
+            embed=ok_embed("Giveaway Rerolled", f"**{doc['prize']}**\nNew winners: {mentions}\n\nReroll again with `{self._reroll_command(doc)}`", emoji="🔄"),
             mention_author=False,
         )
 
