@@ -3,7 +3,7 @@ import re
 from discord import app_commands
 from discord.ext import commands
 
-from cogs.owner_cmds.utils import safe_send
+from cogs.owner.utils import safe_send
 
 # Regex pattern for a 24-character hexadecimal MongoDB ObjectId
 OBJECT_ID_REGEX = re.compile(r"^[0-9a-fA-F]{24}$")
