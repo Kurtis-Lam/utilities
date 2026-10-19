@@ -80,6 +80,76 @@ STATE_DB = "utilities"
 STATE_COLLECTION = "bot_state"
 STATE_ID = "pending_update"
 
+
+# ----------------------------------------------------------------------------
+# Context: error replies delete themselves (and the command that caused them)
+# ----------------------------------------------------------------------------
+ERROR_DELETE_DELAY = 5
+ERROR_COLOR_VALUE = discord.Color.red().value
+ERROR_PREFIXES = ("❌", "🚫")
+
+
+def _looks_like_error(content, embeds) -> bool:
+    """True for plain text / embeds that were written as an error message (❌ ..., 🚫 ...)."""
+    if isinstance(content, str) and content.lstrip().startswith(ERROR_PREFIXES):
+        return True
+    for embed in embeds:
+        text = (embed.title or embed.description or "").lstrip()
+        if text.startswith(ERROR_PREFIXES):
+            return True
+        if text.startswith("⚠️") and embed.color is not None and embed.color.value == ERROR_COLOR_VALUE:
+            return True
+    return False
+
+
+class UtilitiesContext(commands.Context):
+    """Context that removes error answers after ERROR_DELETE_DELAY seconds.
+
+    When a command fails (missing permissions, missing arguments, bad input, cooldown, ...)
+    the invoking message of the author and the error answer of the bot are both deleted.
+    An answer counts as an error when the command raised (``error_mode``) or when the reply
+    itself is an error message (starts with ❌ / 🚫, or a red ⚠️ embed).
+    """
+
+    error_mode: bool = False
+
+    def _is_error_reply(self, content, kwargs: dict) -> bool:
+        if self.error_mode:
+            return True
+        embeds = list(kwargs.get("embeds") or [])
+        if kwargs.get("embed") is not None:
+            embeds.append(kwargs["embed"])
+        return _looks_like_error(content, embeds)
+
+    def cleanup_if_error(self, sent, content=None, kwargs: dict | None = None) -> None:
+        """Schedules the deletion of ``sent`` (and the author's command) if it is an error reply."""
+        if sent is None or not self._is_error_reply(content, kwargs or {}):
+            return
+        targets = [sent]
+        if self.interaction is None and not getattr(self, "_author_cleanup_scheduled", False):
+            self._author_cleanup_scheduled = True
+            targets.append(self.message)
+        asyncio.create_task(self._delete_later(targets))
+
+    @staticmethod
+    async def _delete_later(messages) -> None:
+        await asyncio.sleep(ERROR_DELETE_DELAY)
+        for message in messages:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+    async def send(self, content=None, **kwargs):
+        sent = await super().send(content, **kwargs)
+        self.cleanup_if_error(sent, content, kwargs)
+        return sent
+
+    async def reply(self, content=None, **kwargs):
+        sent = await super().reply(content, **kwargs)
+        self.cleanup_if_error(sent, content, kwargs)
+        return sent
+
 # ----------------------------------------------------------------------------
 # Bot
 # ----------------------------------------------------------------------------
@@ -123,6 +193,26 @@ class Utilities(commands.Bot):
 
         # Which cogs to load is defined in config.json ("COGS")
         self.cogs_dict = COGS
+
+    async def get_context(self, origin, *, cls=UtilitiesContext):
+        return await super().get_context(origin, cls=cls)
+
+    async def invoke(self, ctx):
+        """Same as Bot.invoke, but marks the context as failed before any error handler answers."""
+        if ctx.command is None:
+            return await super().invoke(ctx)
+        self.dispatch("command", ctx)
+        try:
+            if await self.can_run(ctx, call_once=True):
+                await ctx.command.invoke(ctx)
+            else:
+                raise commands.CheckFailure("The global check once functions failed.")
+        except commands.CommandError as exc:
+            if isinstance(ctx, UtilitiesContext):
+                ctx.error_mode = True
+            await ctx.command.dispatch_error(ctx, exc)
+        else:
+            self.dispatch("command_completion", ctx)
 
     async def get_prefix_with_space(self, bot, message):
         try:
