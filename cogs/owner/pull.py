@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 from firebase_admin import credentials, db
 
-from cogs.owner_cmds.utils import OwnerCog, Progress, run_cmd, safe_edit, safe_send
+from cogs.owner.utils import OwnerCog, Progress, run_cmd, safe_edit, safe_send
 
 # --- GRINDER REMOTE UPDATE (Firebase signal) ---
 FIREBASE_DB_URL = "https://versatile-kl-default-rtdb.firebaseio.com/"
