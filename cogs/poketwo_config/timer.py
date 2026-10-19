@@ -4,7 +4,6 @@ import time
 from dataclasses import dataclass, field
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from views.common_views import EMBED_COLOR, error_embed
@@ -17,13 +16,21 @@ from views.timer_views import (
     TIMER_NAMES,
     build_main_page,
 )
+from cogs.config.baseconfigs import config_group
 
 READY_TEXT = "You can catch the pokémon now!"
 STEAL_TEXT = "{mention} you have **{short}** stole **{pokemon}**!"
 
 
+STANDARD = "standard"
+
+
 def _default_category() -> dict:
     return {"enabled": False, "seconds": DEFAULT_SECONDS, "whitelist": []}
+
+
+def _default_standard() -> dict:
+    return {"enabled": False, "seconds": DEFAULT_SECONDS}
 
 
 def _label(category: str) -> str:
@@ -51,12 +58,11 @@ class ActiveTimer:
     task: asyncio.Task | None = None
 
 
-@commands.hybrid_command(
-    name="timersetup",
-    aliases=["timerconfig"],
-    description="Configure catch timer settings.",
+@config_group.command(
+    name="timer",
+    aliases=["t"],
+    description="Configure catch timers.",
 )
-@app_commands.default_permissions(administrator=True)
 @commands.has_permissions(administrator=True)
 async def timerconfig(ctx: commands.Context):
     cog = ctx.bot.get_cog("Timer")
@@ -93,9 +99,21 @@ class Timer(commands.Cog):
         doc = await self.collection.find_one({"_id": gid})
 
         if not doc:
-            doc = {"_id": gid, **{cat: _default_category() for cat in TIMER_CATEGORIES}}
+            doc = {"_id": gid, **{cat: _default_category() for cat in TIMER_CATEGORIES},
+                   STANDARD: _default_standard()}
             await self.collection.insert_one(doc)
             return doc
+
+        if not isinstance(doc.get(STANDARD), dict):
+            doc[STANDARD] = _default_standard()
+            await self.collection.update_one({"_id": gid}, {"$set": {STANDARD: doc[STANDARD]}}, upsert=True)
+        else:
+            missing = {k: v for k, v in _default_standard().items() if k not in doc[STANDARD]}
+            if missing:
+                doc[STANDARD].update(missing)
+                await self.collection.update_one(
+                    {"_id": gid}, {"$set": {f"{STANDARD}.{k}": v for k, v in missing.items()}}, upsert=True
+                )
 
         needs_update = False
         for cat in TIMER_CATEGORIES:
@@ -115,16 +133,85 @@ class Timer(commands.Cog):
         return doc
 
     async def get_category_config(self, guild_id: int, category: str) -> dict:
+        """Server-wide config of a timer. ``category="standard"`` returns the standard settings."""
         doc = await self.get_guild_config(guild_id)
+        if category == STANDARD:
+            return doc.get(STANDARD, _default_standard())
         return doc.get(category, _default_category())
 
+    async def get_standard(self, guild_id: int) -> dict:
+        return await self.get_category_config(guild_id, STANDARD)
+
     async def toggle_timer(self, guild_id: int, category: str) -> bool:
+        """Server-wide toggle (``category="standard"`` toggles the standard)."""
         cfg = await self.get_category_config(guild_id, category)
         new_val = not cfg.get("enabled", False)
         await self.collection.update_one(
             {"_id": str(guild_id)}, {"$set": {f"{category}.enabled": new_val}}, upsert=True
         )
         return new_val
+
+    async def set_enabled(self, guild_id: int, category: str, value: bool):
+        await self.get_guild_config(guild_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)}, {"$set": {f"{category}.enabled": bool(value)}}, upsert=True
+        )
+
+    # --- per-channel overrides --------------------------------------------------
+    # Stored under doc["channels"][channel_id][category] and only hold the keys that were
+    # overridden ("enabled" / "seconds"); anything missing falls back to the server-wide
+    # config. The whitelist is always server-wide, same as AutoLock.
+
+    async def get_channel_overrides(self, guild_id: int, channel_id: int) -> dict:
+        doc = await self.get_guild_config(guild_id)
+        channels = doc.get("channels")
+        if not isinstance(channels, dict):
+            return {}
+        entry = channels.get(str(channel_id))
+        return entry if isinstance(entry, dict) else {}
+
+    async def get_category_config_channel(self, guild_id: int, channel_id: int, category: str) -> dict:
+        """Effective config in this channel: server-wide config + channel override."""
+        base = dict(await self.get_category_config(guild_id, category))
+        override = (await self.get_channel_overrides(guild_id, channel_id)).get(category)
+        if isinstance(override, dict):
+            base.update(override)
+        return base
+
+    async def _set_channel_field(self, guild_id: int, channel_id: int, category: str, field: str, value):
+        await self.get_guild_config(guild_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"channels.{channel_id}.{category}.{field}": value}},
+            upsert=True,
+        )
+
+    async def set_seconds_channel(self, guild_id: int, channel_id: int, category: str, seconds: int):
+        await self._set_channel_field(guild_id, channel_id, category, "seconds", seconds)
+
+    async def set_enabled_channel(self, guild_id: int, channel_id: int, category: str, value: bool):
+        await self._set_channel_field(guild_id, channel_id, category, "enabled", bool(value))
+
+    async def toggle_timer_channel(self, guild_id: int, channel_id: int, category: str) -> bool:
+        cfg = await self.get_category_config_channel(guild_id, channel_id, category)
+        new_val = not cfg.get("enabled", False)
+        await self._set_channel_field(guild_id, channel_id, category, "enabled", new_val)
+        return new_val
+
+    async def use_standard(self, guild_id: int, category: str) -> dict:
+        """Copy the standard enabled/seconds onto a timer (server-wide). Returns what was applied."""
+        std = await self.get_standard(guild_id)
+        applied = {
+            "enabled": bool(std.get("enabled", False)),
+            "seconds": int(std.get("seconds", DEFAULT_SECONDS)),
+        }
+        await self.get_guild_config(guild_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"{category}.enabled": applied["enabled"], f"{category}.seconds": applied["seconds"]}},
+            upsert=True,
+        )
+        return applied
 
     async def set_seconds(self, guild_id: int, category: str, seconds: int):
         await self.get_guild_config(guild_id)
@@ -346,13 +433,12 @@ class Timer(commands.Cog):
         if await self._lock_active(guild, channel, activated_categories):
             return
 
-        doc = await self.get_guild_config(guild.id)
-
         chosen = None
         for cat in TIMER_CATEGORIES:  # sh > cl > rp > tp
             if cat not in activated_categories:
                 continue
-            cfg = doc.get(cat, _default_category())
+            # server-wide config + this channel's override (.set / .toggle without --global)
+            cfg = await self.get_category_config_channel(guild.id, channel.id, cat)
             if not cfg.get("enabled", False):
                 continue
             if not self._channel_whitelisted(channel, cfg.get("whitelist", [])):
@@ -467,5 +553,5 @@ class Timer(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Timer(bot))
-    if bot.get_command("timersetup") is None:
-        bot.add_command(timerconfig)
+    if bot.get_command("config") is None:
+        bot.add_command(config_group)
