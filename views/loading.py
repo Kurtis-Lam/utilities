@@ -119,6 +119,9 @@ class Loading:
                 if delay is not None:
                     with suppress(discord.HTTPException):
                         await edited.delete(delay=delay)
+                cleanup = getattr(self.ctx, "cleanup_if_error", None)
+                if cleanup is not None:
+                    cleanup(edited, content, kwargs)
                 return edited
 
         await self._remove()
