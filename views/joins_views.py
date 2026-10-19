@@ -398,7 +398,7 @@ class WelcomeConfigView(EmbedLayout):
             stats = await tracker.get_stats(interaction.guild.id, interaction.user.id)
         except Exception:
             return None
-        from cogs.cmds.invites import JoinInfo
+        from cogs.community.invites import JoinInfo
         return format_invite_line(JoinInfo(kind="invite", inviter_id=interaction.user.id, stats=stats))
 
     async def test_greets_cb(self, interaction: discord.Interaction):
