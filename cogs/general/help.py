@@ -35,7 +35,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from cogs.owner_cmds.utils import OwnerCog
+from cogs.owner.utils import OwnerCog
 from views.embeds import BRAND_COLOR, USAGE_EXAMPLES, _param_descriptions, _usage_line, handle_common_error
 from views.navigate import PaginatorView
 
