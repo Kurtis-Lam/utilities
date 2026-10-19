@@ -7,7 +7,7 @@ import discord
 import psutil
 from discord.ext import commands
 
-from cogs.owner_cmds.utils import OwnerCog, get_dir_size
+from cogs.owner.utils import OwnerCog, get_dir_size
 from views.loading import loading
 
 
