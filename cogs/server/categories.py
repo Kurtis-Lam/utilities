@@ -9,7 +9,7 @@ from discord.ext import commands
 from views.categories_views import CategorySelectView
 from views.common_views import confirm
 from views.embeds import handle_common_error, send_usage
-from views.prompts import ask, is_skip, one_line
+from views.prompts import ask, exact_category, is_skip, one_line, raw_args, split_name_and_target, strip_quotes
 from views.loading import loading
 
 
@@ -39,6 +39,32 @@ class Categories(commands.Cog):
                 continue
         return None
 
+    async def _target_and_category(self, ctx, target, category):
+        """Prefix commands: splits ``[member/role] <category name with spaces>`` from the raw text.
+
+        The first word is only taken as the target when it resolves to a member / role and what
+        follows (if anything) is an existing category. Slash commands keep their separate options.
+        """
+        if ctx.interaction is not None:
+            return target, category
+
+        args = raw_args(ctx)
+        if not args:
+            return None, None
+        if exact_category(ctx.guild, args) is not None:
+            return None, args
+
+        first, _, rest = args.partition(" ")
+        rest = rest.strip()
+        for converter in (commands.MemberConverter(), commands.RoleConverter()):
+            try:
+                found = await converter.convert(ctx, first)
+            except commands.BadArgument:
+                continue
+            if not rest or exact_category(ctx.guild, rest) is not None:
+                return found, rest or None
+        return None, args
+
     async def prompt_category_selection(self, ctx, categories):
         view = CategorySelectView(ctx.author, categories)
         embed = discord.Embed(
@@ -64,7 +90,7 @@ class Categories(commands.Cog):
         if isinstance(query, discord.CategoryChannel):
             return query
 
-        query_str = str(query).replace("-", " ").lower()
+        query_str = strip_quotes(str(query)).replace("-", " ").lower()
 
         if query_str.startswith("<#") and query_str.endswith(">"):
             try:
@@ -303,6 +329,7 @@ class Categories(commands.Cog):
     async def deletecategory(
         self,
         ctx,
+        *,
         category: typing.Optional[str] = commands.parameter(
             default=None,
             description=(
@@ -371,6 +398,14 @@ class Categories(commands.Cog):
             ),
         ),
     ):
+        if ctx.interaction is None:
+            # Prefix command: the new name may contain spaces; it ends where an existing category
+            # (mention / ID / exact name) begins. Without one, this channel's category is renamed.
+            name, found, unresolved = split_name_and_target(raw_args(ctx), lambda q: exact_category(ctx.guild, q))
+            if unresolved:
+                return await ctx.reply(one_line(f"❌ Couldn't find the category `{unresolved}`. Cancelled."), mention_author=False)
+            category = found
+
         # No name given -> ask the questions one by one (30 seconds each)
         if not name:
             reply = await ask(
@@ -446,6 +481,7 @@ class Categories(commands.Cog):
             default=None,
             description="The member or role to lock. Defaults to everyone.",
         ),
+        *,
         category: typing.Optional[str] = commands.parameter(
             default=None,
             description=(
@@ -453,6 +489,7 @@ class Categories(commands.Cog):
             ),
         ),
     ):
+        target, category = await self._target_and_category(ctx, target, category)
         target_category = await self.get_target_category(ctx, category)
         if not target_category:
             embed = discord.Embed(
@@ -501,6 +538,7 @@ class Categories(commands.Cog):
             default=None,
             description="The member or role to unlock. Defaults to everyone.",
         ),
+        *,
         category: typing.Optional[str] = commands.parameter(
             default=None,
             description=(
@@ -508,6 +546,7 @@ class Categories(commands.Cog):
             ),
         ),
     ):
+        target, category = await self._target_and_category(ctx, target, category)
         target_category = await self.get_target_category(ctx, category)
         if not target_category:
             embed = discord.Embed(
@@ -556,6 +595,7 @@ class Categories(commands.Cog):
             default=None,
             description="The member or role to hide from. Defaults to everyone.",
         ),
+        *,
         category: typing.Optional[str] = commands.parameter(
             default=None,
             description=(
@@ -563,6 +603,7 @@ class Categories(commands.Cog):
             ),
         ),
     ):
+        target, category = await self._target_and_category(ctx, target, category)
         target_category = await self.get_target_category(ctx, category)
         if not target_category:
             embed = discord.Embed(
@@ -611,6 +652,7 @@ class Categories(commands.Cog):
             default=None,
             description="The member or role to unhide for. Defaults to everyone.",
         ),
+        *,
         category: typing.Optional[str] = commands.parameter(
             default=None,
             description=(
@@ -618,6 +660,7 @@ class Categories(commands.Cog):
             ),
         ),
     ):
+        target, category = await self._target_and_category(ctx, target, category)
         target_category = await self.get_target_category(ctx, category)
         if not target_category:
             embed = discord.Embed(
