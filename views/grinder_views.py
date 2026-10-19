@@ -3,7 +3,7 @@ import re
 import discord
 from discord import ui
 
-from cogs.owner_cmds import grinder as config
+from cogs.owner import grinder as config
 from views.common_views import (
     ConfirmLayout,
     EmbedLayout,
