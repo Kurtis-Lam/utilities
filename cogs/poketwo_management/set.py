@@ -34,14 +34,16 @@ TRUE_WORDS = {"true", "t", "yes", "y", "on", "enable", "enabled"}
 FALSE_WORDS = {"false", "f", "no", "n", "off", "disable", "disabled"}
 
 # Only these accept --standard / --stan; every other .set command rejects the flag.
-STANDARD_COMMANDS = "lockdelay, locktime, whitelist and restrictunlockers"
+STANDARD_COMMANDS = "lockdelay, locktime, whitelist, restrictunlockers and the timers (shtimer, cltimer, rptimer, tptimer)"
 NO_STANDARD_COMMANDS = {
-    "set shtimer", "set cltimer", "set rptimer", "set tptimer",
     "set rarerole", "set regionalrole", "set gigantamaxrole", "set paradoxrole", "set eeveelutionsrole",
     "set use-standard",
 }
 
 STANDARD = "standard"
+
+# `.set use-standard shtimer` etc.
+TIMER_TOKENS = {"shtimer": "sh", "cltimer": "cl", "rptimer": "rp", "tptimer": "tp"}
 
 # A whitelist item: channel mention, channel id (or list index when removing), "*" or "#name".
 CHANNEL_TOKEN = re.compile(r"^(<#\d+>|\d+|\*|#\S+)$")
@@ -443,15 +445,18 @@ class Set(commands.Cog):
         locks='Locks to apply the standard to: sh, cl, rp, tp, res or all.',
     )
     async def set_use_standard(self, ctx: commands.Context, *, locks: str = ""):
-        locks = locks.split()
-        if not locks:
+        tokens = locks.split()
+        if not tokens:
             return await send_usage(ctx, title="Missing arg: `lock`")
         cog = await self._cog(ctx)
         if not cog:
             return
 
-        cats, unknown = self._resolve_locks(cog, locks)
-        if not cats:
+        timer_cats = list(dict.fromkeys(TIMER_TOKENS[t.lower()] for t in tokens if t.lower() in TIMER_TOKENS))
+        lock_tokens = [t for t in tokens if t.lower() not in TIMER_TOKENS]
+
+        cats, unknown = self._resolve_locks(cog, lock_tokens) if lock_tokens else ([], [])
+        if not cats and not timer_cats:
             return await ctx.reply(embed=err_embed(f"Unknown lock(s): {', '.join(unknown)}"), mention_author=False)
 
         lines = []
@@ -467,90 +472,155 @@ class Set(commands.Cog):
             if "restrict" in applied:
                 line += f", restrict {'on' if applied['restrict'] else 'off'}"
             lines.append(line)
+
+        if timer_cats:
+            timer = await self._timer_cog(ctx)
+            if not timer:
+                return
+            for cat in timer_cats:
+                applied = await timer.use_standard(ctx.guild.id, cat)
+                lines.append(
+                    f"⭐ **{TIMER_LABELS.get(cat, cat.upper())}** — `{applied['seconds']}s`, "
+                    f"{'on' if applied['enabled'] else 'off'}"
+                )
         embed = ok_embed("Standard Applied", "\n".join(lines)[:4096], emoji="⭐")
         self._unknown_field(embed, unknown)
         await ctx.reply(embed=embed, mention_author=False)
 
-    # --- timers: .set shtimer|cltimer|rptimer|tptimer {timer} ----------------------------
-    # Timers are stored by the Timer cog (server-wide), see `.c timer` for the rest.
+    # --- timers: .set shtimer|cltimer|rptimer|tptimer {time|on|off} [--global|--standard] ---
+    # Same scopes as the locks: no flag = this channel only, --global = whole server,
+    # --standard = the standard value. Timers live in the Timer cog (see `.c timer`).
 
-    async def _set_timer(self, ctx: commands.Context, category: str, value: str | None):
-        if value is None:
-            return await send_usage(ctx, title="Missing arg: `timer`")
-
-        seconds = parse_duration(value, default_unit="s")
-        if seconds is None:
-            return await ctx.reply(
-                embed=err_embed(f"Invalid timer: {value} (use seconds, e.g. `15`)."), mention_author=False
-            )
-        if not (MIN_SECONDS <= seconds <= MAX_SECONDS):
-            return await ctx.reply(
-                embed=err_embed(f"Timer must be {MIN_SECONDS}-{MAX_SECONDS}s."), mention_author=False
-            )
-
+    async def _timer_cog(self, ctx: commands.Context):
         timer = self.bot.get_cog("Timer")
         if not timer:
-            return await ctx.reply(embed=err_embed("Timer is not loaded.", emoji="⚠️"), mention_author=False)
+            await ctx.reply(embed=err_embed("Timer is not loaded.", emoji="⚠️"), mention_author=False)
+        return timer
 
-        await timer.set_seconds(ctx.guild.id, category, seconds)
+    async def _set_timer(self, ctx: commands.Context, category: str, args: str):
+        tokens, is_global, is_standard = split_scope_flags(args.split())
+        if not tokens:
+            return await send_usage(ctx, title="Missing arg: `timer`")
+        if len(tokens) > 1:
+            return await ctx.reply(
+                embed=err_embed("Give just one value: seconds (e.g. `15`) or `on` / `off`."), mention_author=False
+            )
+        if is_global and is_standard:
+            return await ctx.reply(
+                embed=err_embed("`--global` and `--standard` can't be used together."), mention_author=False
+            )
+
+        value = tokens[0].lower()
+        seconds = None
+        enabled = None
+        if value in ON_WORDS:
+            enabled = True
+        elif value in OFF_WORDS:
+            enabled = False
+        else:
+            seconds = parse_duration(value, default_unit="s")
+            if seconds is None:
+                return await ctx.reply(
+                    embed=err_embed(f"Invalid timer: {tokens[0]} (use seconds, e.g. `15`, or `on` / `off`)."),
+                    mention_author=False,
+                )
+            if not (MIN_SECONDS <= seconds <= MAX_SECONDS):
+                return await ctx.reply(
+                    embed=err_embed(f"Timer must be {MIN_SECONDS}-{MAX_SECONDS}s."), mention_author=False
+                )
+
+        timer = await self._timer_cog(ctx)
+        if not timer:
+            return
+
+        gid, cid = ctx.guild.id, ctx.channel.id
+        scope = "standard" if is_standard else ("whole server" if is_global else ctx.channel.mention)
+        target = STANDARD if is_standard else category
+
+        if seconds is not None:
+            if is_global or is_standard:
+                await timer.set_seconds(gid, target, seconds)
+            else:
+                await timer.set_seconds_channel(gid, cid, category, seconds)
+        elif is_global or is_standard:
+            await timer.set_enabled(gid, target, enabled)
+        else:
+            await timer.set_enabled_channel(gid, cid, category, enabled)
+
+        if is_standard:
+            cfg = await timer.get_standard(gid)
+        elif is_global:
+            cfg = await timer.get_category_config(gid, category)
+        else:
+            cfg = await timer.get_category_config_channel(gid, cid, category)
+
         label = TIMER_LABELS.get(category, category.upper())
-        text = f"Set to **{seconds}s**."
-        cfg = await timer.get_category_config(ctx.guild.id, category)
-        if not cfg.get("enabled", False):
-            text += " The timer is currently off (turn it on in `.c timer`)."
+        if is_standard:
+            label = "Standard Timer"
+        if seconds is not None:
+            text = f"Set to **{seconds}s** ({scope})."
+            if not cfg.get("enabled", False):
+                text += f" It's currently off here — turn it on with `.toggle {category}timer`."
+        else:
+            text = f"**{'On ✅' if enabled else 'Off ❌'}** ({scope}) — `{cfg.get('seconds', 15)}s`."
         await ctx.reply(embed=ok_embed(f"{label} Updated", text, emoji="⏲️"), mention_author=False)
 
-    @set_group.command(name="shtimer", usage="<timer>", description="Set the SH timer length in seconds.")
+    @set_group.command(
+        name="shtimer",
+        usage="<time|on|off> [--global|--standard]",
+        description="Set the SH timer length in seconds, or turn it on/off.",
+        extras={"args": {"args": "Timer length in seconds (e.g. 15 or 30s) or on/off, plus optional --global (whole server) or --standard (the standard value). No flag = this channel only."}},
+    )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @app_commands.describe(
-        timer='Timer length in seconds, e.g. 15 or 30s.',
+        args='Timer length in seconds (e.g. 15 or 30s) or on/off, plus --global or --standard.',
     )
-    async def set_shtimer(
-        self,
-        ctx: commands.Context,
-        timer: str = commands.parameter(default=None, description="Timer length in seconds, e.g. 15 or 30s."),
-    ):
-        await self._set_timer(ctx, "sh", timer)
+    async def set_shtimer(self, ctx: commands.Context, *, args: str = ""):
+        await self._set_timer(ctx, "sh", args)
 
-    @set_group.command(name="cltimer", usage="<timer>", description="Set the CL timer length in seconds.")
+    @set_group.command(
+        name="cltimer",
+        usage="<time|on|off> [--global|--standard]",
+        description="Set the CL timer length in seconds, or turn it on/off.",
+        extras={"args": {"args": "Timer length in seconds (e.g. 15 or 30s) or on/off, plus optional --global (whole server) or --standard (the standard value). No flag = this channel only."}},
+    )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @app_commands.describe(
-        timer='Timer length in seconds, e.g. 15 or 30s.',
+        args='Timer length in seconds (e.g. 15 or 30s) or on/off, plus --global or --standard.',
     )
-    async def set_cltimer(
-        self,
-        ctx: commands.Context,
-        timer: str = commands.parameter(default=None, description="Timer length in seconds, e.g. 15 or 30s."),
-    ):
-        await self._set_timer(ctx, "cl", timer)
+    async def set_cltimer(self, ctx: commands.Context, *, args: str = ""):
+        await self._set_timer(ctx, "cl", args)
 
-    @set_group.command(name="rptimer", usage="<timer>", description="Set the RP timer length in seconds.")
+    @set_group.command(
+        name="rptimer",
+        usage="<time|on|off> [--global|--standard]",
+        description="Set the RP timer length in seconds, or turn it on/off.",
+        extras={"args": {"args": "Timer length in seconds (e.g. 15 or 30s) or on/off, plus optional --global (whole server) or --standard (the standard value). No flag = this channel only."}},
+    )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @app_commands.describe(
-        timer='Timer length in seconds, e.g. 15 or 30s.',
+        args='Timer length in seconds (e.g. 15 or 30s) or on/off, plus --global or --standard.',
     )
-    async def set_rptimer(
-        self,
-        ctx: commands.Context,
-        timer: str = commands.parameter(default=None, description="Timer length in seconds, e.g. 15 or 30s."),
-    ):
-        await self._set_timer(ctx, "rp", timer)
+    async def set_rptimer(self, ctx: commands.Context, *, args: str = ""):
+        await self._set_timer(ctx, "rp", args)
 
-    @set_group.command(name="tptimer", usage="<timer>", description="Set the TP timer length in seconds.")
+    @set_group.command(
+        name="tptimer",
+        usage="<time|on|off> [--global|--standard]",
+        description="Set the TP timer length in seconds, or turn it on/off.",
+        extras={"args": {"args": "Timer length in seconds (e.g. 15 or 30s) or on/off, plus optional --global (whole server) or --standard (the standard value). No flag = this channel only."}},
+    )
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @app_commands.describe(
-        timer='Timer length in seconds, e.g. 15 or 30s.',
+        args='Timer length in seconds (e.g. 15 or 30s) or on/off, plus --global or --standard.',
     )
-    async def set_tptimer(
-        self,
-        ctx: commands.Context,
-        timer: str = commands.parameter(default=None, description="Timer length in seconds, e.g. 15 or 30s."),
-    ):
-        await self._set_timer(ctx, "tp", timer)
+    async def set_tptimer(self, ctx: commands.Context, *, args: str = ""):
+        await self._set_timer(ctx, "tp", args)
+
 
     # --- role setters ----------------------------------------------------------
     # Roles live in the PokePings data (utilities.pings -> roles.<key>), which is
