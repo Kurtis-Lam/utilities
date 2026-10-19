@@ -9,6 +9,7 @@ from discord.ext import commands, tasks
 from views.common_views import confirm
 from views.embeds import ok_embed, err_embed, handle_common_error, send_usage
 from views.loading import loading
+from views.prompts import raw_args, strip_quotes
 
 
 _DURATION_FULL = re.compile(r"^(?:\d+[smhdw])+$")
@@ -23,6 +24,64 @@ def parse_duration(text: str) -> typing.Optional[int]:
     if not _DURATION_FULL.match(text):
         return None
     return sum(int(n) * _DURATION_UNITS[u] for n, u in _DURATION_PART.findall(text))
+
+
+_ROLE_REF = re.compile(r"<@&(\d+)>|(\d{15,25})")
+_FIRST_ARG = re.compile(r"^(?:\"[^\"]*\"|\u201c[^\u201d]*\u201d|'[^']*'|\S+)\s*(.*)$", re.S)
+_MEMBER_REF = re.compile(r"<@!?\d+>|\d{15,25}")
+_LEVELS = ("admin", "basic", "none")
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}|(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{6}")
+COLOR_MAP = {
+    "red": discord.Color.red(),
+    "orange": discord.Color.orange(),
+    "yellow": discord.Color.gold(),
+    "green": discord.Color.green(),
+    "blue": discord.Color.blue(),
+    "purple": discord.Color.purple(),
+    "pink": discord.Color.magenta(),
+    "black": discord.Color.from_rgb(1, 1, 1),
+    "white": discord.Color.from_rgb(255, 255, 255),
+    "light red": discord.Color.from_rgb(255, 100, 100),
+    "light blue": discord.Color.from_rgb(100, 149, 237),
+    "light green": discord.Color.from_rgb(144, 238, 144),
+    "light orange": discord.Color.from_rgb(255, 165, 0),
+    "light purple": discord.Color.from_rgb(216, 191, 216),
+    "light yellow": discord.Color.from_rgb(255, 255, 224),
+    "light pink": discord.Color.from_rgb(255, 182, 193),
+    "grey": discord.Color.greyple(),
+    "gray": discord.Color.greyple(),
+    "default": discord.Color.default(),
+    "none": discord.Color.default(),
+}
+
+
+def find_role(guild: discord.Guild, text: str) -> typing.Optional[discord.Role]:
+    """A role by <@&mention>, ID or exact name (spaces allowed, case-insensitive). @everyone is never returned."""
+    text = strip_quotes(text)
+    if not text:
+        return None
+    match = _ROLE_REF.fullmatch(text)
+    if match:
+        role = guild.get_role(int(match.group(1) or match.group(2)))
+        return role if role is not None and not role.is_default() else None
+    wanted = " ".join(text.lower().split())
+    matches = [r for r in guild.roles if not r.is_default() and " ".join(r.name.lower().split()) == wanted]
+    return max(matches, key=lambda r: r.position) if matches else None
+
+
+def after_first_arg(args: str) -> str:
+    """Drops the first (possibly quoted) word of the raw argument text."""
+    match = _FIRST_ARG.match(args.strip())
+    return match.group(1).strip() if match else ""
+
+
+async def role_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    guild = interaction.guild
+    if guild is None:
+        return []
+    wanted = current.lower().strip()
+    roles = [r for r in reversed(guild.roles) if not r.is_default() and wanted in r.name.lower()]
+    return [app_commands.Choice(name=r.name[:100], value=str(r.id)) for r in roles[:25]]
 
 
 class Role(commands.Cog):
@@ -94,6 +153,39 @@ class Role(commands.Cog):
         if not await handle_common_error(ctx, error):
             raise error
 
+    @staticmethod
+    def _parse_createrole_args(args: str):
+        """Splits `<name> [color] [level] [members...]` into (name, color, level, member refs)."""
+        args = args.strip()
+        quoted = re.match(r"^([\"'\u201c\u2018])(.+?)[\"'\u201d\u2019](?:\s+(.*))?$", args, re.S)
+        if quoted:
+            name, tokens, keep_one = quoted.group(2).strip(), (quoted.group(3) or "").split(), 0
+        else:
+            name, tokens, keep_one = "", args.split(), 1
+
+        members = []
+        while len(tokens) > keep_one and _MEMBER_REF.fullmatch(tokens[-1]):
+            members.insert(0, tokens.pop())
+
+        level = "none"
+        if len(tokens) > keep_one and tokens[-1].lower() in _LEVELS:
+            level = tokens.pop().lower()
+
+        color = "default"
+        if len(tokens) > keep_one:
+            last = tokens[-1].lower().replace("-", " ")
+            if len(tokens) > keep_one + 1 and f"{tokens[-2].lower()} {last}" in COLOR_MAP:
+                color = f"{tokens[-2].lower()} {last}"
+                del tokens[-2:]
+            elif last in COLOR_MAP or _HEX_COLOR.fullmatch(tokens[-1]):
+                color = tokens.pop()
+            elif keep_one == 0 and tokens:
+                color = tokens[-1]
+
+        if not quoted:
+            name = " ".join(tokens)
+        return name, color, level, members
+
     async def confirm_action(self, ctx, prompt: str) -> bool:
         return await confirm(
             ctx,
@@ -111,7 +203,7 @@ class Role(commands.Cog):
     )
     @app_commands.describe(
         member="The server member to give the role to.",
-        role="The role to assign.",
+        role="The role to assign (name, mention or ID).",
         duration="Optional time before the role is removed again (e.g. 30m, 2h, 1d, 1d12h)."
     )
     @commands.has_permissions(manage_roles=True)
@@ -120,9 +212,28 @@ class Role(commands.Cog):
         self,
         ctx,
         member: discord.Member = commands.parameter(description="The member to give the role to (mention or ID)."),
-        role: discord.Role = commands.parameter(description="The role to give (mention, ID or name)."),
+        role: str = commands.parameter(description="The role to give (mention, ID or name, spaces allowed)."),
         duration: typing.Optional[str] = commands.parameter(default=None, description="How long they keep it, e.g. 30m, 2h, 1d, 1d12h. Leave blank for permanent."),
     ):
+        if ctx.interaction is None:
+            # Prefix command: the role name may contain spaces and may be followed by a duration.
+            rest = after_first_arg(raw_args(ctx))
+            role_obj = find_role(ctx.guild, rest)
+            duration = None
+            if role_obj is None:
+                role_text, _, last = rest.rpartition(" ")
+                if role_text and parse_duration(last) is not None:
+                    role_obj = find_role(ctx.guild, role_text)
+                    duration = last
+            if role_obj is None:
+                raise commands.RoleNotFound(strip_quotes(rest))
+            role = role_obj
+        else:
+            role_obj = find_role(ctx.guild, role)
+            if role_obj is None:
+                raise commands.RoleNotFound(strip_quotes(role))
+            role = role_obj
+
         if role >= ctx.guild.me.top_role:
             return await ctx.reply(embed=err_embed("Action Denied", "I cannot assign a role that is higher than or equal to my highest role."), mention_author=False)
         if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
@@ -164,7 +275,7 @@ class Role(commands.Cog):
     )
     @app_commands.describe(
         member="The server member to remove the role from.",
-        role="The role to remove."
+        role="The role to remove (name, mention or ID)."
     )
     @commands.has_permissions(manage_roles=True)
     @commands.bot_has_permissions(manage_roles=True)
@@ -172,8 +283,13 @@ class Role(commands.Cog):
         self,
         ctx,
         member: discord.Member = commands.parameter(description="The member to remove the role from (mention or ID)."),
-        role: discord.Role = commands.parameter(description="The role to remove (mention, ID or name)."),
+        *,
+        role: str = commands.parameter(description="The role to remove (mention, ID or name, spaces allowed)."),
     ):
+        role_obj = find_role(ctx.guild, role)
+        if role_obj is None:
+            raise commands.RoleNotFound(strip_quotes(role))
+        role = role_obj
         if role >= ctx.guild.me.top_role:
             return await ctx.reply(embed=err_embed("Action Denied", "I cannot remove a role that is higher than or equal to my highest role."), mention_author=False)
         if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
@@ -257,7 +373,7 @@ class Role(commands.Cog):
         with_app_command=True
     )
     @app_commands.describe(
-        name="The name of the new role (use quotes for multi-word names in text commands).",
+        name="The name of the new role (spaces allowed).",
         color_input="Color name (e.g. red, light-blue), hex code (#FF0000), or default.",
         level="Role permission level: admin, basic, or none.",
         targets="Members to immediately assign the role to (optional)."
@@ -268,7 +384,7 @@ class Role(commands.Cog):
     async def createrole(
         self, 
         ctx, 
-        name: str = commands.parameter(description="The name of the new role."), 
+        name: str = commands.parameter(description="The name of the new role (spaces allowed)."),
         color_input: typing.Optional[str] = commands.parameter(default="default", description="Color name or hex code."),
         level: typing.Optional[typing.Literal["admin", "basic", "none"]] = commands.parameter(default="none", description="Permission level: admin, basic, or none."),
         targets: commands.Greedy[discord.Member] = commands.parameter(default=None, description="Members to assign the role to.")
@@ -279,60 +395,25 @@ class Role(commands.Cog):
         elif isinstance(targets, discord.Member):
             assigned_members.append(targets)
 
-        # Handle optional positional shifting for prefix commands if user skips color or level
         if ctx.interaction is None:
-            # Case 1: User skipped color and passed level directly (e.g. .cr "Role" admin)
-            if color_input and color_input.lower() in ["admin", "basic", "none"] and level == "none":
-                level = color_input.lower()
-                color_input = "default"
+            # Prefix command: `.cr <name with spaces> [color] [level] [@members...]`. The optional
+            # parts are read from the end, so the name is whatever is left. Put the name in quotes
+            # when it ends with a color / level word (e.g. `.cr "Dark Red" blue`).
+            name, color_input, level, member_refs = self._parse_createrole_args(raw_args(ctx))
+            assigned_members = []
+            for ref in member_refs:
+                member_id = int(re.sub(r"\D", "", ref))
+                member = ctx.guild.get_member(member_id)
+                if member is None:
+                    try:
+                        member = await ctx.guild.fetch_member(member_id)
+                    except discord.HTTPException:
+                        return await ctx.reply(embed=err_embed(f"Couldn't find the member {ref}."), mention_author=False)
+                assigned_members.append(member)
+            if not name:
+                raise commands.MissingRequiredArgument(ctx.command.clean_params["name"])
 
-            # Case 2: User skipped color/level and passed a member mention directly (e.g. .cr "Role" @User)
-            elif color_input and (color_input.startswith("<@") or color_input.isdigit()):
-                try:
-                    member_id = int(re.sub(r"\D", "", color_input))
-                    member = ctx.guild.get_member(member_id)
-                    if member:
-                        assigned_members.append(member)
-                        color_input = "default"
-                        level = "none"
-                except ValueError:
-                    pass
-
-            # Case 3: User provided color, skipped level, passed a member in level position (e.g. .cr "Role" red @User)
-            if level and (level.startswith("<@") or level.isdigit()):
-                try:
-                    member_id = int(re.sub(r"\D", "", level))
-                    member = ctx.guild.get_member(member_id)
-                    if member:
-                        assigned_members.append(member)
-                        level = "none"
-                except ValueError:
-                    pass
-
-        # Color Parsing
-        color_map = {
-            "red": discord.Color.red(),
-            "orange": discord.Color.orange(),
-            "yellow": discord.Color.gold(),
-            "green": discord.Color.green(),
-            "blue": discord.Color.blue(),
-            "purple": discord.Color.purple(),
-            "pink": discord.Color.magenta(),
-            "black": discord.Color.from_rgb(1, 1, 1),
-            "white": discord.Color.from_rgb(255, 255, 255),
-            "light red": discord.Color.from_rgb(255, 100, 100),
-            "light blue": discord.Color.from_rgb(100, 149, 237),
-            "light green": discord.Color.from_rgb(144, 238, 144),
-            "light orange": discord.Color.from_rgb(255, 165, 0),
-            "light purple": discord.Color.from_rgb(216, 191, 216),
-            "light yellow": discord.Color.from_rgb(255, 255, 224),
-            "light pink": discord.Color.from_rgb(255, 182, 193),
-            "grey": discord.Color.greyple(),
-            "gray": discord.Color.greyple(),
-            "default": discord.Color.default(),
-            "none": discord.Color.default()
-        }
-
+        color_map = COLOR_MAP
         color_input_clean = color_input.strip().lower().replace("-", " ") if color_input else "default"
         role_color = discord.Color.default()
 
@@ -404,11 +485,15 @@ class Role(commands.Cog):
         with_app_command=True
     )
     @app_commands.describe(
-        role="The role to delete (mention or ID)."
+        role="The role to delete (name, mention or ID)."
     )
     @commands.has_permissions(manage_roles=True)
     @commands.bot_has_permissions(manage_roles=True)
-    async def deleterole(self, ctx, role: discord.Role = commands.parameter(description="The role to delete (mention, ID or name).")):
+    async def deleterole(self, ctx, *, role: str = commands.parameter(description="The role to delete (mention, ID or name, spaces allowed).")):
+        role_obj = find_role(ctx.guild, role)
+        if role_obj is None:
+            raise commands.RoleNotFound(strip_quotes(role))
+        role = role_obj
         if role >= ctx.guild.me.top_role:
             return await ctx.reply(embed=err_embed("Action Denied", "I cannot delete a role that is higher than or equal to my highest role."), mention_author=False)
         if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
@@ -427,6 +512,18 @@ class Role(commands.Cog):
             await confirmed.show(ok_embed("Role Deleted", f"Successfully deleted the role **{role_name}**.", emoji="🗑️"))
         except discord.HTTPException:
             await confirmed.show(err_embed("Delete Failed", "Failed to delete the role. Check my permissions."))
+
+    @giverole.autocomplete("role")
+    async def giverole_role_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await role_autocomplete(interaction, current)
+
+    @removerole.autocomplete("role")
+    async def removerole_role_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await role_autocomplete(interaction, current)
+
+    @deleterole.autocomplete("role")
+    async def deleterole_role_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await role_autocomplete(interaction, current)
 
 
 async def setup(bot):
