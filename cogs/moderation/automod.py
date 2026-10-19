@@ -7,7 +7,10 @@ Commands (hybrid: work as ``.automod ...`` and as ``/automod ...``):
 * ``automod action <kick|ban>``         change only the punishment
 * ``automod warn``                      post the red warning message in the trap channel
 * ``automod disable``                   turn the trap off
-* ``clearautomodlogs <guild_id> [kick|ban|all]``  owner only: wipe the stored punishment logs of a server
+
+The buttons of the ``automod`` panel sit inside its embed. Bot owners get an extra "Reset Logs" button
+there: it asks for a server ID (blank = the current server) and wipes the stored punishment logs of
+that server.
 
 Anyone who is not an administrator and sends a message in the trap channel is punished at once.
 Every punishment is stored in MongoDB (``utilities.automod_logs``); the counter button on the
@@ -21,7 +24,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from views.common_views import confirm
 from views.automod_views import ACTION_WORDS, AutomodPanelView, AutomodWarningView
 from views.embeds import BRAND_COLOR, err_embed, handle_command_error, info_embed, ok_embed
 from views.navigate import PaginatorView
@@ -32,7 +34,6 @@ REFRESH_DELAY = 5
 _NO_PINGS = discord.AllowedMentions.none()
 
 Action = typing.Literal["kick", "ban"]
-ClearAction = typing.Literal["kick", "ban", "all"]
 
 
 class Automod(commands.Cog):
@@ -111,13 +112,15 @@ class Automod(commands.Cog):
             )
         return embed
 
-    def _panel_view(self, guild: discord.Guild, author_id: int) -> AutomodPanelView:
+    async def _panel_view(self, guild: discord.Guild, user: discord.abc.User) -> AutomodPanelView:
         cfg = self._config.get(guild.id) or {}
         return AutomodPanelView(
             self,
-            author_id=author_id,
+            embed=await self._panel_embed(guild),
+            author_id=user.id,
             action=cfg.get("action", "kick"),
             has_channel=guild.get_channel(cfg.get("channel_id", 0)) is not None,
+            is_owner=await self.bot.is_owner(user),
         )
 
     async def send_warning(self, guild: discord.Guild) -> tuple[bool, str]:
@@ -309,11 +312,67 @@ class Automod(commands.Cog):
         current = (self._config.get(guild.id) or {}).get("action", "kick")
         await self._save_config(guild.id, action="ban" if current == "kick" else "kick")
         self.schedule_refresh(guild.id)
-        await view.swap(
-            interaction,
-            embed=await self._panel_embed(guild),
-            view=self._panel_view(guild, interaction.user.id),
+        await view.swap(interaction, view=await self._panel_view(guild, interaction.user))
+
+    async def panel_reset_logs(self, interaction: discord.Interaction, raw_id: str, panel: AutomodPanelView):
+        """Owner only: clears the stored kick and ban logs of a server (blank ID = current server)."""
+        if not await self.bot.is_owner(interaction.user):
+            return await interaction.response.send_message(
+                embed=err_embed("Only the bot owner can reset logs."), ephemeral=True
+            )
+        if not self._db_ready():
+            return await interaction.response.send_message(
+                embed=err_embed("MongoDB isn't configured, automod is unavailable.", emoji="⚠️"), ephemeral=True
+            )
+
+        raw_id = (raw_id or "").strip()
+        if raw_id:
+            try:
+                target_id = int(raw_id)
+            except ValueError:
+                return await interaction.response.send_message(
+                    embed=err_embed("The server ID must be a number."), ephemeral=True
+                )
+        elif interaction.guild is not None:
+            target_id = interaction.guild.id
+        else:
+            return await interaction.response.send_message(
+                embed=err_embed("Enter a server ID."), ephemeral=True
+            )
+
+        guild = self.bot.get_guild(target_id)
+        name = f"{guild.name} (`{target_id}`)" if guild else f"`{target_id}`"
+        try:
+            total = await self.logs.count_documents({"guild_id": target_id})
+            if not total:
+                return await interaction.response.send_message(
+                    embed=info_embed("Nothing to clear", f"There are no automod logs for {name}.", emoji="📭"),
+                    ephemeral=True,
+                )
+            deleted = (await self.logs.delete_many({"guild_id": target_id})).deleted_count
+        except Exception as e:
+            return await interaction.response.send_message(
+                embed=err_embed(f"Could not clear the logs: {e}"), ephemeral=True
+            )
+
+        self.schedule_refresh(target_id)
+        await interaction.response.send_message(
+            embed=ok_embed(
+                "Logs Cleared",
+                f"Deleted **{deleted:,}** log entr{'y' if deleted == 1 else 'ies'} of {name}.",
+                emoji="🧹",
+            ),
+            ephemeral=True,
         )
+
+        if interaction.guild is not None and target_id == interaction.guild.id and panel.message is not None:
+            try:
+                fresh = await self._panel_view(interaction.guild, interaction.user)
+                panel.superseded = True
+                fresh.message = panel.message
+                await panel.message.edit(view=fresh)
+            except discord.HTTPException:
+                pass
 
     # ------------------------------------------------------------------
     # Commands
@@ -337,8 +396,8 @@ class Automod(commands.Cog):
     async def automod(self, ctx: commands.Context):
         if not await self._require_db(ctx):
             return
-        view = self._panel_view(ctx.guild, ctx.author.id)
-        view.message = await ctx.reply(embed=await self._panel_embed(ctx.guild), view=view, mention_author=False)
+        view = await self._panel_view(ctx.guild, ctx.author)
+        view.message = await ctx.reply(view=view, mention_author=False)
 
     @automod.command(name="set", usage="<channel> <kick|ban>", description="Sets the trap channel and the punishment.")
     @app_commands.describe(channel="The trap channel.", action="Kick or ban whoever sends a message there.")
@@ -398,51 +457,6 @@ class Automod(commands.Cog):
             return await ctx.reply(embed=err_embed("Automod isn't set up."), mention_author=False)
         await self.configs.delete_one({"_id": ctx.guild.id})
         await ctx.reply(embed=ok_embed("Automod Disabled", "The trap channel is no longer watched.", emoji="🛡️"), mention_author=False)
-
-
-    @commands.hybrid_command(
-        name="clearautomodlogs",
-        aliases=["clearamlogs"],
-        usage="<guild_id> [kick|ban|all]",
-        description="Clears the automod kick/ban logs of a server (owner only).",
-    )
-    @app_commands.describe(guild_id="The ID of the server whose logs should be cleared.", action="Which logs to clear (default: all).")
-    @commands.is_owner()
-    async def clearautomodlogs(self, ctx: commands.Context, guild_id: str, action: ClearAction = "all"):
-        if not await self._require_db(ctx):
-            return
-        try:
-            target_id = int(guild_id.strip())
-        except ValueError:
-            return await ctx.reply(embed=err_embed("The guild ID must be a number."), mention_author=False)
-
-        query = {"guild_id": target_id}
-        if action != "all":
-            query["action"] = action
-
-        total = await self.logs.count_documents(query)
-        guild = self.bot.get_guild(target_id)
-        name = f"{guild.name} (`{target_id}`)" if guild else f"`{target_id}`"
-        if not total:
-            return await ctx.reply(embed=info_embed("Nothing to clear", f"There are no {action} logs for {name}.", emoji="📭"), mention_author=False)
-
-        label = "kick and ban" if action == "all" else action
-        result = await confirm(
-            ctx,
-            f"Delete **{total:,}** {label} log entr{'y' if total == 1 else 'ies'} of {name}?\nThis can't be undone.",
-            title="⚠️ Clear Automod Logs",
-            cancel_text="❌ Cancelled",
-            timeout_text="⏱️ Timeout\nYou took too long to reply. Nothing was deleted.",
-        )
-        if not result:
-            return
-
-        try:
-            deleted = (await self.logs.delete_many(query)).deleted_count
-        except Exception as e:
-            return await result.show(err_embed(f"Could not clear the logs: {e}"))
-        self.schedule_refresh(target_id)
-        await result.show(ok_embed("Logs Cleared", f"Deleted **{deleted:,}** {label} log entr{'y' if deleted == 1 else 'ies'} of {name}.", emoji="🧹"))
 
 
 async def setup(bot: commands.Bot):
