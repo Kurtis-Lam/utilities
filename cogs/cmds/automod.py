@@ -7,6 +7,7 @@ Commands (hybrid: work as ``.automod ...`` and as ``/automod ...``):
 * ``automod action <kick|ban>``         change only the punishment
 * ``automod warn``                      post the red warning message in the trap channel
 * ``automod disable``                   turn the trap off
+* ``clearautomodlogs <guild_id> [kick|ban|all]``  owner only: wipe the stored punishment logs of a server
 
 Anyone who is not an administrator and sends a message in the trap channel is punished at once.
 Every punishment is stored in MongoDB (``utilities.automod_logs``); the counter button on the
@@ -20,6 +21,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from views.common_views import confirm
 from views.automod_views import ACTION_WORDS, AutomodPanelView, AutomodWarningView
 from views.embeds import BRAND_COLOR, err_embed, handle_command_error, info_embed, ok_embed
 from views.navigate import PaginatorView
@@ -30,6 +32,7 @@ REFRESH_DELAY = 5
 _NO_PINGS = discord.AllowedMentions.none()
 
 Action = typing.Literal["kick", "ban"]
+ClearAction = typing.Literal["kick", "ban", "all"]
 
 
 class Automod(commands.Cog):
@@ -395,6 +398,51 @@ class Automod(commands.Cog):
             return await ctx.reply(embed=err_embed("Automod isn't set up."), mention_author=False)
         await self.configs.delete_one({"_id": ctx.guild.id})
         await ctx.reply(embed=ok_embed("Automod Disabled", "The trap channel is no longer watched.", emoji="🛡️"), mention_author=False)
+
+
+    @commands.hybrid_command(
+        name="clearautomodlogs",
+        aliases=["clearamlogs"],
+        usage="<guild_id> [kick|ban|all]",
+        description="Clears the automod kick/ban logs of a server (owner only).",
+    )
+    @app_commands.describe(guild_id="The ID of the server whose logs should be cleared.", action="Which logs to clear (default: all).")
+    @commands.is_owner()
+    async def clearautomodlogs(self, ctx: commands.Context, guild_id: str, action: ClearAction = "all"):
+        if not await self._require_db(ctx):
+            return
+        try:
+            target_id = int(guild_id.strip())
+        except ValueError:
+            return await ctx.reply(embed=err_embed("The guild ID must be a number."), mention_author=False)
+
+        query = {"guild_id": target_id}
+        if action != "all":
+            query["action"] = action
+
+        total = await self.logs.count_documents(query)
+        guild = self.bot.get_guild(target_id)
+        name = f"{guild.name} (`{target_id}`)" if guild else f"`{target_id}`"
+        if not total:
+            return await ctx.reply(embed=info_embed("Nothing to clear", f"There are no {action} logs for {name}.", emoji="📭"), mention_author=False)
+
+        label = "kick and ban" if action == "all" else action
+        result = await confirm(
+            ctx,
+            f"Delete **{total:,}** {label} log entr{'y' if total == 1 else 'ies'} of {name}?\nThis can't be undone.",
+            title="⚠️ Clear Automod Logs",
+            cancel_text="❌ Cancelled",
+            timeout_text="⏱️ Timeout\nYou took too long to reply. Nothing was deleted.",
+        )
+        if not result:
+            return
+
+        try:
+            deleted = (await self.logs.delete_many(query)).deleted_count
+        except Exception as e:
+            return await result.show(err_embed(f"Could not clear the logs: {e}"))
+        self.schedule_refresh(target_id)
+        await result.show(ok_embed("Logs Cleared", f"Deleted **{deleted:,}** {label} log entr{'y' if deleted == 1 else 'ies'} of {name}.", emoji="🧹"))
 
 
 async def setup(bot: commands.Bot):
