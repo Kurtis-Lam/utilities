@@ -328,7 +328,7 @@ class Tickets(commands.Cog):
                 return await interaction.followup.send(embed=error_embed(f"This ticket is already claimed by {owner}."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
             await self._mark_claimed(interaction.message, member, ticket)
             message = _format_ticket(str(config.get("claim_message", "Ticket claimed by {user}.")), user=member, guild=interaction.guild, channel=channel, option=ticket.get("option_label", "Ticket"), ticket_id=channel.id)
-            await channel.send(embed=make_embed("🖐️ Ticket Claimed", message), allowed_mentions=discord.AllowedMentions.none())
+            await channel.send(embed=make_embed("Ticket Claimed", message), allowed_mentions=discord.AllowedMentions.none())
             return await interaction.followup.send(embed=success_embed("You claimed this ticket."), ephemeral=True)
 
         if action == "close":
