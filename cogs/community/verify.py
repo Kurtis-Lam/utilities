@@ -506,13 +506,20 @@ class Verification(commands.Cog):
                 old_message = await channel.fetch_message(int(old_id))
             except discord.HTTPException:
                 old_message = None
-        view = VerificationPanelView(self, str(config.get("verify_button_label", "Verify")))
+        view = VerificationPanelView(self, str(config.get("verify_button_label", "Verify")), embed)
+        if old_message is not None and not old_message.flags.components_v2:
+            # A classic embed message can't be turned into a container message: replace it.
+            try:
+                await old_message.delete()
+            except discord.HTTPException:
+                pass
+            old_message = None
         try:
             if old_message:
-                await old_message.edit(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+                await old_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
                 message = old_message
             else:
-                message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+                message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException as exc:
             print(f"Verification Cog: could not post verification panel: {exc}")
             return None
