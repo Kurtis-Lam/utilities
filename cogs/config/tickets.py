@@ -13,7 +13,7 @@ from discord.ext import commands
 from views.common_views import ConfirmLayout, error_embed, make_embed, success_embed
 from views.embeds import handle_command_error
 from views.ticket_transcript import build_ticket_transcript
-from views.tickets_views import TicketControlView, TicketDashboardView, TicketPanelView
+from views.tickets_views import OTHER_KEY, TicketControlView, TicketDashboardView, TicketPanelView, other_option
 
 
 def _defaults(guild_id: int) -> dict:
@@ -22,6 +22,8 @@ def _defaults(guild_id: int) -> dict:
         "panel_title": "Need help?",
         "panel_description": "Choose a category below to open a private support ticket.",
         "panel_button_label": "Create Ticket",
+        "panel_button_emoji": "🎫",
+        "allow_other_option": True,
         "choose_option_message": "Choose the category that best matches your request.",
         "default_category_id": None,
         "staff_role_ids": [],
@@ -105,6 +107,7 @@ class Tickets(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._delete_tasks: dict[int, asyncio.Task] = {}
+        self._background_tasks: set[asyncio.Task] = set()
 
     @property
     def config_collection(self):
@@ -130,6 +133,25 @@ class Tickets(commands.Cog):
         for task in self._delete_tasks.values():
             task.cancel()
         self._delete_tasks.clear()
+        for task in list(self._background_tasks):
+            task.cancel()
+        self._background_tasks.clear()
+
+    def _edit_channel_soon(self, channel: discord.TextChannel, **kwargs):
+        """Rename/retopic a channel without blocking ticket messages.
+
+        Discord limits channel renames to 2 per 10 minutes, so a close/reopen/close sequence
+        would otherwise stall for minutes before the next ticket message could be sent.
+        """
+        async def runner():
+            try:
+                await asyncio.wait_for(channel.edit(**kwargs), timeout=20)
+            except (asyncio.TimeoutError, discord.HTTPException):
+                pass
+
+        task = asyncio.create_task(runner())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def get_config(self, guild_id: int) -> dict:
         if not self._db_ready():
@@ -153,7 +175,7 @@ class Tickets(commands.Cog):
     def _db_ready(self) -> bool:
         return self.bot.mongo_client is not None
 
-    async def create_ticket(self, interaction: discord.Interaction, option_key: str, config: dict, panel: dict):
+    async def create_ticket(self, interaction: discord.Interaction, option_key: str, config: dict, panel: dict, reason: str | None = None):
         if interaction.guild is None or interaction.user.bot:
             return await interaction.response.send_message(embed=error_embed("Tickets can only be created by server members."), ephemeral=True)
         if not self._db_ready():
@@ -161,9 +183,16 @@ class Tickets(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         config = await self.get_config(guild.id)
-        option = next((item for item in config.get("options", []) if item.get("key") == option_key), None)
-        if option is None:
-            return await interaction.followup.send(embed=error_embed("That ticket option was removed. Open the panel again."), ephemeral=True)
+        if option_key == OTHER_KEY:
+            if not config.get("allow_other_option", True):
+                return await interaction.followup.send(embed=error_embed("The Other option is currently disabled. Open the panel again."), ephemeral=True)
+            option = other_option()
+            reason_text = (reason or "").strip() or "No reason provided"
+        else:
+            option = next((item for item in config.get("options", []) if item.get("key") == option_key), None)
+            if option is None:
+                return await interaction.followup.send(embed=error_embed("That ticket option was removed. Open the panel again."), ephemeral=True)
+            reason_text = str(option.get("label", "Ticket"))
         max_open = int(config.get("max_open_tickets", 3) or 0)
         if max_open > 0:
             count = await self.tickets_collection.count_documents({"guild_id": guild.id, "opener_id": interaction.user.id, "closed": False})
@@ -217,6 +246,7 @@ class Tickets(commands.Cog):
             "option_key": option_key,
             "option_label": str(option.get("label", "Ticket")),
             "ticket_number": ticket_number,
+            "reason": reason_text,
             "panel_message_id": int(panel.get("message_id", 0)),
             "opened_at": int(time.time()),
             "closed": False,
@@ -234,24 +264,28 @@ class Tickets(commands.Cog):
             return await interaction.followup.send(embed=error_embed("Ticket creation failed while saving its record. Please try again."), ephemeral=True)
 
         opening_template = str(option.get("open_message") or config.get("open_message", "Hello {user}, the team will be with you shortly.\n**Reason:** {reason}"))
-        description = _format_ticket(opening_template, user=interaction.user, guild=guild, channel=channel, reason=str(option.get("label", "Ticket")), option=str(option.get("label", "Ticket")), ticket_id=channel.id)
+        description = _format_ticket(opening_template, user=interaction.user, guild=guild, channel=channel, reason=reason_text, option=str(option.get("label", "Ticket")), ticket_id=channel.id)
         embed = make_embed(f"{option.get('emoji') or '🎫'} {option.get('label', 'Ticket')}", description)
         embed.add_field(name="Created by", value=interaction.user.mention, inline=True)
         embed.add_field(name="Ticket ID", value=f"`{channel.id}`", inline=True)
+        if option_key == OTHER_KEY and "{reason}" not in opening_template:
+            embed.add_field(name="Reason", value=reason_text[:1024], inline=False)
         role_mentions = [f"<@&{role_id}>" for role_id in ping_ids if guild.get_role(role_id)]
         allowed_mentions = discord.AllowedMentions(users=[interaction.user], roles=[discord.Object(id=role_id) for role_id in ping_ids if guild.get_role(role_id)], everyone=False, replied_user=False)
         try:
+            lead = " ".join([interaction.user.mention, *role_mentions])
             control_message = await channel.send(
-                content=" ".join(role_mentions) or None,
-                embed=embed,
-                view=TicketControlView(self),
+                view=TicketControlView(self, embed=embed, mode="open", lead=lead),
                 allowed_mentions=allowed_mentions,
             )
-            await self.tickets_collection.update_one({"_id": channel.id}, {"$set": {"control_message_id": control_message.id}})
+            await self.tickets_collection.update_one(
+                {"_id": channel.id},
+                {"$set": {"control_message_id": control_message.id, "control_embed": embed.to_dict(), "control_lead": lead}},
+            )
         except discord.HTTPException as exc:
             print(f"Tickets Cog: ticket {channel.id} created but opening message failed: {exc}")
         await interaction.followup.send(
-            embed=success_embed(f"Your ticket has been created: {channel.mention}\n[Open ticket]({channel.jump_url if hasattr(channel, 'jump_url') else f'https://discord.com/channels/{guild.id}/{channel.id}'})"),
+            embed=success_embed(f"Your ticket has been created: {channel.mention}"),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -292,7 +326,7 @@ class Tickets(commands.Cog):
                 latest = await self.tickets_collection.find_one({"_id": channel.id}) or {}
                 owner = f"<@{latest['claimed_by']}>" if latest.get("claimed_by") else "another staff member"
                 return await interaction.followup.send(embed=error_embed(f"This ticket is already claimed by {owner}."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-            await self._mark_claimed(interaction.message, member)
+            await self._mark_claimed(interaction.message, member, ticket)
             message = _format_ticket(str(config.get("claim_message", "Ticket claimed by {user}.")), user=member, guild=interaction.guild, channel=channel, option=ticket.get("option_label", "Ticket"), ticket_id=channel.id)
             await channel.send(embed=make_embed("🖐️ Ticket Claimed", message), allowed_mentions=discord.AllowedMentions.none())
             return await interaction.followup.send(embed=success_embed("You claimed this ticket."), ephemeral=True)
@@ -349,13 +383,14 @@ class Tickets(commands.Cog):
             if pending_delete is not None:
                 pending_delete.cancel()
             await self.tickets_collection.update_one({"_id": channel.id}, {"$set": {"closed": False, "reopened_at": int(time.time())}, "$unset": {"closed_at": "", "closed_by": "", "closed_by_name": ""}})
-            new_name = channel.name.removeprefix("closed-")
-            try:
-                await channel.edit(name=new_name[:100], topic=(channel.topic or "").replace(str(config.get("closed_topic_suffix", "(closed)")), "").strip(), reason=f"Ticket reopened by {member}")
-            except discord.HTTPException:
-                pass
             message = _format_ticket(str(config.get("reopen_message", "Ticket reopened by {user}.")), user=member, guild=interaction.guild, channel=channel, option=ticket.get("option_label", "Ticket"), ticket_id=channel.id)
-            await channel.send(embed=make_embed("🔓 Ticket Reopened", message), allowed_mentions=discord.AllowedMentions.none())
+            await channel.send(view=TicketControlView(self, embed=make_embed("🔓 Ticket Reopened", message), mode="reopened"), allowed_mentions=discord.AllowedMentions.none())
+            self._edit_channel_soon(
+                channel,
+                name=channel.name.removeprefix("closed-")[:100],
+                topic=(channel.topic or "").replace(str(config.get("closed_topic_suffix", "(closed)")), "").strip()[:1024],
+                reason=f"Ticket reopened by {member}",
+            )
             return await interaction.followup.send(embed=success_embed("Ticket reopened."), ephemeral=True)
 
         if action == "delete":
@@ -367,30 +402,33 @@ class Tickets(commands.Cog):
             await self._delete_ticket(channel, ticket, config, deleter=member, interaction=interaction)
             return
 
-    async def _mark_claimed(self, message: discord.Message | None, member: discord.Member):
+    async def _mark_claimed(self, message: discord.Message | None, member: discord.Member, ticket: dict):
         if message is None:
             return
         try:
-            base = message.embeds[0] if message.embeds else make_embed("🎫 Ticket")
-            embed = discord.Embed.from_dict(base.to_dict())
+            stored = ticket.get("control_embed")
+            if stored:
+                embed = discord.Embed.from_dict(stored)
+            elif message.embeds:
+                embed = discord.Embed.from_dict(message.embeds[0].to_dict())
+            else:
+                embed = make_embed("🎫 Ticket")
             for index in reversed(range(len(embed.fields))):
                 if embed.fields[index].name == "Claimed by":
                     embed.remove_field(index)
-            embed.add_field(name="Claimed by", value=member.mention, inline=True)
-            await message.edit(embed=embed, view=TicketControlView(self, mode="claimed"), allowed_mentions=discord.AllowedMentions.none())
-        except discord.HTTPException as exc:
+            embed.add_field(name="Claimed by", value=member.mention, inline=False)
+            kwargs = {
+                "view": TicketControlView(self, embed=embed, mode="claimed", lead=ticket.get("control_lead")),
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
+            if not getattr(message.flags, "components_v2", False):
+                kwargs.update(content=None, embeds=[])
+            await message.edit(**kwargs)
+        except (discord.HTTPException, TypeError, ValueError) as exc:
             print(f"Tickets Cog: could not update claimed ticket message {message.id}: {exc}")
 
     async def _close_ticket(self, channel: discord.TextChannel, ticket: dict, config: dict, closer: discord.Member):
         guild = channel.guild
-        log_channel = guild.get_channel(int(config["log_channel_id"])) if config.get("log_channel_id") else None
-        if log_channel and isinstance(log_channel, (discord.TextChannel, discord.Thread)):
-            try:
-                log_embed = make_embed("🔒 Ticket Closed", f"**Channel:** {channel.mention}\n**Creator:** <@{ticket['opener_id']}>\n**Closed by:** {closer.mention}\n**Option:** {ticket.get('option_label', 'Ticket')}\n**Ticket ID:** `{channel.id}`")
-                await log_channel.send(embed=log_embed, allowed_mentions=discord.AllowedMentions.none())
-            except discord.HTTPException as exc:
-                print(f"Tickets Cog: could not log closed ticket {channel.id}: {exc}")
-
         opener = guild.get_member(int(ticket["opener_id"]))
         if opener is None:
             try:
@@ -407,17 +445,14 @@ class Tickets(commands.Cog):
             except discord.HTTPException:
                 pass
         await self.tickets_collection.update_one({"_id": channel.id}, {"$set": {"closed": True, "closed_at": int(time.time()), "closed_by": closer.id, "closed_by_name": closer.display_name}})
-        try:
-            suffix = str(config.get("closed_topic_suffix", "(closed)")).strip()
-            topic = (channel.topic or "").replace(suffix, "").strip()
-            if suffix:
-                topic = f"{topic} {suffix}".strip()
-            name = channel.name if channel.name.startswith("closed-") else f"closed-{channel.name}"
-            await channel.edit(name=name[:100], topic=topic[:1024], reason=f"Ticket closed by {closer}")
-        except discord.HTTPException:
-            pass
         close_text = _format_ticket(str(config.get("close_message", "Ticket closed by {user}.")), user=closer, guild=guild, channel=channel, option=ticket.get("option_label", "Ticket"), ticket_id=channel.id)
-        await channel.send(embed=make_embed("🔒 Ticket Closed", close_text), view=TicketControlView(self, mode="closed"), allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(view=TicketControlView(self, embed=make_embed("🔒 Ticket Closed", close_text), mode="closed"), allowed_mentions=discord.AllowedMentions.none())
+        suffix = str(config.get("closed_topic_suffix", "(closed)")).strip()
+        topic = (channel.topic or "").replace(suffix, "").strip()
+        if suffix:
+            topic = f"{topic} {suffix}".strip()
+        name = channel.name if channel.name.startswith("closed-") else f"closed-{channel.name}"
+        self._edit_channel_soon(channel, name=name[:100], topic=topic[:1024], reason=f"Ticket closed by {closer}")
         delay_minutes = int(config.get("delete_after_close_minutes", 0) or 0)
         if delay_minutes > 0:
             task = asyncio.create_task(self._delete_channel_after(channel.id, delay_minutes * 60))
