@@ -116,9 +116,9 @@ HELP_CATEGORIES: dict[str, list[str]] = {
     ],
     "Pokétwo Management": ["set", "toggle", "settings", "channelsettings", "serversettings"],
     "Pokétwo Utils": ["catchtime", "dex", "extract"],
-    "Utilities": ["remind", "timer", "reminders"],
+    "Utilities": ["remind", "timer", "reminders", "roll"],
     "Grinder": ["syncguilds"],
-    "Bot": ["stats", "gitstats", "pull", "reload", "restart", "sync", "clearautomodlogs"],
+    "Bot": ["stats", "gitstats", "pull", "reload", "restart", "sync"],
 }
 OTHER_CATEGORY = "Other"
 
