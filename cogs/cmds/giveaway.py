@@ -348,7 +348,6 @@ class Giveaway(commands.Cog):
                     "🎉 You won a giveaway!",
                     f"You won **{doc['prize']}** in **{guild_name}**.\n\n[View the giveaway message]({jump_url})",
                 )
-                dm_embed.set_footer(text="Congratulations!")
                 try:
                     await user.send(embed=dm_embed, allowed_mentions=discord.AllowedMentions.none())
                 except (discord.Forbidden, discord.HTTPException) as exc:
