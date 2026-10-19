@@ -16,7 +16,7 @@ from views.timer_views import (
     TIMER_NAMES,
     build_main_page,
 )
-from cogs.config.baseconfigs import config_group
+from .baseconfigs import config_group
 
 READY_TEXT = "You can catch the pokémon now!"
 STEAL_TEXT = "{mention} you have **{short}** stole **{pokemon}**!"
