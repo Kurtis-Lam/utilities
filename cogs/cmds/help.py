@@ -100,7 +100,7 @@ HELP_CATEGORIES: dict[str, list[str]] = {
     "Role": ["createrole", "deleterole", "giverole", "removerole", "setperms"],
     "Member": [
         "membercount", "whois", "kick", "ban", "nick", "mute", "unmute", "muterole",
-        "warn", "warns", "kicked", "banned", "mutelogs",
+        "warn", "warns", "kicked", "banned", "mutelogs", "invites",
     ],
     "Message": [
         "snipe", "messages", "timediff", "purge", "forward", "pin", "unpin", "pins",
@@ -118,7 +118,7 @@ HELP_CATEGORIES: dict[str, list[str]] = {
     "Pokétwo Utils": ["catchtime", "dex", "extract"],
     "Utilities": ["remind", "timer", "reminders"],
     "Grinder": ["syncguilds"],
-    "Bot": ["stats", "gitstats", "pull", "reload", "restart", "sync"],
+    "Bot": ["stats", "gitstats", "pull", "reload", "restart", "sync", "clearautomodlogs"],
 }
 OTHER_CATEGORY = "Other"
 
