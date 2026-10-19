@@ -7,7 +7,7 @@ from discord.ext import commands
 
 # Imports from views directory
 from views.categories_views import CategorySelectView
-from views.common_views import confirm
+from views.common_views import confirm, confirm_and_run
 from views.embeds import handle_common_error, send_usage
 from views.prompts import ask, exact_category, is_skip, one_line, raw_args, split_name_and_target, strip_quotes
 from views.loading import loading
@@ -321,9 +321,7 @@ class Categories(commands.Cog):
         description="Deletes a category and all channels inside it.",
     )
     @app_commands.describe(
-        category=(
-            "The category to delete. Defaults to the current category."
-        )
+        category="The category to delete. Defaults to the current category."
     )
     @commands.has_permissions(manage_channels=True)
     async def deletecategory(
@@ -332,9 +330,7 @@ class Categories(commands.Cog):
         *,
         category: typing.Optional[str] = commands.parameter(
             default=None,
-            description=(
-                "The category to delete. Defaults to the current category."
-            ),
+            description="The category to delete. Defaults to the current category.",
         ),
     ):
         target_category = await self.get_target_category(ctx, category)
@@ -346,29 +342,29 @@ class Categories(commands.Cog):
             )
             return await ctx.reply(embed=embed, mention_author=False)
 
-        confirmed = await self.confirm_action(
-            ctx,
-            f"Delete category **{target_category.name}** and all its channels?",
-        )
-        if not confirmed:
-            return
+        category_name = target_category.name
 
-        for channel in target_category.channels:
-            await channel.delete()
-        await target_category.delete()
-
-        try:
-            embed = discord.Embed(
+        async def perform_delete(_interaction):
+            for child_channel in list(target_category.channels):
+                await child_channel.delete(
+                    reason=f"Category {category_name} deleted by {ctx.author}"
+                )
+            await target_category.delete(reason=f"Deleted by {ctx.author}")
+            return discord.Embed(
                 title="✅ Category Deleted",
-                description=(
-                    f"Category **{target_category.name}** and all its channels"
-                    " have been deleted."
-                ),
-                color=discord.Color.red(),
+                description=f"Category **{category_name}** and all its channels have been deleted.",
+                color=discord.Color.green(),
             )
-            await confirmed.show(embed)
-        except discord.NotFound:
-            pass
+
+        await confirm_and_run(
+            ctx,
+            f"Delete category **{category_name}** and all its channels?",
+            perform_delete,
+            title="⚠️ Confirm",
+            cancel_text="❌ Cancelled",
+            timeout_text="⏱️ Timeout\nYou took too long to reply. Action cancelled.",
+            failure_text="❌ Category deletion failed. Some channels may already have been deleted; check the category and try again.",
+        )
 
     @commands.hybrid_command(
         aliases=["rcat"],
