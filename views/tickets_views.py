@@ -21,7 +21,7 @@ def ticket_config_embed(config: dict, guild: discord.Guild | None) -> discord.Em
     embed.add_field(name="Category", value=f"<#{category_id}>" if category_id else "*Not set*", inline=True)
     embed.add_field(name="Log channel", value=f"<#{log_id}>" if log_id else "*Not set*", inline=True)
     embed.add_field(name="Max open", value=str(config.get("max_open_tickets", 3)), inline=True)
-    option_lines = [f"`{o.get('key', '?')}` — **{o.get('label', 'Untitled')}**" for o in options[:12]]
+    option_lines = [f"{o.get('emoji') or '▫️'} `{o.get('key', '?')}` — **{o.get('label', 'Untitled')}**" for o in options[:12]]
     if len(options) > 12:
         option_lines.append(f"…and {len(options) - 12} more")
     embed.add_field(name=f"Creation options ({len(options)}/25)", value="\n".join(option_lines) if option_lines else "*No options configured yet*", inline=False)
@@ -133,13 +133,22 @@ class TicketOptionSelectView(discord.ui.View):
 
 
 class TicketControlView(discord.ui.View):
-    """Persistent claim, close, reopen and delete controls for ticket channels."""
+    """Persistent claim, close, reopen and delete controls for ticket channels.
+
+    Modes: ``open`` (Claim + Close), ``claimed`` (Close only), ``closed`` (Reopen + Delete)
+    and ``all`` (every button; only used to register the persistent callbacks).
+    """
 
     def __init__(self, cog, mode: str = "open"):
         super().__init__(timeout=None)
         self.cog = cog
         if mode == "open":
             self.remove_item(self.reopen)
+            self.remove_item(self.delete)
+        elif mode == "claimed":
+            self.remove_item(self.claim)
+            self.remove_item(self.reopen)
+            self.remove_item(self.delete)
         elif mode == "closed":
             self.remove_item(self.claim)
             self.remove_item(self.close)
@@ -367,7 +376,7 @@ class TicketSecuritySettingsModal(Modal, title="Ticket Limits & Controls"):
     max_open = TextInput(label="Max open tickets per member (0 = unlimited)", required=True, max_length=3)
     allow_user_close = TextInput(label="Allow ticket creator to close? (true/false)", required=True, max_length=5)
     allow_claim = TextInput(label="Enable ticket claim button? (true/false)", required=True, max_length=5)
-    transcripts = TextInput(label="Generate transcripts on close? (true/false)", required=True, max_length=5)
+    transcripts = TextInput(label="Transcript on ticket delete? (true/false)", required=True, max_length=5)
     deletion_delay = TextInput(label="Delete closed ticket after min (0 = never)", required=True, max_length=4)
 
     def __init__(self, dashboard: TicketDashboardView):
@@ -405,21 +414,22 @@ class TicketSecuritySettingsModal(Modal, title="Ticket Limits & Controls"):
 
 class TicketOptionModal(Modal, title="Ticket Option"):
     option_label = TextInput(label="Option name", required=True, max_length=100)
+    option_emoji = TextInput(label="Emoji (blank = none)", required=False, max_length=64, placeholder="🎫  or a custom emoji like <:name:id>")
     option_description = TextInput(label="Option description", required=True, max_length=100, placeholder="Describe what this ticket is for")
     category_id = TextInput(label="Destination category ID (blank = default)", required=False, max_length=25)
     ping_roles = TextInput(label="Extra roles to ping (comma separated IDs)", required=False, max_length=500)
-    opening_message = TextInput(label="Custom opening message (blank = default)", style=discord.TextStyle.paragraph, required=False, max_length=1000)
 
     def __init__(self, cog, guild_id: int, dashboard: TicketDashboardView, mode: str, option: dict | None = None):
         super().__init__(title="Add Ticket Option" if mode == "add" else "Edit Ticket Option")
         self.cog, self.guild_id, self.dashboard, self.mode = cog, guild_id, dashboard, mode
         self.option_key = option.get("key") if option else None
         option = option or {}
+        self.existing_option = option
         self.option_label.default = str(option.get("label", ""))[:100] or None
+        self.option_emoji.default = str(option.get("emoji") or "")[:64] or None
         self.option_description.default = str(option.get("description", ""))[:100] or None
         self.category_id.default = str(option.get("category_id") or "")
         self.ping_roles.default = ", ".join(map(str, option.get("ping_role_ids", [])))[:500]
-        self.opening_message.default = str(option.get("open_message", ""))[:1000] or None
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -434,33 +444,120 @@ class TicketOptionModal(Modal, title="Ticket Option"):
         missing = [rid for rid in pings if guild is None or guild.get_role(rid) is None]
         if missing:
             return await interaction.response.send_message(embed=error_embed("Unknown role ID(s): " + ", ".join(map(str, missing))), ephemeral=True)
-        key = self.option_key or re.sub(r"[^a-z0-9]+", "-", self.option_label.value.lower()).strip("-")[:40] or "option"
+
+        label = self.option_label.value.strip()
+        emoji = self.option_emoji.value.strip() or None
         config = await self.cog.get_config(self.guild_id)
         options = list(config.get("options", []))
-        updated = {
-            "key": key,
-            "label": self.option_label.value.strip(),
-            "description": self.option_description.value.strip(),
-            "category_id": category_ids[0] if category_ids else None,
-            "ping_role_ids": pings,
-            "open_message": self.opening_message.value,
-            "emoji": (next((o.get("emoji") for o in options if o.get("key") == key), None)),
-        }
+        key = self.option_key or re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:40] or "option"
         existing = next((i for i, item in enumerate(options) if item.get("key") == key), None)
         if self.mode == "add":
             if len(options) >= 25:
                 return await interaction.response.send_message(embed=error_embed("Discord supports up to 25 ticket options. Remove an option before adding another."), ephemeral=True)
-            if any(o.get("key") == key for o in options):
+            if existing is not None:
                 key = f"{key}-{int(time.time()) % 100000}"
-                updated["key"] = key
-            options.append(updated)
-        elif existing is not None:
-            options[existing] = updated
-        else:
+        elif existing is None:
             return await interaction.response.send_message(embed=error_embed("That option no longer exists. Refresh the dashboard."), ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+
+        probe = None
+        if emoji:
+            probe_view = discord.ui.View(timeout=60)
+            try:
+                probe_view.add_item(Select(placeholder="Previewing emoji…", options=[discord.SelectOption(label=label[:100] or "Preview", value="preview", emoji=emoji)]))
+                probe = await interaction.followup.send(content="Checking that emoji…", view=probe_view, ephemeral=True, wait=True)
+            except (discord.HTTPException, ValueError, TypeError):
+                return await interaction.followup.send(
+                    embed=error_embed("Discord did not accept that emoji. Use a standard emoji like 🎫, or a custom emoji from a server the bot is in, like <:name:id>."),
+                    ephemeral=True,
+                )
+            finally:
+                probe_view.stop()
+
+        updated = {
+            "key": key,
+            "label": label,
+            "description": self.option_description.value.strip(),
+            "category_id": category_ids[0] if category_ids else None,
+            "ping_role_ids": pings,
+            "open_message": str(self.existing_option.get("open_message", "")) if self.mode == "edit" else "",
+            "emoji": emoji,
+        }
+        config = await self.cog.get_config(self.guild_id)
+        options = list(config.get("options", []))
+        index = next((i for i, item in enumerate(options) if item.get("key") == key), None)
+        if self.mode == "add" and index is None:
+            options.append(updated)
+        elif index is not None and self.mode == "edit":
+            options[index] = updated
+        else:
+            return await interaction.followup.send(embed=error_embed("Could not save that option. Refresh the dashboard and try again."), ephemeral=True)
         await self.cog.save_config_fields(self.guild_id, {"options": options})
-        await interaction.response.send_message(embed=success_embed(f"Ticket option **{updated['label']}** saved."), ephemeral=True)
+
+        success = success_embed(f"Ticket option {emoji + ' ' if emoji else ''}**{label}** saved.\nUse the button below to set a custom opening message for this option.")
+        follow_up = TicketOpeningMessageView(self.cog, self.guild_id, key, self.dashboard)
+        if probe is not None:
+            try:
+                await probe.edit(content=None, embed=success, view=follow_up)
+                follow_up.message = probe
+            except discord.HTTPException:
+                follow_up.message = await interaction.followup.send(embed=success, view=follow_up, ephemeral=True, wait=True)
+        else:
+            follow_up.message = await interaction.followup.send(embed=success, view=follow_up, ephemeral=True, wait=True)
         await self.dashboard.refresh_message()
+
+
+class TicketOpeningMessageModal(Modal, title="Custom Opening Message"):
+    opening_message = TextInput(
+        label="Opening message (blank = server default)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+        placeholder="Placeholders: {user} {username} {option} {reason}",
+    )
+
+    def __init__(self, cog, guild_id: int, option_key: str, dashboard: TicketDashboardView, current: str = ""):
+        super().__init__()
+        self.cog, self.guild_id, self.option_key, self.dashboard = cog, guild_id, option_key, dashboard
+        self.opening_message.default = (current or "")[:1000] or None
+
+    async def on_submit(self, interaction: discord.Interaction):
+        config = await self.cog.get_config(self.guild_id)
+        options = list(config.get("options", []))
+        index = next((i for i, item in enumerate(options) if item.get("key") == self.option_key), None)
+        if index is None:
+            return await interaction.response.send_message(embed=error_embed("That option no longer exists."), ephemeral=True)
+        options[index] = {**options[index], "open_message": self.opening_message.value}
+        await self.cog.save_config_fields(self.guild_id, {"options": options})
+        await interaction.response.send_message(embed=success_embed("Custom opening message saved."), ephemeral=True)
+        await self.dashboard.refresh_message()
+
+
+class TicketOpeningMessageView(discord.ui.View):
+    def __init__(self, cog, guild_id: int, option_key: str, dashboard: TicketDashboardView):
+        super().__init__(timeout=300)
+        self.cog, self.guild_id, self.option_key, self.dashboard = cog, guild_id, option_key, dashboard
+        self.message: discord.Message | None = None
+        button = Button(label="Custom Opening Message", emoji="📝", style=discord.ButtonStyle.secondary)
+        button.callback = self.open_modal
+        self.add_item(button)
+
+    async def open_modal(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(embed=error_embed("Administrator permission is required."), ephemeral=True)
+        config = await self.cog.get_config(self.guild_id)
+        option = next((o for o in config.get("options", []) if o.get("key") == self.option_key), None)
+        if option is None:
+            return await interaction.response.send_message(embed=error_embed("That option no longer exists."), ephemeral=True)
+        await interaction.response.send_modal(TicketOpeningMessageModal(self.cog, self.guild_id, self.option_key, self.dashboard, str(option.get("open_message", ""))))
+
+    async def on_timeout(self):
+        if self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except discord.HTTPException:
+                pass
 
 
 class TicketOptionActionView(discord.ui.View):
@@ -471,7 +568,7 @@ class TicketOptionActionView(discord.ui.View):
             placeholder="Choose a ticket option…",
             min_values=1,
             max_values=1,
-            options=[discord.SelectOption(label=str(o.get("label", "Option"))[:100], value=str(o.get("key", "general"))[:100]) for o in options[:25]],
+            options=[discord.SelectOption(label=str(o.get("label", "Option"))[:100], value=str(o.get("key", "general"))[:100], emoji=o.get("emoji") or None) for o in options[:25]],
         )
         self.select.callback = self.selected
         self.add_item(self.select)
