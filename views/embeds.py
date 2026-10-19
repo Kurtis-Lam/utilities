@@ -170,6 +170,7 @@ USAGE_EXAMPLES = {
         "{p}set ld 15 sh cl --global",
         "{p}set ld 20 --standard",
         "{p}set shtimer 20",
+        "{p}set shtimer off --global",
         "{p}set locktime 2h sh",
         "{p}set lt 30m sh cl --global",
         "{p}set lt 1h --stan",
@@ -213,10 +214,30 @@ USAGE_EXAMPLES = {
         "{p}set ru t --standard",
     ],
     "set use-standard": ["{p}set use-standard sh", "{p}set use-standard sh cl tp"],
-    "set shtimer": ["{p}set shtimer 15", "{p}set shtimer 30s"],
-    "set cltimer": ["{p}set cltimer 15", "{p}set cltimer 30s"],
-    "set rptimer": ["{p}set rptimer 15", "{p}set rptimer 30s"],
-    "set tptimer": ["{p}set tptimer 15", "{p}set tptimer 30s"],
+    "set shtimer": [
+        "{p}set shtimer 15",
+        "{p}set shtimer 30s --global",
+        "{p}set shtimer off",
+        "{p}set shtimer 20 --standard",
+    ],
+    "set cltimer": [
+        "{p}set cltimer 15",
+        "{p}set cltimer 30s --global",
+        "{p}set cltimer off",
+        "{p}set cltimer 20 --standard",
+    ],
+    "set rptimer": [
+        "{p}set rptimer 15",
+        "{p}set rptimer 30s --global",
+        "{p}set rptimer off",
+        "{p}set rptimer 20 --standard",
+    ],
+    "set tptimer": [
+        "{p}set tptimer 15",
+        "{p}set tptimer 30s --global",
+        "{p}set tptimer off",
+        "{p}set tptimer 20 --standard",
+    ],
     "set rarerole": ["{p}set rarerole @Rare Ping", "{p}set rare 123456789012345678"],
     "set regionalrole": ["{p}set regionalrole @Regional Ping", "{p}set reg @Regional Ping"],
     "set gigantamaxrole": ["{p}set gigantamaxrole @GMax Ping", "{p}set gmax @GMax Ping"],
@@ -239,6 +260,16 @@ USAGE_EXAMPLES = {
         "{p}toggle ru --standard",
     ],
     "toggle naming": ["{p}toggle naming", "{p}toggle naming --global"],
+    "toggle timer": [
+        "{p}toggle timer sh",
+        "{p}toggle timer sh cl --global",
+        "{p}toggle timer all",
+        "{p}toggle timer --standard",
+    ],
+    "toggle shtimer": ["{p}toggle shtimer", "{p}toggle shtimer --global", "{p}toggle shtimer --standard"],
+    "toggle cltimer": ["{p}toggle cltimer", "{p}toggle cltimer --global", "{p}toggle cltimer --standard"],
+    "toggle rptimer": ["{p}toggle rptimer", "{p}toggle rptimer --global", "{p}toggle rptimer --standard"],
+    "toggle tptimer": ["{p}toggle tptimer", "{p}toggle tptimer --global", "{p}toggle tptimer --standard"],
     "toggle lockdelay": [
         "{p}toggle lockdelay sh",
         "{p}toggle ld sh cl",
@@ -283,11 +314,11 @@ USAGE_OVERVIEWS = {
         "{p}set rarerole|rare|rarole|ra {role}",
         "{p}set regionalrole|regional|regrole|reg {role}",
         "{p}set lockdelay|lock-delay|delay|ld {time} [lock] [--global|--standard]",
-        "{p}set shtimer/cltimer/rptimer/tptimer {timer}",
+        "{p}set shtimer/cltimer/rptimer/tptimer {time|on|off} [--global|--standard]",
         "{p}set locktime|lock-time|time|lt {time} [lock(s)] [--global|--standard]",
         "{p}set whitelist|wl {add|a|remove|r} {channel mention(s) / channel id(s)} [lock(s)] [--standard]",
         "{p}set restrictunlockers|restrict-unlockers|ru {true|false|t|f} [lock(s)] [--global|--standard]",
-        "{p}set use-standard {lock(s)}",
+        "{p}set use-standard {lock(s) / shtimer / cltimer / rptimer / tptimer}",
     ],
     "toggle": [
         "{p}toggle {lock} [--global]",
@@ -295,13 +326,15 @@ USAGE_OVERVIEWS = {
         "{p}toggle locktime {lock(s)} [--global|--standard]",
         "{p}toggle lockdelay {lock(s)} [--global|--standard]",
         "{p}toggle restrictunlockers|restrict-unlockers|ru {lock(s)} [--global|--standard]",
+        "{p}toggle shtimer/cltimer/rptimer/tptimer [--global|--standard]",
+        "{p}toggle timer {sh|cl|rp|tp|all} [--global|--standard]",
     ],
 }
 USAGE_OVERVIEW_NOTES = {
     "set": "`{}` required • `[]` optional • `--standard` / `--stan` can't be combined with `--global`, "
-           "and only works with lockdelay, locktime, whitelist and restrictunlockers.",
+           "and only works with lockdelay, locktime, whitelist, restrictunlockers and the timers.",
     "toggle": "`{}` required • `[]` optional • `--standard` / `--stan` can't be combined with `--global`, "
-              "and only works with lockdelay, locktime and restrictunlockers.",
+              "and only works with lockdelay, locktime, restrictunlockers and the timers.",
 }
 
 
