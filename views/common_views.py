@@ -20,6 +20,7 @@ Everything visual lives here so the whole bot stays consistent:
 from __future__ import annotations
 
 import re
+import traceback
 
 import discord
 
@@ -369,6 +370,14 @@ class ConfirmLayout(BaseLayout):
                 self.embed,
                 discord.ui.ActionRow(self.confirm_button, self.cancel_button),
             )
+        elif state == "processing":
+            container = container_from_embed(
+                discord.Embed(
+                    title="⏳ Processing",
+                    description="The action is being completed.",
+                    color=discord.Color.gold(),
+                )
+            )
         elif state == "confirmed":
             # Buttons are gone while the action runs; callers then call show() with the result.
             confirmed = discord.Embed(
@@ -436,6 +445,88 @@ async def confirm(ctx, prompt: str, **kwargs) -> ConfirmLayout:
     view = ConfirmLayout(ctx.author, prompt, **kwargs)
     await view.send(ctx)
     await view.wait()
+    return view
+
+
+class ConfirmActionLayout(ConfirmLayout):
+    """A confirmation view that runs its action from the button callback."""
+
+    def __init__(self, author, prompt, action, *, failure_text: str, **kwargs):
+        self.action = action
+        self.failure_text = failure_text
+        self._action_running = False
+        super().__init__(author, prompt, **kwargs)
+
+    async def _on_confirm(self, interaction: discord.Interaction) -> None:
+        if self._action_running:
+            return
+        self._action_running = True
+
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.HTTPException:
+            self._action_running = False
+            return
+
+        self.value = True
+        self.stop()
+        self.render("processing")
+        try:
+            await interaction.message.edit(
+                view=self,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            pass
+
+        try:
+            result = await self.action(interaction)
+        except Exception:
+            traceback.print_exc()
+            try:
+                await interaction.edit_original_response(
+                    content=self.failure_text,
+                    embed=None,
+                )
+            except discord.HTTPException:
+                pass
+            return
+
+        try:
+            if isinstance(result, discord.Embed):
+                await interaction.edit_original_response(content=None, embed=result)
+            else:
+                await interaction.edit_original_response(
+                    content=str(result) if result is not None else "✅ Done.",
+                    embed=None,
+                )
+        except discord.HTTPException:
+            try:
+                if isinstance(result, discord.Embed):
+                    await interaction.followup.send(embed=result, ephemeral=True)
+                else:
+                    await interaction.followup.send(
+                        content=str(result) if result is not None else "✅ Done.",
+                        ephemeral=True,
+                    )
+            except discord.HTTPException:
+                pass
+
+
+async def confirm_and_run(ctx, prompt: str, action, **kwargs) -> ConfirmActionLayout:
+    """Send a confirmation view without keeping the command's message task waiting."""
+    failure_text = kwargs.pop(
+        "failure_text",
+        "❌ The action failed. Check the bot's permissions and try again.",
+    )
+    view = ConfirmActionLayout(
+        ctx.author,
+        prompt,
+        action,
+        failure_text=failure_text,
+        **kwargs,
+    )
+    await view.send(ctx)
     return view
 
 
