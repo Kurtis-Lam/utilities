@@ -15,7 +15,7 @@ member, so leaves and rejoins can be counted later.
 * Bots are ignored.
 * The bot needs the Manage Server permission to read invites.
 
-The welcome message (``cogs/config/joins.py``) asks this cog who invited the new member through
+The welcome message (``cogs/community/joins.py``) asks this cog who invited the new member through
 ``process_join`` and shows "Invited by ..." when the admins left that option on.
 """
 from __future__ import annotations
