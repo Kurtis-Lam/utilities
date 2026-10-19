@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 
-from cogs.owner_cmds.utils import OwnerCog, run_cmd, safe_send
+from cogs.owner.utils import OwnerCog, run_cmd, safe_send
 from views.common_views import EMBED_COLOR
 from views.loading import loading
 
