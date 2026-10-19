@@ -1,5 +1,6 @@
 import asyncio
 import os
+import random
 import re
 import secrets
 import time
@@ -20,6 +21,9 @@ DURATION_PART = re.compile(r"(\d+)([smhd])")
 DURATION_FULL = re.compile(r"^(?:\d+[smhd])+$")
 UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 MAX_TIMER_SECONDS = 2592000  # 30 days
+ROLL_DEFAULT_MIN = 1
+ROLL_DEFAULT_MAX = 100
+MAX_ROLL_NUMBER = 10 ** 12
 
 
 def parse_duration(text: str):
@@ -223,6 +227,48 @@ class Utilities(commands.Cog):
         except Exception as e:  # still works until the next restart
             print(f"Failed to save timer {doc['id']}: {e}")
         self._schedule_timer(doc)
+
+    # ------------------------------------------------------------------
+    # Dice (.roll)
+    # ------------------------------------------------------------------
+
+    @commands.hybrid_command(
+        name="roll",
+        usage="[min] [max]",
+        description="Rolls a random number (1-100 by default, or between two numbers you choose).",
+    )
+    @app_commands.describe(
+        first="The lowest number (or the highest one when it is the only number). Default: 1.",
+        second="The highest number. Default: 100.",
+    )
+    async def roll(
+        self,
+        ctx,
+        first: typing.Optional[int] = commands.parameter(default=None, description="The lowest number (or the highest one when it is the only number). Default: 1."),
+        second: typing.Optional[int] = commands.parameter(default=None, description="The highest number. Default: 100."),
+    ):
+        if first is None and second is None:
+            low, high = ROLL_DEFAULT_MIN, ROLL_DEFAULT_MAX
+        elif second is None:
+            low, high = ROLL_DEFAULT_MIN, first
+        elif first is None:
+            low, high = ROLL_DEFAULT_MIN, second
+        else:
+            low, high = first, second
+
+        if low > high:
+            low, high = high, low
+        if abs(low) > MAX_ROLL_NUMBER or abs(high) > MAX_ROLL_NUMBER:
+            return await ctx.reply(embed=err_embed(f"Numbers can't go beyond ±{MAX_ROLL_NUMBER:,}."), mention_author=False)
+
+        result = random.randint(low, high)
+        embed = discord.Embed(
+            title="🎲 Roll",
+            description=f"You rolled **{result:,}**",
+            color=discord.Color.from_hsv(random.random(), random.uniform(0.55, 0.95), random.uniform(0.75, 1.0)),
+        )
+        embed.set_footer(text=f"Range: {low:,} to {high:,}")
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_group(
         name="reminders",
