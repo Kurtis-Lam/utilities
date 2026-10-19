@@ -814,6 +814,8 @@ def _render_page(
         facts.append(_fact("Ticket", _esc(number_text)))
     facts.append(_fact("Ticket ID", _esc(ticket.get("channel_id") or ticket.get("_id") or "—")))
     facts.append(_fact("Category", _esc(label)))
+    if ticket.get("option_key") == "__other__" and ticket.get("reason"):
+        facts.append(_fact("Reason", _esc(str(ticket["reason"])[:300])))
     facts.append(_fact("Created by", _person_html(opener_name, opener_avatar, opener_id or None)))
     claimed_by = ticket.get("claimed_by")
     if claimed_by:
