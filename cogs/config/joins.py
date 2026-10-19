@@ -10,6 +10,7 @@ from views.joins_views import (
     AutoroleConfigView,
     GreetConfigView,
     WelcomeConfigView,
+    format_invite_line,
     make_member_welcome_embed,
     render_template,
     _delete_after,
@@ -74,6 +75,7 @@ class Joins(commands.Cog):
             "welcome_embed_fields": [],
             "welcome_show_timestamp": True,
             "welcome_ping_member": True,
+            "welcome_show_inviter": True,
             "greet_channels": [],
             "greet_delete_delay": 1.0,
             "autoroles": [],
@@ -105,9 +107,13 @@ class Joins(commands.Cog):
         if channel:
             try:
                 if config.get("use_embed", True):
+                    invite_line = None
+                    tracker = self.bot.get_cog("Invites")
+                    if tracker is not None and config.get("welcome_show_inviter", True):
+                        invite_line = format_invite_line(await tracker.process_join(member))
                     await channel.send(
                         content=member.mention if config.get("welcome_ping_member", True) else None,
-                        embed=make_member_welcome_embed(config, member.guild, member, channel),
+                        embed=make_member_welcome_embed(config, member.guild, member, channel, invite_line),
                         allowed_mentions=discord.AllowedMentions(users=[member] if config.get("welcome_ping_member", True) else [], roles=False, everyone=False, replied_user=False),
                     )
                 else:
