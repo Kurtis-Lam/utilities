@@ -62,10 +62,10 @@ USAGE_EXAMPLES = {
     # channels
     "createchannel": [
         "{p}createchannel general-chat",
-        "{p}cch general-chat \"Staff Area\"",
-        "{p}cch secret-chat --prelock --prehide",
+        "{p}cch general chat Staff Area",
+        "{p}cch secret chat --prelock --prehide",
     ],
-    "renamechannel": ["{p}renamechannel new-name", "{p}rch new-name #old-channel"],
+    "renamechannel": ["{p}renamechannel new name", "{p}rch new name #old-channel"],
     "movechannel": [
         "{p}movechannel 123456789012345678",
         "{p}movech Staff Area",
@@ -78,7 +78,7 @@ USAGE_EXAMPLES = {
         "{p}ccat Private Area @user --prehide",
         "{p}ccat Private Area 123456789012345678",
     ],
-    "renamecategory": ["{p}renamecategory new-name", "{p}rcat new-name old-category"],
+    "renamecategory": ["{p}renamecategory New Name", "{p}rcat New Name Old Category"],
     # members
     "membercount": ["{p}membercount", "{p}mc"],
     "kick": ["{p}kick @user Spamming"],
@@ -100,8 +100,8 @@ USAGE_EXAMPLES = {
     ],
     "warns remove": ["{p}warns remove @user a1b2c3", "{p}warns r @user a1b2c3"],
     # roles
-    "giverole": ["{p}giverole @user @role", "{p}gr @user @role"],
-    "removerole": ["{p}removerole @user @role", "{p}rr @user @role"],
+    "giverole": ["{p}giverole @user @role", "{p}gr @user VIP Members", "{p}gr @user VIP Members 2h"],
+    "removerole": ["{p}removerole @user @role", "{p}rr @user VIP Members"],
     "setperms": [
         "{p}setperms admin @role @user",
         "{p}setperms member @role",
@@ -109,11 +109,11 @@ USAGE_EXAMPLES = {
     ],
     "createrole": [
         "{p}createrole VIP",
-        "{p}cr VIP red",
+        "{p}cr VIP Members red",
         "{p}cr Mods light-blue admin @user",
         "{p}cr Staff #FF0000 basic @user1 @user2",
     ],
-    "deleterole": ["{p}deleterole @role", "{p}dr @role"],
+    "deleterole": ["{p}deleterole @role", "{p}dr VIP Members"],
     # messages
     "purge": ["{p}purge 10", "{p}purge 25 @user", "{p}purge *"],
     "forward": [
@@ -139,6 +139,7 @@ USAGE_EXAMPLES = {
     "remind": ["{p}remind 10m Take a break", "{p}rm 2h Check the oven", "{p}remindme 1d Pay rent"],
     "timer": ["{p}timer 10m", "{p}timer 1h30m Pizza", "{p}timer 45s Tea is ready"],
     "reminders remove": ["{p}reminders remove a1b2c3", "{p}reminders r a1b2c3"],
+    "roll": ["{p}roll", "{p}roll 50", "{p}roll 5 90"],
     # administrator configuration
     "autolock": ["{p}autolock", "{p}al"],
     "spawns": ["{p}spawns", "{p}s"],
