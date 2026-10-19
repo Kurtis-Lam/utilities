@@ -1,388 +1,803 @@
-import asyncio
-import datetime
+import re
 
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 
+from views.autolock_views import (
+    build_main_page,
+    CATEGORY_LABELS,
+    ALL_CATEGORIES,
+    CATEGORY_DESCRIPTIONS,
+    ROLE_CATEGORIES,
+    ROLE_COMMAND_HINTS,
+    RESTRICT_CATEGORIES,
+)
 from cogs.poketwo_helper.lockcommon import (
     DEFAULT_DELAY,
-    SHORT_NAMES,
-    UNLOCK_PRIORITY,
-    WARN_COLOR,
-    auto_unlocked_embed,
-    get_poketwo_target,
-    is_locked_overwrite,
-    locked_embed,
-    now_unix,
+    DEFAULT_LOCKTIME,
+    format_duration,
+    resolve_category as _resolve_category,
+    display_name as _display_name,
 )
-from cogs.poketwo_helper.lockunlock import NO_PINGS
-from views.lockunlock_views import UnlockLayout
-
-# How often the auto-unlock loop looks for locks whose timer has run out.
-AUTO_UNLOCK_CHECK_SECONDS = 5
+from views.common_views import error_embed
+from views.embeds import handle_command_error
+from cogs.config.baseconfigs import config_group
 
 
-def _channel_in_whitelist(channel, whitelist: list) -> bool:
-    """Empty whitelist == no channels will autolock. '*' == whole server."""
-    if not whitelist:
-        return False
-    entries = {str(w) for w in whitelist}
-    if "*" in entries:
-        return True
-    if str(channel.id) in entries:
-        return True
-    category_id = getattr(channel, "category_id", None)
-    if category_id and str(category_id) in entries:
-        return True
-    return False
+# Pseudo-category used to store the server's "standard" settings. It lives in the same
+# guild document and has the same field names as a real category (delay, delay_enabled,
+# locktime, locktime_enabled, whitelist, restrict_unlockers), so every setter below works on it unchanged.
+STANDARD = "standard"
+
+
+def _default_category(category: str) -> dict:
+    return {
+        "enabled": False,
+        "delay": DEFAULT_DELAY,
+        "delay_enabled": True,  # True = wait `delay` seconds, False = lock immediately
+        "locktime": DEFAULT_LOCKTIME,   # seconds the channel stays locked before auto-unlock
+        "locktime_enabled": False,      # True = auto-unlock after `locktime`, False = stay locked
+        "whitelist": [],
+        "restrict_unlockers": category in RESTRICT_CATEGORIES,
+    }
+
+
+def _default_standard() -> dict:
+    return {
+        "delay": DEFAULT_DELAY,
+        "delay_enabled": True,
+        "locktime": DEFAULT_LOCKTIME,
+        "locktime_enabled": False,
+        "whitelist": [],
+        "restrict_unlockers": True,
+    }
+
+
+# What "use standard" can copy onto a lock (restrict only lands on locks that can be restricted).
+STANDARD_PARTS = ("delay", "locktime", "whitelist", "restrict")
+
+
+def _label(category: str) -> str:
+    return CATEGORY_LABELS.get(category, category.capitalize())
+
+
+@config_group.command(
+    name="autolock",
+    aliases=["al"],
+    description="Configure autolocks.",
+)
+@commands.has_permissions(administrator=True)
+async def autolockconfig(ctx: commands.Context):
+    cog = ctx.bot.get_cog("AutoLockConfig")
+
+    if cog is None:
+        return await ctx.reply(embed=error_embed("AutoLockConfig is not loaded."), mention_author=False)
+
+    # build_main_page reads every category so the buttons are green (on) / grey (off).
+    view = await build_main_page(cog, ctx.guild, ctx.guild.id, ctx.author.id)
+    view.message = await ctx.reply(view=view, mention_author=False)
+
+
+@autolockconfig.error
+async def autolockconfig_error(ctx: commands.Context, error: Exception):
+    await handle_command_error(ctx, error)
 
 
 class AutoLockConfig(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.pending_locks = set()
-        self._background_tasks = set()
-
-    async def cog_load(self):
-        self.auto_unlock_loop.start()
-
-    async def cog_unload(self):
-        self.auto_unlock_loop.cancel()
 
     # Shared Mongo client from main.py (no connection string lives in this file).
+    @property
+    def mongo_client(self):
+        return self.bot.mongo_client
+
     @property
     def db(self):
         return self.bot.mongo_client["utilities"]
 
     @property
-    def locks_collection(self):
-        return self.db["locked_channels"]
+    def collection(self):
+        return self.db["autolock"]
 
-    # Autolock's own on/off/delay/whitelist/restrict settings — both the guild-wide
-    # ("--global") defaults and any per-channel overrides — live in AutoLockConfig.
-    # We read through that cog rather than Mongo directly so every reader/writer
-    # (this cog, .set, .toggle, the config UI) always agrees on the effective value.
     @property
-    def config_cog(self):
-        return self.bot.get_cog("AutoLockConfig")
+    def pings_collection(self):
+        return self.db["pings"]
 
-    def _resolve_unlockers(self, cat_configs: dict[str, dict], active: list[str], category_users: dict):
-        """
-        Highest-priority active lock with 'restrict unlockers' ON (for this channel,
-        after applying any channel override) decides who may unlock.
-        Returns (allowed_user_ids | None, restricting_categories).
-        None means anyone can unlock.
-        """
-        for tier in UNLOCK_PRIORITY:
-            tier_cats = [
-                c for c in tier
-                if c in active and cat_configs.get(c, {}).get("restrict_unlockers", False)
-            ]
-            users = set()
-            for c in tier_cats:
-                users |= {int(u) for u in category_users.get(c, ())}
-            if users:
-                return sorted(users), tier_cats
-        return None, []
+    # --- category resolution (used by .toggle / .set) --------------------------
 
-    async def process_autolock(
-        self,
-        channel: discord.TextChannel,
-        activated_categories: list[str],
-        category_users: dict[str, set[int]] | None = None,
-        pinged_users: set[int] | None = None,
-        ping_url: str | None = None,
-    ):
-        """
-        Called directly by Recognizer when a Pokémon is identified.
+    @staticmethod
+    def resolve_category(token: str) -> str | None:
+        return _resolve_category(token)
 
-        activated_categories: categories that matched this spawn (re, sh, cl, tp, rp, rare, ...)
-        category_users:       {"re": {uid, ...}, "sh": {...}, ...} users pinged per category
-        pinged_users:         users actually @mentioned in the ping message (never role pings);
-                              these are the people AutoLockDM may DM once the channel is locked
-        ping_url:             jump link of the ping message, included in those DMs
-        """
-        if channel.id in self.pending_locks:
-            return
+    @staticmethod
+    def display_name(category: str) -> str:
+        return _display_name(category)
 
-        config_cog = self.config_cog
-        if not config_cog:
-            print("AutoLock: AutoLockConfig cog is not loaded, skipping autolock check.")
-            return
+    @staticmethod
+    def can_restrict(category: str) -> bool:
+        return category in RESTRICT_CATEGORIES
 
-        category_users = category_users or {}
+    @staticmethod
+    def all_categories() -> tuple:
+        return ALL_CATEGORIES
 
-        # Effective config per category = guild-wide default with any channel-specific
-        # override (set via .set/.toggle without --global) applied on top. Only
-        # categories that are enabled *and* whose (guild-wide) whitelist covers this
-        # channel take part.
-        active = []
-        cat_configs: dict[str, dict] = {}
-        for cat in dict.fromkeys(activated_categories):
-            cfg = await config_cog.get_category_config_channel(channel.guild.id, channel.id, cat)
-            if cfg.get("enabled", False) and _channel_in_whitelist(channel, cfg.get("whitelist", [])):
-                active.append(cat)
-                cat_configs[cat] = cfg
+    # --- storage helpers (guild-wide / "--global" autolock settings) -----------
 
-        if not active:
-            return
+    async def get_guild_config(self, guild_id: int) -> dict:
+        gid = str(guild_id)
+        doc = await self.collection.find_one({"_id": gid})
 
-        # Delay: a category with delay OFF locks immediately; otherwise use its delay.
-        # With several categories the shortest wait wins.
-        delay = min(
-            (
-                cat_configs[cat].get("delay", DEFAULT_DELAY)
-                if cat_configs[cat].get("delay_enabled", True)
-                else 0
+        if not doc:
+            doc = {
+                "_id": gid,
+                **{cat: _default_category(cat) for cat in ALL_CATEGORIES},
+                STANDARD: _default_standard(),
+            }
+            await self.collection.insert_one(doc)
+            return doc
+
+        needs_update = False
+        if not isinstance(doc.get(STANDARD), dict):
+            doc[STANDARD] = _default_standard()
+            await self.collection.update_one({"_id": gid}, {"$set": {STANDARD: doc[STANDARD]}}, upsert=True)
+        else:
+            missing = {k: v for k, v in _default_standard().items() if k not in doc[STANDARD]}
+            if missing:
+                doc[STANDARD].update(missing)
+                await self.collection.update_one(
+                    {"_id": gid}, {"$set": {f"{STANDARD}.{k}": v for k, v in missing.items()}}, upsert=True
+                )
+
+        for cat in ALL_CATEGORIES:
+            if not isinstance(doc.get(cat), dict):
+                doc[cat] = _default_category(cat)
+                needs_update = True
+            else:
+                for key, val in _default_category(cat).items():
+                    if key not in doc[cat]:
+                        doc[cat][key] = val
+                        needs_update = True
+                if doc[cat].pop("role", None) is not None:
+                    needs_update = True
+
+        if needs_update:
+            await self.collection.update_one(
+                {"_id": gid}, {"$set": {cat: doc[cat] for cat in ALL_CATEGORIES}}, upsert=True
             )
-            for cat in active
+
+        return doc
+
+    async def get_category_config(self, guild_id: int, category: str) -> dict:
+        """Guild-wide config of a lock. ``category="standard"`` returns the standard settings."""
+        doc = await self.get_guild_config(guild_id)
+        if category == STANDARD:
+            return doc.get(STANDARD, _default_standard())
+        return doc.get(category, _default_category(category))
+
+    async def get_standard(self, guild_id: int) -> dict:
+        return await self.get_category_config(guild_id, STANDARD)
+
+    async def get_naming_enabled(self, guild_id: int, channel_id: int | None = None) -> bool:
+        """Return whether Pokémon naming is enabled, applying a channel override if present."""
+        doc = await self.get_guild_config(guild_id)
+        enabled = doc.get("naming_enabled", True)
+        if channel_id is not None:
+            channels = doc.get("channels")
+            channel_config = channels.get(str(channel_id)) if isinstance(channels, dict) else None
+            if isinstance(channel_config, dict) and isinstance(channel_config.get("naming_enabled"), bool):
+                enabled = channel_config["naming_enabled"]
+        return bool(enabled)
+
+    async def toggle_naming(self, guild_id: int) -> bool:
+        """Toggle the server-wide Pokémon naming default."""
+        doc = await self.get_guild_config(guild_id)
+        new_value = not doc.get("naming_enabled", True)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {"naming_enabled": new_value}},
+            upsert=True,
+        )
+        return new_value
+
+    async def toggle_naming_channel(self, guild_id: int, channel_id: int) -> bool:
+        """Toggle Pokémon naming for a channel, overriding the server default."""
+        new_value = not await self.get_naming_enabled(guild_id, channel_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"channels.{channel_id}.naming_enabled": new_value}},
+            upsert=True,
+        )
+        return new_value
+
+    async def toggle_lock(self, guild_id: int, category: str) -> bool:
+        cfg = await self.get_category_config(guild_id, category)
+        new_val = not cfg.get("enabled", False)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"{category}.enabled": new_val}},
+            upsert=True,
+        )
+        return new_val
+
+    async def set_delay(self, guild_id: int, category: str, delay: int):
+        await self.get_guild_config(guild_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)}, {"$set": {f"{category}.delay": delay}}, upsert=True
         )
 
-        # Auto-unlock: with several categories the shortest configured lock time wins;
-        # categories that have it switched off don't take part.
-        locktimes = [
-            int(cat_configs[cat]["locktime"])
-            for cat in active
-            if cat_configs[cat].get("locktime_enabled", False) and cat_configs[cat].get("locktime")
-        ]
-        locktime = min(locktimes) if locktimes else None
+    async def toggle_delay(self, guild_id: int, category: str) -> bool:
+        """True = the lock waits `delay` seconds first. False = it locks immediately."""
+        cfg = await self.get_category_config(guild_id, category)
+        new_val = not cfg.get("delay_enabled", True)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"{category}.delay_enabled": new_val}},
+            upsert=True,
+        )
+        return new_val
 
-        allowed_unlockers, restrict_cats = self._resolve_unlockers(cat_configs, active, category_users)
-        label = "/".join(SHORT_NAMES.get(c, c) for c in active)
+    async def set_locktime(self, guild_id: int, category: str, seconds: int):
+        """Set how long the channel stays locked. Also switches the auto-unlock timer on."""
+        await self.get_guild_config(guild_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"{category}.locktime": seconds, f"{category}.locktime_enabled": True}},
+            upsert=True,
+        )
 
-        self.pending_locks.add(channel.id)
-        try:
-            if delay > 0:
-                status_msg = await channel.send(
-                    embed=discord.Embed(
-                        title="⏳ Auto-Lock",
-                        description=f"`{label}` matched. Locking <t:{now_unix() + delay}:R>.",
-                        color=WARN_COLOR,
-                    )
+    async def set_locktime_enabled(self, guild_id: int, category: str, value: bool):
+        await self.get_guild_config(guild_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)}, {"$set": {f"{category}.locktime_enabled": bool(value)}}, upsert=True
+        )
+
+    async def toggle_locktime(self, guild_id: int, category: str) -> bool:
+        """True = the channel auto-unlocks after `locktime`. False = it stays locked."""
+        cfg = await self.get_category_config(guild_id, category)
+        new_val = not cfg.get("locktime_enabled", False)
+        await self.set_locktime_enabled(guild_id, category, new_val)
+        return new_val
+
+    async def set_delay_enabled(self, guild_id: int, category: str, value: bool):
+        await self.get_guild_config(guild_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)}, {"$set": {f"{category}.delay_enabled": bool(value)}}, upsert=True
+        )
+
+    async def toggle_restrict(self, guild_id: int, category: str) -> bool:
+        cfg = await self.get_category_config(guild_id, category)
+        new_val = not cfg.get("restrict_unlockers", False)
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"{category}.restrict_unlockers": new_val}},
+            upsert=True,
+        )
+        return new_val
+
+    async def set_restrict(self, guild_id: int, category: str, value: bool):
+        await self.get_guild_config(guild_id)
+        await self.collection.update_one(
+            {"_id": str(guild_id)}, {"$set": {f"{category}.restrict_unlockers": bool(value)}}, upsert=True
+        )
+
+    # --- storage helpers (per-channel overrides, i.e. non "--global" commands) -
+    #
+    # `.set` / `.toggle` without `--global` should only affect the channel the
+    # command was run in, without touching (or requiring) the guild-wide default.
+    # Overrides live under doc["channels"][str(channel_id)][category] and only
+    # ever contain the specific keys that were overridden; anything not present
+    # there falls back to the guild-wide category config. Whitelist is not
+    # overridable per channel — it's always guild-wide, same as before.
+
+    async def get_channel_overrides(self, guild_id: int, channel_id: int) -> dict:
+        """Raw override dict for one channel, e.g. {"sh": {"enabled": True}}. {} if none set."""
+        doc = await self.get_guild_config(guild_id)
+        channels = doc.get("channels")
+        if not isinstance(channels, dict):
+            return {}
+        entry = channels.get(str(channel_id))
+        return entry if isinstance(entry, dict) else {}
+
+    async def get_category_config_channel(self, guild_id: int, channel_id: int, category: str) -> dict:
+        """Effective config for `category` in this channel: guild default + channel override."""
+        base = dict(await self.get_category_config(guild_id, category))
+        overrides = await self.get_channel_overrides(guild_id, channel_id)
+        cat_override = overrides.get(category)
+        if isinstance(cat_override, dict):
+            base.update(cat_override)
+        return base
+
+    # Alias kept for readability at call sites that just want "what should
+    # actually happen in this channel right now" (e.g. the AutoLock cog).
+    async def get_effective_category_config(self, guild_id: int, channel_id: int, category: str) -> dict:
+        return await self.get_category_config_channel(guild_id, channel_id, category)
+
+    async def _set_channel_field(self, guild_id: int, channel_id: int, category: str, field: str, value):
+        await self.get_guild_config(guild_id)  # make sure the guild doc exists first
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"channels.{channel_id}.{category}.{field}": value}},
+            upsert=True,
+        )
+
+    async def set_delay_channel(self, guild_id: int, channel_id: int, category: str, delay: int):
+        await self._set_channel_field(guild_id, channel_id, category, "delay", delay)
+
+    async def set_locktime_channel(self, guild_id: int, channel_id: int, category: str, seconds: int):
+        await self._set_channel_field(guild_id, channel_id, category, "locktime", seconds)
+        await self._set_channel_field(guild_id, channel_id, category, "locktime_enabled", True)
+
+    async def set_locktime_enabled_channel(self, guild_id: int, channel_id: int, category: str, value: bool):
+        await self._set_channel_field(guild_id, channel_id, category, "locktime_enabled", bool(value))
+
+    async def toggle_locktime_channel(self, guild_id: int, channel_id: int, category: str) -> bool:
+        cfg = await self.get_category_config_channel(guild_id, channel_id, category)
+        new_val = not cfg.get("locktime_enabled", False)
+        await self._set_channel_field(guild_id, channel_id, category, "locktime_enabled", new_val)
+        return new_val
+
+    async def toggle_lock_channel(self, guild_id: int, channel_id: int, category: str) -> bool:
+        cfg = await self.get_category_config_channel(guild_id, channel_id, category)
+        new_val = not cfg.get("enabled", False)
+        await self._set_channel_field(guild_id, channel_id, category, "enabled", new_val)
+        return new_val
+
+    async def toggle_delay_channel(self, guild_id: int, channel_id: int, category: str) -> bool:
+        cfg = await self.get_category_config_channel(guild_id, channel_id, category)
+        new_val = not cfg.get("delay_enabled", True)
+        await self._set_channel_field(guild_id, channel_id, category, "delay_enabled", new_val)
+        return new_val
+
+    async def set_restrict_channel(self, guild_id: int, channel_id: int, category: str, value: bool):
+        await self._set_channel_field(guild_id, channel_id, category, "restrict_unlockers", bool(value))
+
+    async def toggle_restrict_channel(self, guild_id: int, channel_id: int, category: str) -> bool:
+        cfg = await self.get_category_config_channel(guild_id, channel_id, category)
+        new_val = not cfg.get("restrict_unlockers", False)
+        await self._set_channel_field(guild_id, channel_id, category, "restrict_unlockers", new_val)
+        return new_val
+
+    @staticmethod
+    def split_items(raw_input) -> list[str]:
+        """'#a, #b 123' -> ['#a', '#b', '123'] (commas and/or spaces both separate items)."""
+        return [i for i in re.split(r"[,\s]+", str(raw_input)) if i]
+
+    def format_whitelist_item(self, guild: discord.Guild, item) -> str:
+        if str(item) == "*":
+            return "🌐 Whole Server (`*`)"
+        ch = guild.get_channel(int(item)) if str(item).isdigit() else None
+        if ch is None:
+            return f"`{item}` (deleted)"
+        if isinstance(ch, discord.CategoryChannel):
+            return f"📁 {ch.name}"
+        return ch.mention
+
+    async def add_whitelist(self, guild: discord.Guild | int, category: str, raw_input: str):
+        """Add channels / categories / `*` to a lock's whitelist (``category="standard"`` works too).
+
+        Returns ``(added, already, invalid)`` — lists of whitelist entries (ids or `*`) and
+        of the raw inputs that couldn't be resolved.
+        """
+        guild_obj = self.bot.get_guild(guild) if isinstance(guild, int) else guild
+        if not guild_obj:
+            return [], [], []
+
+        cfg = await self.get_category_config(guild_obj.id, category)
+        current = list(cfg.get("whitelist", []))
+
+        added, already, invalid = [], [], []
+
+        for item in self.split_items(raw_input):
+            if item == "*":
+                if "*" in current:
+                    already.append("*")
+                else:
+                    current.append("*")
+                    added.append("*")
+                continue
+
+            clean_id = re.sub(r"\D", "", item)
+            target_channel = guild_obj.get_channel(int(clean_id)) if clean_id else None
+
+            if target_channel is None:
+                search_name = item.lower().lstrip("#")
+                target_channel = discord.utils.find(
+                    lambda c: c.name.lower() == search_name, guild_obj.channels
                 )
-                caught = await self._wait_for_catch(channel, delay)
-                try:
-                    await status_msg.delete()
-                except discord.HTTPException:
-                    pass
-                if caught:
-                    return
 
-            await self._lock_channel(
-                channel,
-                active,
-                allowed_unlockers,
-                restrict_cats,
-                locktime=locktime,
-                pinged_users=pinged_users or set(),
-                ping_url=ping_url,
-            )
-        finally:
-            self.pending_locks.discard(channel.id)
+            if target_channel is None:
+                invalid.append(item)
+            elif target_channel.id in current:
+                already.append(target_channel.id)
+            else:
+                current.append(target_channel.id)
+                added.append(target_channel.id)
 
-    async def _wait_for_catch(self, channel: discord.TextChannel, delay: int) -> bool:
-        """True if the Pokémon was caught, or the channel was deleted, before the delay ran out.
-
-        Both cases mean "don't lock": a deleted channel can't be locked, and waiting on it would
-        keep this on_message handler pending until the timer ends."""
-        def poketwo_check(m: discord.Message) -> bool:
-            return (
-                m.author.id == self.bot.poketwo_id
-                and m.channel.id == channel.id
-                and m.content.startswith("Congratulations")
-            )
-
-        def deleted_check(c) -> bool:
-            return c.id == channel.id
-
-        waiters = [
-            asyncio.ensure_future(self.bot.wait_for("message", check=poketwo_check, timeout=delay)),
-            asyncio.ensure_future(self.bot.wait_for("guild_channel_delete", check=deleted_check, timeout=delay)),
-        ]
-        try:
-            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-            return any(not w.cancelled() and w.exception() is None for w in done)
-        finally:
-            for waiter in waiters:
-                waiter.cancel()
-            await asyncio.gather(*waiters, return_exceptions=True)
-
-    async def _lock_channel(
-        self,
-        channel: discord.TextChannel,
-        active: list[str],
-        allowed_unlockers: list[int] | None,
-        restrict_cats: list[str],
-        locktime: int | None = None,
-        pinged_users: set[int] | None = None,
-        ping_url: str | None = None,
-    ):
-        target = await get_poketwo_target(self.bot, channel.guild)
-        if target is None:
-            print(f"AutoLock: Poketwo not found in guild {channel.guild.id}, can't lock #{channel.id}")
-            return
-
-        locked_unix = now_unix()
-        unlock_unix = locked_unix + locktime if locktime else None
-
-        # Sync lock state to MongoDB *before* locking so /unlock checks (lockunlock.py,
-        # the Unlock button) always see the restriction as soon as the channel is locked.
-        # `unlock_at` is what the auto-unlock loop below watches (survives restarts).
-        try:
-            await self.locks_collection.update_one(
-                {"_id": channel.id},
-                {"$set": {
-                    "guild_id": channel.guild.id,
-                    "allowed_users": allowed_unlockers,   # None = anyone can unlock
-                    "source": "autolock",
-                    "categories": active,
-                    "restricted_by": restrict_cats,
-                    "locked_at": datetime.datetime.fromtimestamp(locked_unix, tz=datetime.timezone.utc),
-                    "locktime": locktime,
-                    "unlock_at": (
-                        datetime.datetime.fromtimestamp(unlock_unix, tz=datetime.timezone.utc)
-                        if unlock_unix
-                        else None
-                    ),
-                }},
+        if added:
+            await self.collection.update_one(
+                {"_id": str(guild_obj.id)},
+                {"$set": {f"{category}.whitelist": current}},
                 upsert=True,
             )
-        except Exception as e:
-            print(f"AutoLock: failed to sync lock state to MongoDB: {e}")
+        return added, already, invalid
 
-        try:
-            await channel.set_permissions(target, view_channel=False, send_messages=False)
-        except discord.NotFound:
-            try:
-                await self.locks_collection.delete_one({"_id": channel.id})
-            except Exception:
-                pass
-            return
-        except discord.HTTPException as e:
-            print(f"AutoLock: failed to lock #{channel.id}: {e}")
-            try:
-                await self.locks_collection.delete_one({"_id": channel.id})
-            except Exception:
-                pass
-            return
+    async def remove_whitelist(self, guild: discord.Guild, category: str, raw_input: str):
+        """Remove entries by channel mention / id / name / list number / `*` (= everything).
 
-        lock_embed = locked_embed(
-            channel,
-            trigger="/".join(SHORT_NAMES.get(c, c) for c in active),
-            allowed_users=allowed_unlockers,
-            restricted_by=restrict_cats,
-            when=locked_unix,
-            unlock_at=unlock_unix,
+        Returns ``(removed, not_found)`` — removed whitelist entries and unmatched raw inputs.
+        """
+        guild_id = guild.id
+        cfg = await self.get_category_config(guild_id, category)
+        current = list(cfg.get("whitelist", []))
+
+        if not current:
+            return [], self.split_items(raw_input)
+
+        ordered = self._get_ordered_whitelist(guild, current)
+        to_remove: set = set()
+        not_found: list[str] = []
+        clear_all = False
+
+        for item in self.split_items(raw_input):
+            if item == "*":
+                clear_all = True
+                break
+
+            targets: set = set()
+
+            if item.isdigit():
+                val = int(item)
+                if 1 <= val <= len(ordered):
+                    targets.add(ordered[val - 1])
+                    targets.add(str(ordered[val - 1]))
+                targets.add(val)
+                targets.add(str(val))
+
+            clean_id = re.sub(r"\D", "", item)
+            if clean_id:
+                targets.add(int(clean_id))
+                targets.add(clean_id)
+
+            search_name = item.lower().lstrip("#")
+            matched_channel = discord.utils.find(
+                lambda c: c.name.lower() == search_name, guild.channels
+            )
+            if matched_channel:
+                targets.add(matched_channel.id)
+                targets.add(str(matched_channel.id))
+
+            if any(x in targets or str(x) in targets for x in current):
+                to_remove |= targets
+            else:
+                not_found.append(item)
+
+        if clear_all:
+            removed, new_whitelist = list(current), []
+        else:
+            removed = [x for x in current if x in to_remove or str(x) in to_remove]
+            new_whitelist = [x for x in current if x not in removed]
+
+        if removed:
+            await self.collection.update_one(
+                {"_id": str(guild_id)},
+                {"$set": {f"{category}.whitelist": new_whitelist}},
+                upsert=True,
+            )
+        return removed, not_found
+
+    async def clear_whitelist(self, guild_id: int, category: str) -> int:
+        """Empty a lock's whitelist. Returns how many entries were removed."""
+        cfg = await self.get_category_config(guild_id, category)
+        count = len(cfg.get("whitelist", []))
+        await self.collection.update_one(
+            {"_id": str(guild_id)},
+            {"$set": {f"{category}.whitelist": []}},
+            upsert=True,
         )
-        # The Unlock button lives inside the lock embed (shared with .lock). It is
-        # persistent (registered by the LockUnlock cog), so it survives restarts.
-        msg = None
+        return count
+
+    # --- "standard" settings ----------------------------------------------------
+    #
+    # The server keeps one set of standard values (delay, locktime, whitelist, restrict). A lock's
+    # "Use Standard" button / `.set use-standard` copies them onto that lock in one go.
+
+    async def use_standard(self, guild_id: int, category: str, parts=STANDARD_PARTS) -> dict:
+        """Copy the standard ``parts`` onto a lock (guild level). Returns what was applied."""
+        std = await self.get_standard(guild_id)
+        fields: dict = {}
+        applied: dict = {}
+
+        if "delay" in parts:
+            fields[f"{category}.delay"] = std.get("delay", DEFAULT_DELAY)
+            fields[f"{category}.delay_enabled"] = std.get("delay_enabled", True)
+            applied["delay"] = (std.get("delay", DEFAULT_DELAY), std.get("delay_enabled", True))
+        if "locktime" in parts:
+            fields[f"{category}.locktime"] = std.get("locktime", DEFAULT_LOCKTIME)
+            fields[f"{category}.locktime_enabled"] = std.get("locktime_enabled", False)
+            applied["locktime"] = (std.get("locktime", DEFAULT_LOCKTIME), std.get("locktime_enabled", False))
+        if "whitelist" in parts:
+            fields[f"{category}.whitelist"] = list(std.get("whitelist", []))
+            applied["whitelist"] = list(std.get("whitelist", []))
+        if "restrict" in parts and category in RESTRICT_CATEGORIES:
+            fields[f"{category}.restrict_unlockers"] = std.get("restrict_unlockers", True)
+            applied["restrict"] = std.get("restrict_unlockers", True)
+
+        if fields:
+            await self.get_guild_config(guild_id)
+            await self.collection.update_one({"_id": str(guild_id)}, {"$set": fields}, upsert=True)
+        return applied
+
+    async def get_min_locktime(self, guild_id: int) -> int | None:
+        """Shortest auto-unlock time (seconds) any enabled lock in this server can use,
+        counting channel overrides. None when no lock auto-unlocks (AutoLockDM uses this to
+        decide whether "DM before unlock" can be offered, and how long it may be)."""
+        doc = await self.get_guild_config(guild_id)
+        channels = doc.get("channels") if isinstance(doc.get("channels"), dict) else {}
+        values = []
+        for cat in ALL_CATEGORIES:
+            base = doc.get(cat, _default_category(cat))
+            variants = [base]
+            for entry in channels.values():
+                override = entry.get(cat) if isinstance(entry, dict) else None
+                if isinstance(override, dict) and override:
+                    variants.append({**base, **override})
+            for cfg in variants:
+                if cfg.get("enabled") and cfg.get("locktime_enabled") and cfg.get("locktime"):
+                    values.append(int(cfg["locktime"]))
+        return min(values) if values else None
+
+    # --- reading roles from PokePings (never written here) --------------------
+    # Roles are written by the PokePings cog (see .set rarerole etc. in set.py).
+
+    async def get_ping_role(self, guild: discord.Guild, category: str) -> discord.Role | None:
+        doc = await self.pings_collection.find_one({"_id": str(guild.id)})
+        role_id = (doc or {}).get("roles", {}).get(category)
+        if not role_id:
+            return None
         try:
-            msg = await channel.send(
-                view=UnlockLayout(self.bot, lock_embed),
-                allowed_mentions=NO_PINGS,
+            return guild.get_role(int(role_id))
+        except (TypeError, ValueError):
+            return None
+
+    # --- embed builders & ordering helpers ------------------------------------
+
+    def _get_ordered_whitelist(self, guild: discord.Guild, whitelist: list) -> list:
+        if not whitelist:
+            return []
+
+        categories = []
+        channels = []
+        others = []
+
+        for item in whitelist:
+            if str(item) == "*":
+                others.append("*")
+                continue
+            try:
+                wid = int(item)
+            except (ValueError, TypeError):
+                others.append(item)
+                continue
+
+            ch = guild.get_channel(wid)
+            if ch is None:
+                others.append(wid)
+            elif isinstance(ch, discord.CategoryChannel):
+                categories.append((ch.position, ch.name, wid))
+            else:
+                channels.append((ch.position, ch.name, wid))
+
+        categories.sort(key=lambda x: (x[0], x[1]))
+        channels.sort(key=lambda x: (x[0], x[1]))
+
+        return [cat[2] for cat in categories] + [ch[2] for ch in channels] + others
+
+    def _format_whitelist(self, guild: discord.Guild, whitelist: list) -> str:
+        if not whitelist:
+            return "None"
+
+        ordered = self._get_ordered_whitelist(guild, whitelist)
+        lines = []
+
+        for idx, item in enumerate(ordered, start=1):
+            if str(item) == "*":
+                lines.append(f"`{idx}.` 🌐 Whole Server (`*`)")
+                continue
+
+            ch = guild.get_channel(item) if isinstance(item, int) or str(item).isdigit() else None
+            if ch is None:
+                lines.append(f"`{idx}.` `{item}` (deleted)")
+            elif isinstance(ch, discord.CategoryChannel):
+                lines.append(f"`{idx}.` 📁 {ch.name}")
+            else:
+                lines.append(f"`{idx}.` {ch.mention}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _describe_override(override: dict) -> str:
+        """{'enabled': True, 'delay': 20} -> 'Lock On • Delay 20s'. Only overridden fields appear."""
+        parts = []
+        if "enabled" in override:
+            parts.append(f"Lock {'On' if override['enabled'] else 'Off'}")
+        if "delay" in override or "delay_enabled" in override:
+            text = f"Delay {override['delay']}s" if "delay" in override else "Delay"
+            if "delay_enabled" in override:
+                text += "" if override["delay_enabled"] else " (off)"
+            parts.append(text)
+        if "locktime" in override or "locktime_enabled" in override:
+            text = f"Lock time {format_duration(override['locktime'])}" if "locktime" in override else "Lock time"
+            if "locktime_enabled" in override:
+                text += "" if override["locktime_enabled"] else " (off)"
+            parts.append(text)
+        if "restrict_unlockers" in override:
+            parts.append(f"Restrict {'On' if override['restrict_unlockers'] else 'Off'}")
+        return " • ".join(parts)
+
+    def _format_overrides(self, guild: discord.Guild, doc: dict, category: str) -> str:
+        """One line per channel that overrides this lock: '#channel — Lock On • Delay 20s'."""
+        channels = doc.get("channels")
+        if not isinstance(channels, dict):
+            return "None."
+
+        lines = []
+        for channel_id, entry in channels.items():
+            override = entry.get(category) if isinstance(entry, dict) else None
+            if not isinstance(override, dict) or not override:
+                continue
+            channel = guild.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
+            name = channel.mention if channel else f"`{channel_id}` (deleted)"
+            lines.append(f"{name} — {self._describe_override(override)}")
+        if not lines:
+            return "None."
+
+        shown, length = [], 0
+        for index, line in enumerate(lines):
+            if length + len(line) + 1 > 1000:
+                shown.append(f"…and {len(lines) - index} more")
+                break
+            shown.append(line)
+            length += len(line) + 1
+        return "\n".join(shown)
+
+    async def build_main_embed(self, guild: discord.Guild) -> discord.Embed:
+        """Landing page: one line per lock, on or off. Details live inside each lock's page."""
+        doc = await self.get_guild_config(guild.id)
+
+        lines = []
+        for cat in ALL_CATEGORIES:
+            cfg = doc.get(cat, _default_category(cat))
+            is_enabled = cfg.get("enabled", False)
+            lines.append(f"{'✅' if is_enabled else '❌'} **{_label(cat)}** — {'On' if is_enabled else 'Off'}")
+
+        std = doc.get(STANDARD, _default_standard())
+        return discord.Embed(
+            title=f"🔒 AutoLock — {guild.name}",
+            description=(
+                "Pick a lock to see its settings.\n\n"
+                + "\n".join(lines)
+                + f"\n\n⭐ **Standard** — {self._standard_summary(std)}"
+            ),
+            color=discord.Color.blurple(),
+        )
+
+    @staticmethod
+    def _standard_summary(std: dict) -> str:
+        delay = f"`{std.get('delay', DEFAULT_DELAY)}s`" + ("" if std.get("delay_enabled", True) else " (off)")
+        locktime = f"`{format_duration(std.get('locktime', DEFAULT_LOCKTIME))}`" + (
+            "" if std.get("locktime_enabled", False) else " (off)"
+        )
+        restrict = "On" if std.get("restrict_unlockers", True) else "Off"
+        return (
+            f"Delay {delay} • Lock time {locktime} • Whitelist `{len(std.get('whitelist', []))}` "
+            f"• Restrict {restrict}"
+        )
+
+    async def build_standard_embed(self, guild: discord.Guild) -> discord.Embed:
+        std = await self.get_standard(guild.id)
+        delay_on = std.get("delay_enabled", True)
+        locktime_on = std.get("locktime_enabled", False)
+
+        embed = discord.Embed(
+            title=f"⭐ Standard Settings — {guild.name}",
+            description=(
+                "Your server's standard values. Press **Use Standard** on a lock's page "
+                "(or run `.set use-standard <lock>`) to copy them all onto that lock."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Standard Lock Delay",
+            value=f"`{std.get('delay', DEFAULT_DELAY)}s` — " + ("On ✅" if delay_on else "Off ❌"),
+            inline=False,
+        )
+        embed.add_field(
+            name="Standard Lock Time (auto-unlock)",
+            value=f"`{format_duration(std.get('locktime', DEFAULT_LOCKTIME))}` — "
+            + ("On ✅" if locktime_on else "Off ❌"),
+            inline=False,
+        )
+        embed.add_field(
+            name="Standard Whitelist",
+            value=self._format_whitelist(guild, std.get("whitelist", [])),
+            inline=False,
+        )
+        embed.add_field(
+            name="Standard Restrict Unlockers",
+            value=("On ✅" if std.get("restrict_unlockers", True) else "Off ❌")
+            + " — only pinged user(s) can unlock (admins always can).",
+            inline=False,
+        )
+        return embed
+
+    async def build_category_embed(self, guild: discord.Guild, category: str) -> discord.Embed:
+        doc = await self.get_guild_config(guild.id)
+        cfg = doc.get(category, _default_category(category))
+        is_enabled = cfg.get("enabled", False)
+        status_str = "Enabled ✅" if is_enabled else "Disabled ❌"
+        delay_on = cfg.get("delay_enabled", True)
+
+        embed = discord.Embed(
+            title=f"⚙️ {_label(category)} — {guild.name}",
+            color=discord.Color.blurple(),
+        )
+
+        if category in CATEGORY_DESCRIPTIONS:
+            embed.description = CATEGORY_DESCRIPTIONS[category]
+
+        embed.add_field(name="Lock Status", value=f"`{status_str}`", inline=False)
+        embed.add_field(
+            name="Lock Delay",
+            value=f"`{cfg.get('delay', DEFAULT_DELAY)}s` — " + ("On ✅" if delay_on else "Off ❌"),
+            inline=False,
+        )
+        locktime_on = cfg.get("locktime_enabled", False)
+        embed.add_field(
+            name="Lock Time (auto-unlock)",
+            value=f"`{format_duration(cfg.get('locktime', DEFAULT_LOCKTIME))}` — "
+            + ("On ✅" if locktime_on else "Off ❌"),
+            inline=False,
+        )
+        embed.add_field(
+            name="Whitelist",
+            value=self._format_whitelist(guild, cfg.get("whitelist", [])),
+            inline=False,
+        )
+
+        if category in ROLE_CATEGORIES:
+            role = await self.get_ping_role(guild, category)
+            embed.add_field(
+                name="Ping Role",
+                value=(
+                    f"{role.mention if role else 'Not set'}\n"
+                    f"-# Set with {ROLE_COMMAND_HINTS[category]}"
+                ),
+                inline=False,
             )
-            # Remember the message so .unlock / the auto-unlock can edit it later.
-            await self.locks_collection.update_one({"_id": channel.id}, {"$set": {"message_id": msg.id}})
-        except discord.HTTPException as e:
-            print(f"AutoLock: failed to send lock message in #{channel.id}: {e}")
-        except Exception as e:
-            print(f"AutoLock: failed to store lock message id: {e}")
-
-        # DM the members who were pinged for this spawn (each one's /autolockdm settings decide
-        # whether and when). Runs in the background so a slow DM never delays anything.
-        autolockdm = self.bot.get_cog("AutoLockDM")
-        if autolockdm and pinged_users:
-            task = asyncio.create_task(
-                autolockdm.notify_autolock(
-                    channel=channel,
-                    user_ids=set(pinged_users),
-                    categories=active,
-                    locked_at=locked_unix,
-                    unlock_at=unlock_unix,
-                    ping_url=ping_url,
-                    lock_url=msg.jump_url if msg else None,
-                )
+            embed.add_field(
+                name="Who Can Unlock",
+                value="Anyone (role ping).",
+                inline=False,
             )
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
 
-    # --- Auto-unlock ------------------------------------------------------------
+        if category in RESTRICT_CATEGORIES:
+            embed.add_field(
+                name="Restrict Unlockers",
+                value=f"`{cfg.get('restrict_unlockers', True)}` — only pinged user(s) can unlock (admins always can).",
+                inline=False,
+            )
 
-    @tasks.loop(seconds=AUTO_UNLOCK_CHECK_SECONDS)
-    async def auto_unlock_loop(self):
-        """Unlock every channel whose auto-unlock time has passed. Reads the due locks from
-        MongoDB, so locks that expired while the bot was offline are handled on startup too."""
-        try:
-            due = await self.locks_collection.find(
-                {"unlock_at": {"$lte": datetime.datetime.now(datetime.timezone.utc)}}
-            ).to_list(length=None)
-        except Exception as e:
-            print(f"AutoLock: failed to query due auto-unlocks: {e}")
-            return
+        embed.add_field(
+            name="Channel Overrides",
+            value=self._format_overrides(guild, doc, category),
+            inline=False,
+        )
 
-        for doc in due:
-            try:
-                await self._auto_unlock(doc)
-            except Exception as e:
-                print(f"AutoLock: auto-unlock of #{doc.get('_id')} failed: {e}")
-
-    @auto_unlock_loop.before_loop
-    async def _before_auto_unlock_loop(self):
-        await self.bot.wait_until_ready()
-
-    async def _auto_unlock(self, doc: dict):
-        channel_id = doc["_id"]
-        # Only remove the lock doc we actually acted on (a newer lock must survive).
-        same_lock = {"_id": channel_id, "unlock_at": doc["unlock_at"]}
-
-        channel = self.bot.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(channel_id)
-            except discord.NotFound:
-                await self.locks_collection.delete_one(same_lock)  # channel is gone
-                return
-            except discord.HTTPException:
-                return  # try again on the next tick
-
-        poketwo = await get_poketwo_target(self.bot, channel.guild)
-        if poketwo is None:
-            await self.locks_collection.delete_one(same_lock)
-            return
-
-        if is_locked_overwrite(channel.overwrites_for(poketwo)):
-            try:
-                await channel.set_permissions(
-                    poketwo,
-                    overwrite=discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                    reason="Auto-unlock: lock time ran out",
-                )
-            except discord.HTTPException as e:
-                print(f"AutoLock: can't auto-unlock #{channel_id}: {e}")
-                # Stop retrying every few seconds; the lock stays until someone unlocks it.
-                await self.locks_collection.update_one(same_lock, {"$set": {"unlock_at": None}})
-                return
-
-        await self.locks_collection.delete_one(same_lock)
-
-        # Edit the lock message itself: "Unlocked — by Automatic".
-        embed = auto_unlocked_embed(channel, lock_doc=doc, when=now_unix())
-        message_id = doc.get("message_id")
-        edited = False
-        if message_id:
-            try:
-                msg = await channel.fetch_message(message_id)
-                await msg.edit(view=UnlockLayout(self.bot, embed, unlocked=True), allowed_mentions=NO_PINGS)
-                edited = True
-            except discord.HTTPException:
-                pass
-        if not edited:
-            try:
-                await channel.send(embed=embed, allowed_mentions=NO_PINGS)
-            except discord.HTTPException:
-                pass
+        return embed
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AutoLockConfig(bot))
+    if bot.get_command("config") is None:
+        bot.add_command(config_group)
