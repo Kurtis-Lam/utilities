@@ -7,7 +7,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class OwnerCog(commands.Cog):
-    """Base class for every owner_cmds cog.
+    """Base class for every owner cog.
 
     The cog-level check runs before *any* command in the cog, so every command
     (including ones added later) is owner-only. Owners come from "OWNER_IDS" in
