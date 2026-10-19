@@ -37,7 +37,7 @@ def _channel_in_whitelist(channel, whitelist: list) -> bool:
     return False
 
 
-class AutoLockC(commands.Cog):
+class AutoLockConfig(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.pending_locks = set()
@@ -385,4 +385,4 @@ class AutoLockC(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(AutoLockC(bot))
+    await bot.add_cog(AutoLockConfig(bot))
