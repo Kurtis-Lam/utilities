@@ -449,7 +449,14 @@ async def confirm(ctx, prompt: str, **kwargs) -> ConfirmLayout:
 
 
 class ConfirmActionLayout(ConfirmLayout):
-    """A confirmation view that runs its action from the button callback."""
+    """A confirmation view that runs its action from the button callback.
+
+    Pressing Confirm is acknowledged with ONE fast request (``edit_message`` -> the
+    "Processing" card), which always lands inside Discord's 3 second window. Only then
+    does the slow work (deleting channels, ...) run. The result is written back onto the
+    same message; if that message no longer exists (the deleted channel held it) the
+    result is sent as an ephemeral follow-up instead. Every failure is printed.
+    """
 
     def __init__(self, author, prompt, action, *, failure_text: str, **kwargs):
         self.action = action
@@ -457,60 +464,59 @@ class ConfirmActionLayout(ConfirmLayout):
         self._action_running = False
         super().__init__(author, prompt, **kwargs)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        print(f"Unhandled error in confirm view ({type(error).__name__}):")
+        traceback.print_exception(type(error), error, error.__traceback__)
+        await self._safe_reply(interaction, make_embed(description=self.failure_text))
+
+    async def _safe_reply(self, interaction: discord.Interaction, embed: discord.Embed) -> None:
+        """Show ``embed`` on the confirm message, or as an ephemeral follow-up if that fails."""
+        self.clear_items()
+        self.add_item(container_from_embed(embed))
+        try:
+            if interaction.response.is_done():
+                await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            else:
+                await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
+            return
+        except discord.HTTPException as exc:
+            print(f"Confirm view: could not edit the confirm message ({exc}); sending a follow-up instead.")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+        except discord.HTTPException as exc:
+            print(f"Confirm view: could not send the result either ({exc}).")
+
     async def _on_confirm(self, interaction: discord.Interaction) -> None:
         if self._action_running:
             return
         self._action_running = True
 
-        try:
-            await interaction.response.defer(ephemeral=True, thinking=True)
-        except discord.HTTPException:
-            self._action_running = False
-            return
-
         self.value = True
-        self.stop()
         self.render("processing")
         try:
-            await interaction.message.edit(
-                view=self,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.HTTPException:
-            pass
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException as exc:
+            print(f"Confirm view: could not acknowledge the button press ({exc}).")
+            self._action_running = False
+            self.value = None
+            return
+        self.stop()
 
         try:
             result = await self.action(interaction)
         except Exception:
             traceback.print_exc()
-            try:
-                await interaction.edit_original_response(
-                    content=self.failure_text,
-                    embed=None,
-                )
-            except discord.HTTPException:
-                pass
+            await self._safe_reply(interaction, make_embed(description=self.failure_text))
             return
 
-        try:
-            if isinstance(result, discord.Embed):
-                await interaction.edit_original_response(content=None, embed=result)
-            else:
-                await interaction.edit_original_response(
-                    content=str(result) if result is not None else "✅ Done.",
-                    embed=None,
-                )
-        except discord.HTTPException:
-            try:
-                if isinstance(result, discord.Embed):
-                    await interaction.followup.send(embed=result, ephemeral=True)
-                else:
-                    await interaction.followup.send(
-                        content=str(result) if result is not None else "✅ Done.",
-                        ephemeral=True,
-                    )
-            except discord.HTTPException:
-                pass
+        if isinstance(result, discord.Embed):
+            embed = result
+        else:
+            embed = make_embed(description=str(result) if result is not None else "\u2705 Done.")
+        await self._safe_reply(interaction, embed)
 
 
 async def confirm_and_run(ctx, prompt: str, action, **kwargs) -> ConfirmActionLayout:
