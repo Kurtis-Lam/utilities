@@ -54,15 +54,30 @@ def _color_from_config(config: dict) -> discord.Color:
     return EMBED_COLOR
 
 
+def format_invite_line(info) -> str | None:
+    """One line for the welcome embed from a ``JoinInfo`` (cogs/cmds/invites.py). None = nothing to show."""
+    if info is None:
+        return None
+    if info.kind == "vanity":
+        return "Joined using the server's vanity URL."
+    if info.kind == "invite" and info.inviter_id:
+        total = info.stats.total if info.stats else 0
+        return f"Invited by <@{info.inviter_id}>, who now has **{total:,}** invite{'s' if total != 1 else ''}."
+    return "I couldn't work out who invited them."
+
+
 def make_member_welcome_embed(
     config: dict,
     guild: discord.Guild | None,
     member: discord.abc.User | None,
     channel: discord.abc.GuildChannel | None = None,
+    invite_line: str | None = None,
 ) -> discord.Embed:
     description = render_template(
         str(config.get("welcome_message", "Welcome {mention} to {server}!")), guild, member, channel
     )
+    if invite_line and config.get("welcome_show_inviter", True):
+        description = f"{description}\n\n{invite_line}" if description else invite_line
     title_template = str(config.get("welcome_embed_title", "Welcome to {server}!"))
     title = render_template(title_template, guild, member, channel).strip() or None
     embed = discord.Embed(title=title, description=description or None, color=_color_from_config(config))
@@ -117,6 +132,7 @@ def get_welcome_embed(
     embed.add_field(name="📍 Channel", value=f"<#{channel_id}>" if channel_id else "*Not set*", inline=True)
     embed.add_field(name="📄 Format", value="Embed" if config.get("use_embed", True) else "Plain text", inline=True)
     embed.add_field(name="🔔 Member ping", value="Enabled" if config.get("welcome_ping_member", True) else "Disabled", inline=True)
+    embed.add_field(name="📨 Show inviter", value="On" if config.get("welcome_show_inviter", True) else "Off", inline=True)
     message = str(config.get("welcome_message", "Welcome {mention} to {server}!"))
     shown = message if len(message) <= 800 else message[:797] + "…"
     embed.add_field(name="📝 Message template", value=f"```\n{shown}\n```", inline=False)
@@ -283,6 +299,8 @@ class WelcomeConfigView(EmbedLayout):
         self.toggle_embed_btn.callback = self.toggle_embed_cb
         self.toggle_ping_btn = Button(label="Toggle Member Ping", emoji="🔔", style=discord.ButtonStyle.secondary)
         self.toggle_ping_btn.callback = self.toggle_ping_cb
+        self.toggle_inviter_btn = Button(label="Toggle Inviter", emoji="📨", style=discord.ButtonStyle.secondary)
+        self.toggle_inviter_btn.callback = self.toggle_inviter_cb
         self.test_welcome_btn = Button(label="Test Welcome", emoji="🧪", style=discord.ButtonStyle.success)
         self.test_welcome_btn.callback = self.test_welcome_cb
         self.test_greet_btn = Button(label="Test Greets", emoji="👻", style=discord.ButtonStyle.success)
@@ -299,7 +317,7 @@ class WelcomeConfigView(EmbedLayout):
             [self.channel_select],
             [self.edit_message_btn, self.style_btn, self.advanced_btn],
             [self.test_welcome_btn, self.test_greet_btn, self.test_roles_btn],
-            [self.toggle_embed_btn, self.toggle_ping_btn, self.next_page_btn],
+            [self.toggle_embed_btn, self.toggle_ping_btn, self.toggle_inviter_btn, self.next_page_btn],
         ]
 
     async def save_values(self, interaction: discord.Interaction, values: dict):
@@ -313,6 +331,7 @@ class WelcomeConfigView(EmbedLayout):
         self.toggle_embed_btn.label = "Switch to Plain Text" if use_embed else "Switch to Embed"
         self.toggle_embed_btn.emoji = "💬" if use_embed else "🖼️"
         self.toggle_ping_btn.label = "Disable Member Ping" if self.config.get("welcome_ping_member", True) else "Enable Member Ping"
+        self.toggle_inviter_btn.label = "Hide Inviter" if self.config.get("welcome_show_inviter", True) else "Show Inviter"
 
     async def select_welcome_channel(self, interaction: discord.Interaction):
         channel_id = self.channel_select.values[0].id
@@ -337,6 +356,9 @@ class WelcomeConfigView(EmbedLayout):
     async def toggle_ping_cb(self, interaction: discord.Interaction):
         await self.save_values(interaction, {"welcome_ping_member": not self.config.get("welcome_ping_member", True)})
 
+    async def toggle_inviter_cb(self, interaction: discord.Interaction):
+        await self.save_values(interaction, {"welcome_show_inviter": not self.config.get("welcome_show_inviter", True)})
+
     async def test_welcome_cb(self, interaction: discord.Interaction):
         guild = interaction.guild
         channel = guild.get_channel(self.config.get("welcome_channel")) if guild else None
@@ -346,7 +368,7 @@ class WelcomeConfigView(EmbedLayout):
             if self.config.get("use_embed", True):
                 await channel.send(
                     content=interaction.user.mention if self.config.get("welcome_ping_member", True) else None,
-                    embed=make_member_welcome_embed(self.config, guild, interaction.user, channel),
+                    embed=make_member_welcome_embed(self.config, guild, interaction.user, channel, await self._test_invite_line(interaction)),
                     allowed_mentions=discord.AllowedMentions(
                         users=[interaction.user] if self.config.get("welcome_ping_member", True) else [],
                         roles=False, everyone=False, replied_user=False,
@@ -364,6 +386,20 @@ class WelcomeConfigView(EmbedLayout):
         except discord.HTTPException as exc:
             return await interaction.response.send_message(embed=error_embed(f"Could not send the test: {exc}"), ephemeral=True)
         await interaction.response.send_message(embed=success_embed(f"Test welcome sent to {channel.mention}. Only you can be pinged by this test, according to the configured ping setting."), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _test_invite_line(self, interaction: discord.Interaction) -> str | None:
+        """Sample inviter line for the test welcome: the person pressing the button is the 'inviter'."""
+        if not self.config.get("welcome_show_inviter", True) or interaction.guild is None:
+            return None
+        tracker = interaction.client.get_cog("Invites")
+        if tracker is None:
+            return None
+        try:
+            stats = await tracker.get_stats(interaction.guild.id, interaction.user.id)
+        except Exception:
+            return None
+        from cogs.cmds.invites import JoinInfo
+        return format_invite_line(JoinInfo(kind="invite", inviter_id=interaction.user.id, stats=stats))
 
     async def test_greets_cb(self, interaction: discord.Interaction):
         guild = interaction.guild
