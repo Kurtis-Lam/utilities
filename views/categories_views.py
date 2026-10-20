@@ -1,11 +1,11 @@
 import discord
 
-from views.common_views import BaseView
+from views.common_views import BaseLayout, container_from_embed
 
 MAX_OPTIONS = 25  # Discord's hard limit for a select menu
 
 
-class CategorySelectView(BaseView):
+class CategorySelectView(BaseLayout):
     """Dropdown that lets the invoker pick a server category.
 
     After ``await view.wait()``, ``view.selected_category`` holds the chosen
@@ -14,9 +14,15 @@ class CategorySelectView(BaseView):
     only the first 25 could be listed.
     """
 
-    def __init__(self, author: discord.Member | discord.User, categories: list):
+    def __init__(
+        self,
+        author: discord.Member | discord.User,
+        categories: list,
+        embed: discord.Embed | None = None,
+    ):
         super().__init__(author_id=author.id, timeout=30.0)
         self.author = author
+        self.embed = embed or discord.Embed(title="🔍 Pick a category", color=discord.Color.gold())
         self.selected_category: discord.CategoryChannel | None = None
         self.truncated = len(categories) > MAX_OPTIONS
 
@@ -40,7 +46,11 @@ class CategorySelectView(BaseView):
                 disabled=True,
             )
         self.select.callback = self.select_callback
-        self.add_item(self.select)
+        self.render()
+
+    def render(self) -> None:
+        self.clear_items()
+        self.add_item(container_from_embed(self.embed, discord.ui.ActionRow(self.select)))
 
     async def select_callback(self, interaction: discord.Interaction):
         cat_id = int(self.select.values[0])
