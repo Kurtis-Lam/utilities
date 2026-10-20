@@ -3,7 +3,7 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
-from views.common_views import error_embed, success_embed
+from views.common_views import BaseLayout, container_from_embed, error_embed, success_embed
 from views.embeds import BRAND_COLOR
 
 
@@ -15,14 +15,37 @@ def build_status_embed(channel_id: Optional[str]) -> discord.Embed:
     return discord.Embed(title="Starboard", description=description, color=BRAND_COLOR)
 
 
-class ChannelSelectView(discord.ui.View):
-    """Ephemeral view: pick a channel from a dropdown, then confirm."""
+class ChannelSelectView(BaseLayout):
+    """Ephemeral panel: pick a channel from a dropdown, then confirm (both inside the embed)."""
 
     def __init__(self, cog: "Starboard", parent: "StarboardView"):
         super().__init__(timeout=120)
         self.cog = cog
         self.parent = parent
         self.selected: Optional[discord.abc.GuildChannel] = None
+
+        self.select = discord.ui.ChannelSelect(
+            channel_types=[discord.ChannelType.text],
+            placeholder="Select a channel...",
+            min_values=1,
+            max_values=1,
+        )
+        self.select.callback = self.channel_select
+        self.confirm_button = discord.ui.Button(
+            label="Confirm", style=discord.ButtonStyle.success, disabled=True
+        )
+        self.confirm_button.callback = self.confirm
+        self.render()
+
+    def render(self) -> None:
+        self.clear_items()
+        self.add_item(
+            container_from_embed(
+                self.build_embed(),
+                discord.ui.ActionRow(self.select),
+                discord.ui.ActionRow(self.confirm_button),
+            )
+        )
 
     def build_embed(self) -> discord.Embed:
         if self.selected:
@@ -37,7 +60,8 @@ class ChannelSelectView(discord.ui.View):
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not interaction.user.guild_permissions.administrator:
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if perms is None or not perms.administrator:
             await interaction.response.send_message(
                 embed=error_embed("Only administrators can set the starboard channel."),
                 ephemeral=True,
@@ -45,22 +69,13 @@ class ChannelSelectView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.select(
-        cls=discord.ui.ChannelSelect,
-        channel_types=[discord.ChannelType.text],
-        placeholder="Select a channel...",
-        min_values=1,
-        max_values=1,
-    )
-    async def channel_select(
-        self, interaction: discord.Interaction, select: discord.ui.ChannelSelect
-    ):
-        self.selected = select.values[0]
-        self.confirm.disabled = False
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+    async def channel_select(self, interaction: discord.Interaction):
+        self.selected = self.select.values[0]
+        self.confirm_button.disabled = False
+        self.render()
+        await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, disabled=True)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirm(self, interaction: discord.Interaction):
         channel = interaction.guild.get_channel(self.selected.id)
         if channel is None:
             return await interaction.response.send_message(
@@ -92,19 +107,29 @@ class ChannelSelectView(discord.ui.View):
             upsert=True,
         )
         self.stop()
-        await interaction.response.edit_message(
-            embed=success_embed(f"Starboard channel set to {channel.mention}."),
-            view=None,
-        )
+        self.clear_items()
+        self.add_item(container_from_embed(success_embed(f"Starboard channel set to {channel.mention}.")))
+        await interaction.response.edit_message(view=self)
         await self.parent.refresh(interaction.guild)
 
 
-class StarboardView(discord.ui.View):
-    def __init__(self, cog: "Starboard", ctx: commands.Context):
-        super().__init__(timeout=180)
+class StarboardView(BaseLayout):
+    """Starboard status with its Configure button inside the embed."""
+
+    def __init__(self, cog: "Starboard", ctx: commands.Context, embed: Optional[discord.Embed] = None):
+        super().__init__(author_id=ctx.author.id, timeout=180)
         self.cog = cog
         self.ctx = ctx
-        self.message: Optional[discord.Message] = None
+        self.embed = embed or build_status_embed(None)
+        self.configure_button = discord.ui.Button(
+            label="Configure", style=discord.ButtonStyle.primary, emoji="⚙️"
+        )
+        self.configure_button.callback = self.configure
+        self.render()
+
+    def render(self) -> None:
+        self.clear_items()
+        self.add_item(container_from_embed(self.embed, discord.ui.ActionRow(self.configure_button)))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.ctx.author.id:
@@ -113,42 +138,39 @@ class StarboardView(discord.ui.View):
                 ephemeral=True,
             )
             return False
+        if self.message is None:
+            self.message = interaction.message
         return True
 
-    @discord.ui.button(label="Configure", style=discord.ButtonStyle.primary, emoji="⚙️")
-    async def configure(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def configure(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message(
                 embed=error_embed("Only administrators can set the starboard channel."),
                 ephemeral=True,
             )
         view = ChannelSelectView(self.cog, self)
-        await interaction.response.send_message(
-            embed=view.build_embed(), view=view, ephemeral=True
-        )
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     async def refresh(self, guild: discord.Guild):
         if self.message is None:
             return
         config = await self.cog.starboard_collection.find_one({"guild_id": str(guild.id)})
-        embed = build_status_embed(config.get("channel_id") if config else None)
+        self.embed = build_status_embed(config.get("channel_id") if config else None)
+        self.render()
         try:
-            await self.message.edit(embed=embed, view=self)
+            await self.message.edit(view=self)
         except discord.HTTPException:
             pass
 
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
-            except discord.HTTPException:
-                pass
 
-
-def build_jump_view(jump_url: str) -> discord.ui.View:
-    """Single link button that sends the reader to the original catch message."""
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(label="Jump to Message", url=jump_url))
+def build_jump_layout(embed: discord.Embed, jump_url: str, image: Optional[str] = None) -> discord.ui.LayoutView:
+    """The catch embed with a single 'Jump to Message' link button inside it."""
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(
+        container_from_embed(
+            embed,
+            discord.ui.ActionRow(discord.ui.Button(label="Jump to Message", url=jump_url)),
+            image=image,
+        )
+    )
     return view
