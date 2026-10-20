@@ -108,10 +108,7 @@ class AutomodPanelView(EmbedLayout):
 
     async def _on_reset(self, interaction: discord.Interaction):
         if not await self.cog.bot.is_owner(interaction.user):
-            return await interaction.response.send_message(
-                embed=discord.Embed(title="❌ Only the bot owner can reset logs.", color=discord.Color.red()),
-                ephemeral=True,
-            )
+            return  # owner-only controls never answer anyone else
         await interaction.response.send_modal(ResetLogsModal(self.cog, self))
 
 
