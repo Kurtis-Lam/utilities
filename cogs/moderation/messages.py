@@ -6,8 +6,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from pymongo import UpdateOne
 
-# Import ConfirmView from views/common.py
-from views.common_views import ConfirmView, reply_or_send
+from views.common_views import ConfirmLayout, reply_or_send
 from views.embeds import ok_embed, err_embed, info_embed, handle_common_error, send_usage, BRAND_COLOR
 from views.loading import loading
 
@@ -895,18 +894,23 @@ class Messages(commands.Cog):
             ch_str = target_channel.mention if target_channel else f"ID `{target_id_str}`"
             return await ctx.reply(embed=err_embed("No Sticky Found", f"There is no sticky message active in {ch_str}."), mention_author=False)
 
-        # Step 1: Prompt for confirmation
-        view = ConfirmView(ctx.author)
+        # Step 1: Prompt for confirmation (buttons live inside the embed)
         ch_display = target_channel.mention if target_channel else f"channel `{target_id_str}`"
         confirm_embed = discord.Embed(
             title="⚠️ Confirmation Required",
             description=f"Are you sure you want to remove the sticky message in {ch_display}?",
             color=discord.Color.gold()
         )
-        msg = await ctx.reply(embed=confirm_embed, view=view, mention_author=False)
+        view = ConfirmLayout(
+            ctx.author,
+            embed=confirm_embed,
+            cancel_text="❌ Action Cancelled\nSticky message removal was cancelled.",
+            timeout_text="⏱️ Timeout\nYou took too long to confirm. Removal cancelled.",
+        )
+        await view.send(ctx)
         await view.wait()
 
-        # Step 2: Handle confirmation result
+        # Step 2: Handle confirmation result (cancel / timeout already edited the prompt)
         if view.value is True:
             last_msg_id = existing_stick.get("last_msg_id")
             if last_msg_id and target_channel:
@@ -919,36 +923,11 @@ class Messages(commands.Cog):
             # AWAITED: Non-blocking DB deletion
             await self.collection.delete_one({"_id": target_id_str})
 
-            success_embed = discord.Embed(
+            await view.show(discord.Embed(
                 title="✅ Sticky Removed",
                 description=f"Successfully removed the sticky message from {ch_display}.",
                 color=discord.Color.green()
-            )
-            try:
-                await msg.edit(embed=success_embed, view=None)
-            except discord.HTTPException:
-                pass
-
-        elif view.value is False:
-            cancel_embed = discord.Embed(
-                title="❌ Action Cancelled",
-                description="Sticky message removal was cancelled.",
-                color=discord.Color.red()
-            )
-            try:
-                await msg.edit(embed=cancel_embed, view=None)
-            except discord.HTTPException:
-                pass
-        else:
-            timeout_embed = discord.Embed(
-                title="⏱️ Timeout",
-                description="You took too long to confirm. Removal cancelled.",
-                color=discord.Color.red()
-            )
-            try:
-                await msg.edit(embed=timeout_embed, view=None)
-            except discord.HTTPException:
-                pass
+            ))
 
 
 async def setup(bot):
