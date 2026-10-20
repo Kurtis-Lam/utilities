@@ -309,13 +309,13 @@ class TicketDashboardView(EmbedLayout):
         options = self.config.get("options", [])
         if not options:
             return await interaction.response.send_message(embed=error_embed("Add an option first."), ephemeral=True)
-        await interaction.response.send_message(embed=make_embed("Edit Ticket Option", "Choose the option to edit."), view=TicketOptionActionView(self.cog, self.guild.id, self, options, "edit"), ephemeral=True)
+        await interaction.response.send_message(view=TicketOptionActionView(self.cog, self.guild.id, self, options, "edit"), ephemeral=True)
 
     async def remove_option(self, interaction: discord.Interaction):
         options = self.config.get("options", [])
         if not options:
             return await interaction.response.send_message(embed=error_embed("There are no ticket options to remove."), ephemeral=True)
-        await interaction.response.send_message(embed=make_embed("Remove Ticket Option", "Choose the option to remove."), view=TicketOptionActionView(self.cog, self.guild.id, self, options, "remove"), ephemeral=True)
+        await interaction.response.send_message(view=TicketOptionActionView(self.cog, self.guild.id, self, options, "remove"), ephemeral=True)
 
     async def post_panel(self, interaction: discord.Interaction):
         await interaction.response.send_modal(PostTicketPanelModal(self))
@@ -626,7 +626,9 @@ class TicketOpeningMessageView(discord.ui.LayoutView):
                 pass
 
 
-class TicketOptionActionView(discord.ui.View):
+class TicketOptionActionView(BaseLayout):
+    """Ephemeral option picker: the prompt and its select menu together inside one embed-style container."""
+
     def __init__(self, cog, guild_id: int, dashboard: TicketDashboardView, options: list[dict], action: str):
         super().__init__(timeout=90)
         self.cog, self.guild_id, self.dashboard, self.action = cog, guild_id, dashboard, action
@@ -637,7 +639,9 @@ class TicketOptionActionView(discord.ui.View):
             options=[discord.SelectOption(label=str(o.get("label", "Option"))[:100], value=str(o.get("key", "general"))[:100], emoji=o.get("emoji") or None) for o in options[:25]],
         )
         self.select.callback = self.selected
-        self.add_item(self.select)
+        title = "Edit Ticket Option" if action == "edit" else "Remove Ticket Option"
+        prompt = "Choose the option to edit." if action == "edit" else "Choose the option to remove."
+        self.add_item(container_from_embed(make_embed(title, prompt), discord.ui.ActionRow(self.select)))
 
     async def selected(self, interaction: discord.Interaction):
         key = self.select.values[0]
@@ -654,11 +658,6 @@ class TicketOptionActionView(discord.ui.View):
             await interaction.response.send_message(embed=success_embed(f"Removed ticket option **{option.get('label', key)}**."), ephemeral=True)
             await self.dashboard.refresh_message()
         self.stop()
-
-    async def on_timeout(self):
-        for item in self.children:
-            if hasattr(item, "disabled"):
-                item.disabled = True
 
 
 class PostTicketPanelModal(Modal, title="Publish Ticket Panel"):
