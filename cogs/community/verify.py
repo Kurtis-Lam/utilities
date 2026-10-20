@@ -551,10 +551,9 @@ class Verification(commands.Cog):
         expected = generate_captcha_text(length)
         file = await asyncio.to_thread(make_captcha_image, expected)
         embed = make_embed(str(config.get("captcha_title", "Complete verification")), str(config.get("prompt_description", "Enter the lowercase letters and numbers shown. Similar-looking characters (such as 0, o, i and l) are excluded.")))
-        embed.set_image(url="attachment://verification.png")
-        view = CaptchaPromptView(self, expected, config, interaction.user.id, time.time() + max(30, min(600, int(config.get("captcha_expiry_seconds", 180)))))
+        view = CaptchaPromptView(self, expected, config, interaction.user.id, time.time() + max(30, min(600, int(config.get("captcha_expiry_seconds", 180)))), embed)
         try:
-            view.message = await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), wait=True)
+            view.message = await interaction.followup.send(file=file, view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), wait=True)
         except discord.HTTPException as exc:
             print(f"Verification Cog: could not start CAPTCHA for {interaction.user.id}: {exc}")
             try:
