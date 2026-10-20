@@ -364,11 +364,9 @@ class Dex(commands.Cog):
         if shiny_img:
             view = ShinyView(ctx.author.id, embed, normal_img, shiny_img)
 
-        kwargs = {"embed": embed}
+        kwargs = {"view": view} if view else {"embed": embed}
         if file:
             kwargs["file"] = file
-        if view:
-            kwargs["view"] = view
         msg = await ctx.reply(**kwargs, mention_author=False)
         if view:
             view.message = msg
