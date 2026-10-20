@@ -194,7 +194,6 @@ class Giveaway(commands.Cog):
         if already:
             leave_view = LeaveView(self, message.id)
             await interaction.response.send_message(
-                content="You're already in this giveaway.",
                 view=leave_view,
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -235,13 +234,18 @@ class Giveaway(commands.Cog):
         message = await self._partial_message(doc)
         if message is None:
             return
+        embed = build_embed(doc)
         try:
             await message.edit(
-                embed=build_embed(doc),
-                view=EnterView(self, entries=entry_count(doc)),
+                view=EnterView(self, embed, entries=entry_count(doc)),
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
-            pass
+            # Giveaways posted before the buttons moved inside the embed can't switch layouts: update the embed only.
+            try:
+                await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                pass
 
     # ------------------------------------------------------------------
     # Core helpers
@@ -374,10 +378,17 @@ class Giveaway(commands.Cog):
         doc = await self._get_with_count(giveaway_id) or claimed
         message = await self._partial_message(doc)
         if message is not None:
+            ended_embed = build_embed(doc, ended=True)
             try:
-                await message.edit(embed=build_embed(doc, ended=True), view=EnterView(self, entries=0, disabled=True), allowed_mentions=discord.AllowedMentions.none())
+                await message.edit(
+                    view=EnterView(self, ended_embed, entries=0, disabled=True),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
             except discord.HTTPException:
-                pass
+                try:
+                    await message.edit(embed=ended_embed, view=None, allowed_mentions=discord.AllowedMentions.none())
+                except discord.HTTPException:
+                    pass
         await self._announce(doc, winners)
 
         self._refresh_tasks.pop(giveaway_id, None)
@@ -530,7 +541,10 @@ class Giveaway(commands.Cog):
         doc["_id"] = 0  # placeholder for the embed, replaced by the real message ID below
 
         try:
-            message = await target.send(embed=build_embed(doc), view=EnterView(self))
+            message = await target.send(
+                view=EnterView(self, build_embed(doc)),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         except discord.HTTPException as e:
             return await ctx.reply(embed=err_embed(f"Couldn't post the giveaway: {e.text or e}"), mention_author=False)
 
@@ -648,7 +662,7 @@ class Giveaway(commands.Cog):
         if len(pages) == 1:
             return await ctx.reply(embed=pages[0], mention_author=False)
         view = PaginatorView(pages, user_id=ctx.author.id)
-        view.message = await ctx.reply(embed=pages[0], view=view, mention_author=False)
+        view.message = await ctx.reply(view=view, mention_author=False)
 
     @giveaway.command(
         name="participants",
@@ -694,7 +708,7 @@ class Giveaway(commands.Cog):
         if len(pages) == 1:
             return await ctx.reply(embed=pages[0], mention_author=False)
         view = PaginatorView(pages, user_id=ctx.author.id)
-        view.message = await ctx.reply(embed=pages[0], view=view, mention_author=False)
+        view.message = await ctx.reply(view=view, mention_author=False)
 
     @giveaway_participants.autocomplete("giveaway")
     async def giveaway_participants_autocomplete(self, interaction: discord.Interaction, current: str):
