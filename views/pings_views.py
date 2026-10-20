@@ -2,87 +2,21 @@ from typing import List
 
 import discord
 
-from views.common_views import BaseView, EMBED_COLOR, make_embed, warning_embed
-
-# --- Navigation View Integration ----------------------------------------------
-_NavViewClass = None
-try:
-    import views.navigate as nav_module
-    for attr in ["PaginatorView", "PaginatedView", "Paginator", "NavigationView", "NavigateView"]:
-        if hasattr(nav_module, attr):
-            _NavViewClass = getattr(nav_module, attr)
-            break
-except ImportError:
-    pass
+from views.common_views import BaseLayout, EMBED_COLOR, container_from_embed, error_embed, make_embed
+from views.navigate import PaginatorView
 
 
-class DefaultPaginatorView(discord.ui.View):
-    """Fallback interactive pagination view with left and right arrow buttons."""
-
-    def __init__(self, pages: List[discord.Embed], user_id: int, timeout: float = 180):
-        super().__init__(timeout=timeout)
-        self.pages = pages
-        self.user_id = user_id
-        self.current_page = 0
-
-        self.prev_button = discord.ui.Button(
-            style=discord.ButtonStyle.secondary,
-            emoji="◀️",
-            custom_id="nav_prev",
-            disabled=True
-        )
-        self.next_button = discord.ui.Button(
-            style=discord.ButtonStyle.secondary,
-            emoji="▶️",
-            custom_id="nav_next",
-            disabled=(len(pages) <= 1)
-        )
-
-        self.prev_button.callback = self.on_prev_click
-        self.next_button.callback = self.on_next_click
-
-        self.add_item(self.prev_button)
-        self.add_item(self.next_button)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                embed=warning_embed("Not your menu."),
-                ephemeral=True
-            )
-            return False
-        return True
-
-    def _update_buttons(self):
-        self.prev_button.disabled = (self.current_page == 0)
-        self.next_button.disabled = (self.current_page == len(self.pages) - 1)
-
-    async def on_prev_click(self, interaction: discord.Interaction):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._update_buttons()
-            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
-
-    async def on_next_click(self, interaction: discord.Interaction):
-        if self.current_page < len(self.pages) - 1:
-            self.current_page += 1
-            self._update_buttons()
-            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+def create_paginator_view(pages: List[discord.Embed], user_id: int) -> PaginatorView:
+    """Pager whose arrow buttons sit inside the page's embed. Send it with ``ctx.reply(view=view)``."""
+    return PaginatorView(pages, user_id=user_id)
 
 
-def create_paginator_view(pages: List[discord.Embed], user_id: int) -> discord.ui.View:
-    if _NavViewClass is not None:
-        try:
-            return _NavViewClass(pages=pages, user_id=user_id)
-        except TypeError:
-            try:
-                return _NavViewClass(pages, user_id)
-            except TypeError:
-                try:
-                    return _NavViewClass(pages)
-                except Exception:
-                    pass
-    return DefaultPaginatorView(pages, user_id)
+def result_view(embeds: List[discord.Embed]) -> discord.ui.LayoutView:
+    """A button-less message made of one embed-style container per embed."""
+    view = discord.ui.LayoutView(timeout=None)
+    for embed in embeds:
+        view.add_item(container_from_embed(embed))
+    return view
 
 
 TYPES = [
@@ -116,15 +50,10 @@ class TypePingSelect(discord.ui.Select):
             min_values=0,
             max_values=len(TYPES),
             options=options,
-            custom_id="tp_select"
         )
 
     async def callback(self, interaction: discord.Interaction):
         view: TypePingView = self.view
-        if interaction.user.id != view.user_id:
-            return await interaction.response.send_message(
-                embed=warning_embed("Not your menu."), ephemeral=True
-            )
 
         g_id = str(interaction.guild_id)
         u_id = str(interaction.user.id)
@@ -135,16 +64,25 @@ class TypePingSelect(discord.ui.Select):
         for option in self.options:
             option.default = option.value in new_types
 
-        embed = view.make_embed(new_types)
-        await interaction.response.edit_message(embed=embed, view=view)
+        view.embed = view.make_embed(new_types)
+        view.render()
+        await interaction.response.edit_message(view=view)
 
 
-class TypePingView(discord.ui.View):
+class TypePingView(BaseLayout):
+    """The type ping list and its select menu together inside one embed-style container."""
+
     def __init__(self, cog: "PokePings", user_id: int, user_types: list):
-        super().__init__(timeout=180)
+        super().__init__(author_id=user_id, timeout=180)
         self.cog = cog
         self.user_id = user_id
-        self.add_item(TypePingSelect(user_types))
+        self.select = TypePingSelect(user_types)
+        self.embed = self.make_embed(user_types)
+        self.render()
+
+    def render(self) -> None:
+        self.clear_items()
+        self.add_item(container_from_embed(self.embed, discord.ui.ActionRow(self.select)))
 
     def make_embed(self, user_types: list) -> discord.Embed:
         embed = discord.Embed(title="⚡ Type Pings", color=EMBED_COLOR)
@@ -172,15 +110,10 @@ class RegionPingSelect(discord.ui.Select):
             min_values=0,
             max_values=len(all_items),
             options=options,
-            custom_id="rp_select"
         )
 
     async def callback(self, interaction: discord.Interaction):
         view: RegionPingView = self.view
-        if interaction.user.id != view.user_id:
-            return await interaction.response.send_message(
-                embed=warning_embed("Not your menu."), ephemeral=True
-            )
 
         g_id = str(interaction.guild_id)
         u_id = str(interaction.user.id)
@@ -191,20 +124,29 @@ class RegionPingSelect(discord.ui.Select):
         for option in self.options:
             option.default = option.value in new_regions
 
-        embed = view.make_embed(new_regions)
-        await interaction.response.edit_message(embed=embed, view=view)
+        view.embed = view.make_embed(new_regions)
+        view.render()
+        await interaction.response.edit_message(view=view)
 
 
-class RegionPingView(discord.ui.View):
+class RegionPingView(BaseLayout):
+    """The region ping list and its select menu together inside one embed-style container."""
+
     def __init__(self, cog: "PokePings", user_id: int, user_regions: list):
-        super().__init__(timeout=180)
+        super().__init__(author_id=user_id, timeout=180)
         self.cog = cog
         self.user_id = user_id
-        self.add_item(RegionPingSelect(user_regions))
+        self.select = RegionPingSelect(user_regions)
+        self.embed = self.make_embed(user_regions)
+        self.render()
+
+    def render(self) -> None:
+        self.clear_items()
+        self.add_item(container_from_embed(self.embed, discord.ui.ActionRow(self.select)))
 
     def make_embed(self, user_regions: list) -> discord.Embed:
         embed = discord.Embed(title="🌍 Region Pings", color=EMBED_COLOR)
-        
+
         region_lines = [f"{'✅' if r in user_regions else '❌'} **{r}**" for r in REGIONS]
         extra_lines = [f"{'✅' if cat in user_regions else '❌'} **{cat}**" for cat in EXTRA_RP_CATEGORIES]
 
@@ -244,10 +186,13 @@ class ShinyHuntSelect(discord.ui.Select):
         view.selected.difference_update(page_names)
         view.selected.update(self.values)
         self.update_options()
-        await interaction.response.edit_message(embed=view.make_embed(), view=view)
+        view.render()
+        await interaction.response.edit_message(view=view)
 
 
-class ShinyHuntView(BaseView):
+class ShinyHuntView(BaseLayout):
+    """Variant picker: the select menu and the Previous / Next / Confirm buttons live inside the embed."""
+
     page_size = 25
 
     def __init__(self, cog: "PokePings", author_id: int, variants: list[str]):
@@ -257,9 +202,26 @@ class ShinyHuntView(BaseView):
         self.selected = set()
         self.page = 0
         self.selector = ShinyHuntSelect(self)
-        self.add_item(self.selector)
+
+        self.previous_button = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary)
+        self.next_button = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary)
+        self.confirm_button = discord.ui.Button(label="Confirm", style=discord.ButtonStyle.success)
+        self.previous_button.callback = self._on_previous
+        self.next_button.callback = self._on_next
+        self.confirm_button.callback = self._on_confirm
         self.previous_button.disabled = True
         self.next_button.disabled = len(self.variants) <= self.page_size
+        self.render()
+
+    def render(self) -> None:
+        self.clear_items()
+        self.add_item(
+            container_from_embed(
+                self.make_embed(),
+                discord.ui.ActionRow(self.selector),
+                discord.ui.ActionRow(self.previous_button, self.next_button, self.confirm_button),
+            )
+        )
 
     @property
     def page_variants(self) -> list[str]:
@@ -283,22 +245,20 @@ class ShinyHuntView(BaseView):
         self.selector.update_options()
         self.previous_button.disabled = self.page == 0
         self.next_button.disabled = (self.page + 1) * self.page_size >= len(self.variants)
+        self.render()
 
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
-    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _on_previous(self, interaction: discord.Interaction):
         self._change_page(-1)
-        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+        await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _on_next(self, interaction: discord.Interaction):
         self._change_page(1)
-        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+        await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, row=1)
-    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _on_confirm(self, interaction: discord.Interaction):
         if not self.selected:
             await interaction.response.send_message(
-                embed=warning_embed("Select at least one Pokémon variant first."),
+                embed=error_embed("Select at least one Pokémon variant first."),
                 ephemeral=True,
             )
             return
@@ -307,9 +267,8 @@ class ShinyHuntView(BaseView):
         await self.cog.set_ping_data(
             str(interaction.guild_id), "sh", str(interaction.user.id), variants
         )
-        self.disable_all()
         embeds = self.cog._sh_confirmation_embeds(variants, "✨ Shiny Hunt Pings Updated")
-        await interaction.response.edit_message(embeds=embeds[:10], view=None)
+        await interaction.response.edit_message(view=result_view(embeds[:10]))
         self.stop()
         for start in range(10, len(embeds), 10):
-            await interaction.followup.send(embeds=embeds[start:start + 10])
+            await interaction.followup.send(view=result_view(embeds[start:start + 10]))
