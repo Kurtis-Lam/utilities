@@ -66,12 +66,13 @@ class Categories(commands.Cog):
         return None, args
 
     async def prompt_category_selection(self, ctx, categories):
-        view = CategorySelectView(ctx.author, categories)
         embed = discord.Embed(
             title="🔍 Pick a category",
             color=discord.Color.gold(),
         )
-        msg = await ctx.reply(embed=embed, view=view, mention_author=False)
+        view = CategorySelectView(ctx.author, categories, embed)
+        msg = await ctx.reply(view=view, mention_author=False)
+        view.message = msg
         await view.wait()
 
         try:
