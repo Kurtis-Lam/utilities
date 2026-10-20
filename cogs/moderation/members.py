@@ -7,7 +7,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-# Import ConfirmView from views/common.py
 from views.common_views import confirm
 from views.embeds import handle_common_error, ok_embed, err_embed, warn_embed, info_embed, BRAND_COLOR
 from views.loading import loading
@@ -690,7 +689,7 @@ class Members(commands.Cog):
             return await ctx.reply(embed=pages[0], mention_author=False)
 
         view = PaginatorView(pages, user_id=ctx.author.id)
-        view.message = await ctx.reply(embed=pages[0], view=view, mention_author=False)
+        view.message = await ctx.reply(view=view, mention_author=False)
 
     @commands.hybrid_command(name="kicked", with_app_command=True, description="Shows when, by whom and why a user was kicked.")
     @app_commands.describe(user="The user (mention or ID) to look up.")
