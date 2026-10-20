@@ -11,7 +11,7 @@ from discord.ext import commands
 
 from views.common_views import success_embed
 from views.embeds import BRAND_COLOR, handle_command_error
-from views.starboard_views import StarboardView, build_jump_view, build_status_embed
+from views.starboard_views import StarboardView, build_jump_layout, build_status_embed
 
 log = logging.getLogger(__name__)
 
@@ -283,15 +283,17 @@ class Starboard(commands.Cog):
             )
 
             file = await self._get_pokemon_image(pokemon, shiny=catch["shiny"])
+            image = None
             if file:
-                embed.set_thumbnail(url=f"attachment://{file.filename}")
+                image = f"attachment://{file.filename}"
             elif message.embeds:
                 catch_embed = message.embeds[0]
-                image_url = catch_embed.thumbnail.url or catch_embed.image.url
-                if image_url:
-                    embed.set_thumbnail(url=image_url)
+                image = catch_embed.thumbnail.url or catch_embed.image.url or None
 
-            send_kwargs = {"embed": embed, "view": build_jump_view(message.jump_url)}
+            send_kwargs = {
+                "view": build_jump_layout(embed, message.jump_url, image=image),
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
             if file:
                 send_kwargs["file"] = file
             await channel.send(**send_kwargs)
@@ -308,8 +310,8 @@ class Starboard(commands.Cog):
     async def starboard(self, ctx: commands.Context):
         config = await self.starboard_collection.find_one({"guild_id": str(ctx.guild.id)})
         embed = build_status_embed(config.get("channel_id") if config else None)
-        view = StarboardView(self, ctx)
-        view.message = await ctx.reply(embed=embed, view=view, mention_author=False)
+        view = StarboardView(self, ctx, embed)
+        view.message = await ctx.reply(view=view, mention_author=False)
 
     @starboard.command(
         name="reset",
