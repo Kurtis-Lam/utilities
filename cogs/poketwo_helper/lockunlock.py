@@ -322,7 +322,7 @@ class LockUnlock(commands.Cog):
             return await ctx.reply(embed=pages[0], mention_author=False)
 
         view = PaginatorView(pages, user_id=ctx.author.id)
-        view.message = await ctx.reply(embed=pages[0], view=view, mention_author=False)
+        view.message = await ctx.reply(view=view, mention_author=False)
 
 
 async def setup(bot):
