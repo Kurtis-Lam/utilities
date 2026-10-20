@@ -5,8 +5,10 @@ from discord import ui
 
 from cogs.owner import grinder as config
 from views.common_views import (
+    BaseLayout,
     ConfirmLayout,
     EmbedLayout,
+    container_from_embed,
     error_embed,
     extract_id,
     info_embed,
@@ -47,54 +49,51 @@ def _fmt_nums(nums) -> str:
     return ", ".join(f"#{n}" for n in nums)
 
 
-class BulkConfirmView(ui.View):
+class BulkConfirmView(BaseLayout):
     """
-    Self-contained Confirm / Cancel buttons for the multi-config `.p` / `.r` commands.
-    Send it with an embed:  view.message = await ctx.reply(embed=embed, view=view)
+    Self-contained Confirm / Cancel buttons (inside the prompt embed) for the multi-config `.p` / `.r` commands.
+    Send it with:  view.message = await ctx.reply(view=view)
     then `await view.wait()`; view.value is True (confirmed), False (cancelled) or None (timed out).
     After applying the change call `await view.finish(embed)` to replace the prompt with the result.
     """
 
-    def __init__(self, author, *, confirm_label: str = "Confirm", timeout: float = 60):
-        super().__init__(timeout=timeout)
+    silent_to_others = True
+
+    def __init__(self, author, embed: discord.Embed, *, confirm_label: str = "Confirm", timeout: float = 60):
+        super().__init__(author_id=author.id, timeout=timeout)
         self.author = author
         self.value: bool | None = None
-        self.message: discord.Message | None = None
-        self.confirm_button.label = confirm_label
+        self.confirm_button = ui.Button(label=confirm_label, style=discord.ButtonStyle.green, emoji="✅")
+        self.cancel_button = ui.Button(label="Cancel", style=discord.ButtonStyle.grey, emoji="❌")
+        self.confirm_button.callback = self._on_confirm
+        self.cancel_button.callback = self._on_cancel
+        self.add_item(container_from_embed(embed, ui.ActionRow(self.confirm_button, self.cancel_button)))
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.author.id:
-            return True
-        await interaction.response.send_message(
-            embed=error_embed("Only the person who ran the command can use these buttons."), ephemeral=True
-        )
-        return False
+    def _show_only(self, embed: discord.Embed) -> None:
+        self.clear_items()
+        self.add_item(container_from_embed(embed))
 
-    @ui.button(label="Confirm", style=discord.ButtonStyle.green, emoji="✅")
-    async def confirm_button(self, interaction: discord.Interaction, button: ui.Button):
+    async def _on_confirm(self, interaction: discord.Interaction):
         self.value = True
         await interaction.response.defer()  # acknowledge now; finish() edits the message afterwards
         self.stop()
 
-    @ui.button(label="Cancel", style=discord.ButtonStyle.grey, emoji="❌")
-    async def cancel_button(self, interaction: discord.Interaction, button: ui.Button):
+    async def _on_cancel(self, interaction: discord.Interaction):
         self.value = False
-        await interaction.response.edit_message(embed=info_embed("Cancelled."), view=None)
+        self._show_only(info_embed("Cancelled."))
+        await interaction.response.edit_message(view=self)
         self.stop()
 
     async def finish(self, embed: discord.Embed):
+        self._show_only(embed)
         if self.message:
             try:
-                await self.message.edit(embed=embed, view=None, allowed_mentions=discord.AllowedMentions.none())
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException:
                 pass
 
     async def on_timeout(self):
-        if self.message:
-            try:
-                await self.message.edit(embed=info_embed("Timed out."), view=None, allowed_mentions=discord.AllowedMentions.none())
-            except discord.HTTPException:
-                pass
+        await self.finish(info_embed("Timed out."))
 
 
 # =============================================================================
@@ -185,6 +184,8 @@ class EditAccountModal(ui.Modal, title="Edit Account Token"):
 
 
 class AccountsView(EmbedLayout):
+    silent_to_others = True
+
     def __init__(self, embed: discord.Embed | None = None):
         super().__init__(embed, timeout=None)
 
@@ -432,6 +433,8 @@ async def _build_step_embed(
 
 
 class SequentialEditView(EmbedLayout):
+    silent_to_others = True
+
     def __init__(
         self,
         indices: list[int],
@@ -747,6 +750,8 @@ RESET_NOUNS = {
 
 
 class ConfigView(EmbedLayout):
+    silent_to_others = True
+
     def __init__(self, page="modes", embed: discord.Embed | None = None):
         super().__init__(embed, timeout=None)
         self.page = page
@@ -948,6 +953,8 @@ class SetLogModal(ui.Modal):
 
 
 class GrinderLogsView(EmbedLayout):
+    silent_to_others = True
+
     def __init__(self, embed: discord.Embed | None = None):
         super().__init__(embed, timeout=None)
 
