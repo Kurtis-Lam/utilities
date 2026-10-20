@@ -297,7 +297,7 @@ class Automod(commands.Cog):
         if len(pages) == 1:
             return await interaction.response.send_message(embed=pages[0], ephemeral=True, allowed_mentions=_NO_PINGS)
         view = PaginatorView(pages, user_id=interaction.user.id)
-        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True, allowed_mentions=_NO_PINGS)
+        await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=_NO_PINGS)
 
     async def panel_send_warning(self, interaction: discord.Interaction):
         ok, detail = await self.send_warning(interaction.guild)
@@ -317,9 +317,7 @@ class Automod(commands.Cog):
     async def panel_reset_logs(self, interaction: discord.Interaction, raw_id: str, panel: AutomodPanelView):
         """Owner only: clears the stored kick and ban logs of a server (blank ID = current server)."""
         if not await self.bot.is_owner(interaction.user):
-            return await interaction.response.send_message(
-                embed=err_embed("Only the bot owner can reset logs."), ephemeral=True
-            )
+            return  # owner-only controls never answer anyone else
         if not self._db_ready():
             return await interaction.response.send_message(
                 embed=err_embed("MongoDB isn't configured, automod is unavailable.", emoji="⚠️"), ephemeral=True
