@@ -432,7 +432,7 @@ class PokePings(commands.Cog):
             return
 
         view = ShinyHuntView(self, ctx.author.id, variants)
-        message = await ctx.reply(embed=view.make_embed(), view=view, mention_author=False)
+        message = await ctx.reply(view=view, mention_author=False)
         view.message = message
 
     # --- Collection List Commands ---
@@ -587,7 +587,7 @@ class PokePings(commands.Cog):
             await ctx.reply(embed=pages[0], mention_author=False)
         else:
             view = create_paginator_view(pages, ctx.author.id)
-            await ctx.reply(embed=pages[0], view=view, mention_author=False)
+            view.message = await ctx.reply(view=view, mention_author=False)
 
     # --- Reserves Commands ---
 
@@ -673,7 +673,7 @@ class PokePings(commands.Cog):
             await ctx.reply(embed=pages[0], mention_author=False)
         else:
             view = create_paginator_view(pages, ctx.author.id)
-            await ctx.reply(embed=pages[0], view=view, mention_author=False)
+            view.message = await ctx.reply(view=view, mention_author=False)
 
     @reserves.command(name="all", description="View all user reserves in this server (admin only).")
     @commands.guild_only()
@@ -722,7 +722,7 @@ class PokePings(commands.Cog):
             await ctx.reply(embed=pages[0], mention_author=False)
         else:
             view = create_paginator_view(pages, ctx.author.id)
-            await ctx.reply(embed=pages[0], view=view, mention_author=False)
+            view.message = await ctx.reply(view=view, mention_author=False)
 
     @reserves.command(name="add", aliases=["a"], description="Reserve Pokémon for a member (admin only).")
     @app_commands.describe(member="The member to reserve for (mention or ID).", pokemon="Pokémon name(s), comma separated.")
@@ -858,8 +858,7 @@ class PokePings(commands.Cog):
         if not target:
             user_types = await self.get_ping_data(g_id, "tp", u_id, default=[])
             view = TypePingView(self, ctx.author.id, user_types)
-            embed = view.make_embed(user_types)
-            await ctx.reply(embed=embed, view=view, mention_author=False)
+            view.message = await ctx.reply(view=view, mention_author=False)
             return
 
         if target.strip().lower() in ("clear", "reset"):
@@ -923,8 +922,7 @@ class PokePings(commands.Cog):
         if not target:
             user_regions = await self.get_ping_data(g_id, "rp", u_id, default=[])
             view = RegionPingView(self, ctx.author.id, user_regions)
-            embed = view.make_embed(user_regions)
-            await ctx.reply(embed=embed, view=view, mention_author=False)
+            view.message = await ctx.reply(view=view, mention_author=False)
             return
 
         if target.strip().lower() in ("clear", "reset"):
