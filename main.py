@@ -82,24 +82,127 @@ STATE_ID = "pending_update"
 
 
 # ----------------------------------------------------------------------------
-# Context: error replies delete themselves (and the command that caused them)
+# Error messages delete themselves (and the command that caused them)
 # ----------------------------------------------------------------------------
+# Every error the bot shows (❌ / 🚫 / ⛔ messages, red ⚠️ embeds) disappears after
+# ERROR_DELETE_DELAY seconds, wherever it was sent from:
+#   * UtilitiesContext      - replies of prefix / hybrid commands (also removes the user's command message),
+#   * gateway listeners     - any message the bot posts or edits (listeners, buttons, background tasks),
+#   * interaction patches   - ephemeral replies and follow-ups, which never reach the gateway.
+# Messages that carry buttons or menus are never treated as errors.
 ERROR_DELETE_DELAY = 5
 ERROR_COLOR_VALUE = discord.Color.red().value
-ERROR_PREFIXES = ("❌", "🚫")
+ERROR_PREFIXES = ("❌", "🚫", "⛔")
+_INTERACTIVE_COMPONENT_TYPES = {2, 3, 5, 6, 7, 8}
+_scheduled_deletes: set[int] = set()
+
+
+def _strip_heading(text: str) -> str:
+    return text.lstrip().lstrip("#").lstrip()
+
+
+def _embed_is_error(embed) -> bool:
+    text = _strip_heading(embed.title or embed.description or "")
+    if text.startswith(ERROR_PREFIXES):
+        return True
+    return text.startswith("⚠️") and embed.color is not None and embed.color.value == ERROR_COLOR_VALUE
 
 
 def _looks_like_error(content, embeds) -> bool:
     """True for plain text / embeds that were written as an error message (❌ ..., 🚫 ...)."""
-    if isinstance(content, str) and content.lstrip().startswith(ERROR_PREFIXES):
+    if isinstance(content, str) and _strip_heading(content).startswith(ERROR_PREFIXES):
         return True
-    for embed in embeds:
-        text = (embed.title or embed.description or "").lstrip()
-        if text.startswith(ERROR_PREFIXES):
-            return True
-        if text.startswith("⚠️") and embed.color is not None and embed.color.value == ERROR_COLOR_VALUE:
-            return True
+    return any(_embed_is_error(embed) for embed in embeds)
+
+
+def _view_is_error(view) -> bool:
+    """A button-less Components V2 message whose first text is an error."""
+    walk = getattr(view, "walk_children", None)
+    if walk is None:
+        return False
+    first = None
+    for child in walk():
+        if isinstance(child, (discord.ui.Button, discord.ui.Select)):
+            return False
+        if first is None and isinstance(child, discord.ui.TextDisplay):
+            first = child.content
+    return isinstance(first, str) and _strip_heading(first).startswith(ERROR_PREFIXES)
+
+
+def _kwargs_are_error(content, kwargs: dict) -> bool:
+    embeds = [e for e in (kwargs.get("embeds") or []) if isinstance(e, discord.Embed)]
+    if isinstance(kwargs.get("embed"), discord.Embed):
+        embeds.append(kwargs["embed"])
+    if _looks_like_error(content, embeds):
+        return True
+    return _view_is_error(kwargs.get("view"))
+
+
+def _components_are_error(components) -> bool:
+    """Same check for the raw component payload of a message (list of dicts)."""
+    texts: list[str] = []
+    interactive = False
+
+    def walk(items):
+        nonlocal interactive
+        for comp in items or []:
+            if not isinstance(comp, dict):
+                continue
+            if comp.get("type") in _INTERACTIVE_COMPONENT_TYPES:
+                interactive = True
+            if comp.get("type") == 10 and isinstance(comp.get("content"), str):
+                texts.append(comp["content"])
+            walk(comp.get("components"))
+            if isinstance(comp.get("accessory"), dict):
+                walk([comp["accessory"]])
+
+    walk(components)
+    if interactive or not texts:
+        return False
+    return _strip_heading(texts[0]).startswith(ERROR_PREFIXES)
+
+
+def _has_interactive(components) -> bool:
+    for comp in components or []:
+        if isinstance(comp, dict):
+            if comp.get("type") in _INTERACTIVE_COMPONENT_TYPES:
+                return True
+            if _has_interactive(comp.get("components")):
+                return True
     return False
+
+
+def _payload_is_error(data: dict) -> bool:
+    """Error check for a raw message payload (gateway create / update data)."""
+    components = data.get("components")
+    if _has_interactive(components):
+        return False
+    if _components_are_error(components):
+        return True
+    try:
+        embeds = [discord.Embed.from_dict(e) for e in data.get("embeds") or []]
+    except Exception:
+        embeds = []
+    return _looks_like_error(data.get("content"), embeds)
+
+
+async def _delete_after_delay(delete_calls) -> None:
+    await asyncio.sleep(ERROR_DELETE_DELAY)
+    for call in delete_calls:
+        try:
+            await call()
+        except Exception:
+            pass
+
+
+def _schedule(delete_calls, message_id: int | None = None) -> None:
+    if message_id is not None:
+        if message_id in _scheduled_deletes:
+            return
+        _scheduled_deletes.add(message_id)
+    task = asyncio.create_task(_delete_after_delay(delete_calls))
+    if message_id is not None:
+        task.add_done_callback(lambda _t, mid=message_id: _scheduled_deletes.discard(mid))
 
 
 class UtilitiesContext(commands.Context):
@@ -108,7 +211,7 @@ class UtilitiesContext(commands.Context):
     When a command fails (missing permissions, missing arguments, bad input, cooldown, ...)
     the invoking message of the author and the error answer of the bot are both deleted.
     An answer counts as an error when the command raised (``error_mode``) or when the reply
-    itself is an error message (starts with ❌ / 🚫, or a red ⚠️ embed).
+    itself is an error message (starts with ❌ / 🚫 / ⛔, or a red ⚠️ embed).
     """
 
     error_mode: bool = False
@@ -116,29 +219,17 @@ class UtilitiesContext(commands.Context):
     def _is_error_reply(self, content, kwargs: dict) -> bool:
         if self.error_mode:
             return True
-        embeds = list(kwargs.get("embeds") or [])
-        if kwargs.get("embed") is not None:
-            embeds.append(kwargs["embed"])
-        return _looks_like_error(content, embeds)
+        return _kwargs_are_error(content, kwargs)
 
     def cleanup_if_error(self, sent, content=None, kwargs: dict | None = None) -> None:
         """Schedules the deletion of ``sent`` (and the author's command) if it is an error reply."""
         if sent is None or not self._is_error_reply(content, kwargs or {}):
             return
-        targets = [sent]
+        calls = [sent.delete]
         if self.interaction is None and not getattr(self, "_author_cleanup_scheduled", False):
             self._author_cleanup_scheduled = True
-            targets.append(self.message)
-        asyncio.create_task(self._delete_later(targets))
-
-    @staticmethod
-    async def _delete_later(messages) -> None:
-        await asyncio.sleep(ERROR_DELETE_DELAY)
-        for message in messages:
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            calls.append(self.message.delete)
+        _schedule(calls, getattr(sent, "id", None))
 
     async def send(self, content=None, **kwargs):
         sent = await super().send(content, **kwargs)
@@ -149,6 +240,66 @@ class UtilitiesContext(commands.Context):
         sent = await super().reply(content, **kwargs)
         self.cleanup_if_error(sent, content, kwargs)
         return sent
+
+
+def _install_interaction_cleanup() -> None:
+    """Error answers to buttons, menus, modals and slash commands (usually ephemeral) delete themselves too."""
+
+    def schedule_original(interaction) -> None:
+        _schedule([interaction.delete_original_response])
+
+    original_send_message = discord.InteractionResponse.send_message
+    original_edit_message = discord.InteractionResponse.edit_message
+    original_edit_original = discord.Interaction.edit_original_response
+    original_followup_send = discord.Webhook.send
+
+    async def send_message(self, content=None, **kwargs):
+        result = await original_send_message(self, content, **kwargs)
+        try:
+            if kwargs.get("delete_after") is None and _kwargs_are_error(content, kwargs):
+                schedule_original(self._parent)
+        except Exception:
+            pass
+        return result
+
+    async def edit_message(self, **kwargs):
+        result = await original_edit_message(self, **kwargs)
+        try:
+            if _kwargs_are_error(kwargs.get("content"), kwargs):
+                schedule_original(self._parent)
+        except Exception:
+            pass
+        return result
+
+    async def edit_original_response(self, **kwargs):
+        result = await original_edit_original(self, **kwargs)
+        try:
+            if _kwargs_are_error(kwargs.get("content"), kwargs):
+                schedule_original(self)
+        except Exception:
+            pass
+        return result
+
+    async def followup_send(self, content=discord.utils.MISSING, **kwargs):
+        result = await original_followup_send(self, content, **kwargs)
+        try:
+            if (
+                isinstance(result, discord.WebhookMessage)
+                and kwargs.get("delete_after") is None
+                and _kwargs_are_error(None if content is discord.utils.MISSING else content, kwargs)
+            ):
+                _schedule([result.delete])
+        except Exception:
+            pass
+        return result
+
+    discord.InteractionResponse.send_message = send_message
+    discord.InteractionResponse.edit_message = edit_message
+    discord.Interaction.edit_original_response = edit_original_response
+    discord.Webhook.send = followup_send
+
+
+_install_interaction_cleanup()
 
 # ----------------------------------------------------------------------------
 # Bot
@@ -395,6 +546,55 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
         if after.author.bot or after.guild is None or before.content == after.content:
             return
         await bot.process_commands(after)
+    except Exception:
+        traceback.print_exc()
+
+
+def _is_command_text(text: str) -> bool:
+    text = (text or "").lstrip()
+    starts = [bot.prefix_str]
+    if bot.user is not None:
+        starts += [f"<@{bot.user.id}>", f"<@!{bot.user.id}>"]
+    return bool(text) and text.startswith(tuple(starts))
+
+
+@bot.listen("on_message")
+async def delete_own_error_messages(message: discord.Message):
+    """Any error the bot posts (even outside a command context) goes away after a few seconds,
+    together with the prefix command it answered."""
+    try:
+        if bot.user is None or message.author.id != bot.user.id:
+            return
+        data = {
+            "content": message.content,
+            "embeds": [e.to_dict() for e in message.embeds],
+            "components": [c.to_dict() for c in message.components],
+        }
+        if not _payload_is_error(data):
+            return
+        calls = [message.delete]
+        reference = message.reference.resolved if message.reference else None
+        if isinstance(reference, discord.Message) and not reference.author.bot and _is_command_text(reference.content):
+            calls.append(reference.delete)
+        _schedule(calls, message.id)
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.listen("on_raw_message_edit")
+async def delete_own_edited_error_messages(payload: discord.RawMessageUpdateEvent):
+    """Errors that appear by editing a bot message (button results, status messages) are removed too."""
+    try:
+        data = payload.data
+        author_id = (data.get("author") or {}).get("id")
+        if author_id is None and payload.cached_message is not None:
+            author_id = payload.cached_message.author.id
+        if bot.user is None or author_id is None or int(author_id) != bot.user.id:
+            return
+        if not _payload_is_error(data):
+            return
+        partial = bot.get_partial_messageable(payload.channel_id).get_partial_message(payload.message_id)
+        _schedule([partial.delete], payload.message_id)
     except Exception:
         traceback.print_exc()
 
