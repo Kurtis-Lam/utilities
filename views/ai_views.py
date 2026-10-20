@@ -208,6 +208,8 @@ class AddKeyModal(discord.ui.Modal):
         self.add_item(self.account_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await self.info_view.cog.is_owner_user(interaction.user):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         cog = self.info_view.cog
         try:
@@ -255,6 +257,8 @@ class EditKeyModal(discord.ui.Modal):
         self.add_item(self.account_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await self.info_view.cog.is_owner_user(interaction.user):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         cog = self.info_view.cog
         try:
@@ -287,44 +291,81 @@ class EditKeyModal(discord.ui.Modal):
         await send(embed=_error_embed("Something went wrong. Please try again."), ephemeral=True)
 
 
-class ConfirmDeleteView(discord.ui.View):
+def _panel(embed: discord.Embed, *rows: discord.ui.Item) -> discord.ui.LayoutView:
+    """A message that is just one embed-style container (optionally with button / select rows inside)."""
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container_from_embed(embed, *rows))
+    return view
+
+
+class _OwnerOnlyLayout(BaseLayout):
+    """Layout whose controls only work for bot owners. Everybody else is ignored silently."""
+
+    def __init__(self, cog, **kwargs):
+        super().__init__(**kwargs)
+        self.cog = cog
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await self.cog.is_owner_user(interaction.user):
+            return False
+        return await super().interaction_check(interaction)
+
+
+class ConfirmDeleteView(_OwnerOnlyLayout):
     def __init__(self, info_view: "AIInfoView", key: str, position: int, account: str):
-        super().__init__(timeout=30)
+        super().__init__(info_view.cog, author_id=None, timeout=30)
         self.info_view = info_view
         self.key = key
         self.position = position
         self.account = account
+        self.delete_button = discord.ui.Button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger)
+        self.cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        self.delete_button.callback = self.confirm
+        self.cancel_button.callback = self.cancel
+        embed = discord.Embed(
+            title=f"⚠️ Delete Key #{position}?",
+            description=f"Account **{account}**, ends in `...{key[-4:]}`.\nThis can't be undone.",
+            color=discord.Color.gold(),
+        )
+        self.add_item(
+            container_from_embed(embed, discord.ui.ActionRow(self.delete_button, self.cancel_button))
+        )
 
-    @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirm(self, interaction: discord.Interaction):
         self.stop()
-        await interaction.response.edit_message(content="⏳ Deleting key...", view=None)
+        await interaction.response.edit_message(view=_panel(discord.Embed(description="⏳ Deleting key...", color=BRAND_COLOR)))
         try:
             await self.info_view.cog.delete_api_key(self.key)
         except ValueError as e:
-            await interaction.edit_original_response(content=f"❌ {e}")
+            await interaction.edit_original_response(view=_panel(_error_embed(str(e))))
             return
         except Exception as e:
             print(f"AIInfoView: error deleting key: {e}")
-            await interaction.edit_original_response(content="❌ Couldn't delete the key (check console logs).")
+            await interaction.edit_original_response(
+                view=_panel(_error_embed("Couldn't delete the key (check console logs)."))
+            )
             return
 
         await interaction.edit_original_response(
-            content=f"✅ Deleted **Key #{self.position}** (account **{self.account}**, ended in `...{self.key[-4:]}`)."
+            view=_panel(discord.Embed(
+                description=f"✅ Deleted **Key #{self.position}** (account **{self.account}**, ended in `...{self.key[-4:]}`).",
+                color=BRAND_COLOR,
+            ))
         )
         await self.info_view.refresh_message()
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def cancel(self, interaction: discord.Interaction):
         self.stop()
-        await interaction.response.edit_message(content="Cancelled.", view=None)
+        await interaction.response.edit_message(
+            view=_panel(discord.Embed(description="Cancelled.", color=BRAND_COLOR))
+        )
 
 
-class KeyPickerView(discord.ui.View):
+class KeyPickerView(_OwnerOnlyLayout):
     MAX_OPTIONS = 25
 
     def __init__(self, info_view: "AIInfoView", action: str):
-        super().__init__(timeout=60)
+        super().__init__(info_view.cog, author_id=None, timeout=60)
         self.info_view = info_view
         self.action = action
         cog = info_view.cog
@@ -345,14 +386,15 @@ class KeyPickerView(discord.ui.View):
             placeholder=f"Choose a key to {action}...", options=options, min_values=1, max_values=1
         )
         self.select.callback = self._on_select
-        self.add_item(self.select)
+        embed = discord.Embed(description=f"Which key do you want to {action}?", color=BRAND_COLOR)
+        self.add_item(container_from_embed(embed, discord.ui.ActionRow(self.select)))
 
     async def _on_select(self, interaction: discord.Interaction):
         index = int(self.select.values[0])
         key = self.keys[index]
         cog = self.info_view.cog
         if key not in cog.api_keys:
-            await interaction.response.edit_message(content="❌ That key no longer exists.", view=None)
+            await interaction.response.edit_message(view=_panel(_error_embed("That key no longer exists.")))
             return
         account = cog.key_account_id.get(key, "unknown")
         position = index + 1
@@ -361,20 +403,15 @@ class KeyPickerView(discord.ui.View):
             await interaction.response.send_modal(EditKeyModal(self.info_view, key, position, account))
         else:
             await interaction.response.edit_message(
-                content=(
-                    f"⚠️ Delete **Key #{position}** (account **{account}**, ends in `...{key[-4:]}`)?\n"
-                    "This can't be undone."
-                ),
-                view=ConfirmDeleteView(self.info_view, key, position, account),
+                view=ConfirmDeleteView(self.info_view, key, position, account)
             )
 
 
-class AIInfoView(BaseLayout):
+class AIInfoView(_OwnerOnlyLayout):
     """Add / Edit / Delete / Refresh buttons shown inside the `.ai info` container (bot owner only)."""
 
     def __init__(self, cog, author_id: int, embed: discord.Embed, timeout: float = 180.0):
-        super().__init__(author_id=author_id, timeout=timeout)
-        self.cog = cog
+        super().__init__(cog, author_id=author_id, timeout=timeout)
         self.add_button = discord.ui.Button(label="Add Key", emoji="➕", style=discord.ButtonStyle.success)
         self.edit_button = discord.ui.Button(label="Edit Key", emoji="✏️", style=discord.ButtonStyle.primary)
         self.delete_button = discord.ui.Button(label="Delete Key", emoji="🗑️", style=discord.ButtonStyle.danger)
@@ -394,17 +431,6 @@ class AIInfoView(BaseLayout):
             )
         )
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not await super().interaction_check(interaction):
-            return False
-        if not await self.cog.is_owner_user(interaction.user):
-            await interaction.response.send_message(
-                embed=discord.Embed(description="🚫 Only the bot owner can manage API keys.", color=discord.Color.red()),
-                ephemeral=True,
-            )
-            return False
-        return True
-
     async def refresh_message(self) -> None:
         message = getattr(self, "message", None)
         if message is None:
@@ -419,9 +445,7 @@ class AIInfoView(BaseLayout):
         await interaction.response.send_modal(AddKeyModal(self))
 
     async def _open_picker(self, interaction: discord.Interaction, action: str):
-        await interaction.response.send_message(
-            f"Which key do you want to {action}?", view=KeyPickerView(self, action), ephemeral=True
-        )
+        await interaction.response.send_message(view=KeyPickerView(self, action), ephemeral=True)
 
     async def _on_edit(self, interaction: discord.Interaction):
         await self._open_picker(interaction, "edit")
@@ -432,3 +456,71 @@ class AIInfoView(BaseLayout):
     async def _on_refresh(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await self.refresh_message()
+
+# ===========================================================================
+# Owner approval for AI tool calls that touch the bot's code
+# ===========================================================================
+
+class ToolApprovalView(BaseLayout):
+    """Confirm / Deny buttons inside the embed-style container the AI shows before it changes code.
+
+    Only the owner who asked the AI can press them (everybody else is ignored silently).
+    ``await view.wait()`` then read ``view.approved``: True = confirmed, False = denied,
+    None = nobody answered in time (treated as denied).
+    """
+
+    def __init__(self, cog, requester_id: int, embed: discord.Embed, timeout: float = 120.0):
+        super().__init__(author_id=None, timeout=timeout)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.approved: bool | None = None
+        self._sending = False
+        self.confirm_button = discord.ui.Button(label="Confirm", emoji="✅", style=discord.ButtonStyle.success)
+        self.deny_button = discord.ui.Button(label="Deny", emoji="🛑", style=discord.ButtonStyle.danger)
+        self.confirm_button.callback = self._on_confirm
+        self.deny_button.callback = self._on_deny
+        self.add_item(
+            container_from_embed(embed, discord.ui.ActionRow(self.confirm_button, self.deny_button))
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            return False
+        if not await self.cog.is_owner_user(interaction.user):
+            return False
+        return True
+
+    async def _finish(self, interaction: discord.Interaction, approved: bool) -> None:
+        if self.approved is not None:
+            return
+        self.approved = approved
+        self.clear_items()
+        if approved:
+            embed = discord.Embed(title="✅ Approved", description="Applying the change...", color=discord.Color.green())
+        else:
+            embed = discord.Embed(title="🛑 Denied", description="Nothing was changed.", color=discord.Color.red())
+        self.add_item(container_from_embed(embed))
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+    async def _on_confirm(self, interaction: discord.Interaction):
+        await self._finish(interaction, True)
+
+    async def _on_deny(self, interaction: discord.Interaction):
+        await self._finish(interaction, False)
+
+    async def on_timeout(self) -> None:
+        if self.approved is not None:
+            return
+        self.clear_items()
+        embed = discord.Embed(
+            title="⏱️ Timed out",
+            description="No confirmation was given, so nothing was changed.",
+            color=discord.Color.red(),
+        )
+        self.add_item(container_from_embed(embed))
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                pass
