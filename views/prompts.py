@@ -16,6 +16,8 @@ from contextlib import suppress
 
 import discord
 
+from views.common_views import BaseLayout, container_from_embed
+
 # Words that mean "leave this optional setting at its default".
 SKIP_WORDS = {"skip", "none", "no", "n", "default", "current", "-"}
 # Words that abort the whole flow.
@@ -90,32 +92,48 @@ def is_skip(text: str) -> bool:
     return text.strip().lower() in SKIP_WORDS
 
 
-class PromptView(discord.ui.View):
-    def __init__(self, author_id: int, timeout: float = DEFAULT_TIMEOUT):
-        super().__init__(timeout=timeout)
-        self.author_id = author_id
-        self.cancelled = False
+def _static_panel(text: str, color: discord.Color | int = 0x0414C7) -> discord.ui.LayoutView:
+    """A button-less message made of one embed-style container."""
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container_from_embed(discord.Embed(description=text, color=color)))
+    return view
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("This is not your prompt.", ephemeral=True)
-            return
+
+class PromptView(BaseLayout):
+    """The question and its Cancel button, together inside one embed-style container."""
+
+    def __init__(self, author_id: int, question: str = "", timeout: float = DEFAULT_TIMEOUT):
+        super().__init__(author_id=author_id, timeout=timeout)
+        self.cancelled = False
+        self.question = question
+        self.cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.red)
+        self.cancel_button.callback = self.cancel
+        embed = discord.Embed(
+            description=f"{question}\n-# You have {int(timeout)} seconds\n-# Click below to abort.",
+            color=0x0414C7,
+        )
+        self.add_item(container_from_embed(embed, discord.ui.ActionRow(self.cancel_button)))
+
+    async def cancel(self, interaction: discord.Interaction):
         self.cancelled = True
         self.stop()
         await interaction.response.defer()
 
+    async def on_timeout(self) -> None:
+        # ask() edits the message itself once the wait is over.
+        return None
+
 
 async def ask(ctx, question: str, *, timeout: float = DEFAULT_TIMEOUT) -> discord.Message | None:
     """
-    Asks `question` as text with a Cancel button and waits for the user's reply message
+    Asks `question` inside an embed with a Cancel button and waits for the user's reply message
     in the same channel or for them to click Cancel.
 
     Returns the user's reply message, or None if they timed out or cancelled.
     """
-    view = PromptView(ctx.author.id, timeout=timeout)
-    content = f"{question}\n-# You have {int(timeout)} seconds\n-# Click below to abort."
-    prompt = await ctx.reply(content, view=view, mention_author=False)
+    view = PromptView(ctx.author.id, question, timeout=timeout)
+    prompt = await ctx.reply(view=view, mention_author=False)
+    view.message = prompt
 
     def check(m: discord.Message) -> bool:
         return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
@@ -136,17 +154,17 @@ async def ask(ctx, question: str, *, timeout: float = DEFAULT_TIMEOUT) -> discor
             reply = msg_task.result()
             if reply.content.strip().lower() in CANCEL_WORDS:
                 with suppress(discord.HTTPException):
-                    await prompt.edit(content="❌ Cancelled.", view=None)
+                    await prompt.edit(view=_static_panel("Cancelled."))
                 return None
             with suppress(discord.HTTPException):
-                await prompt.edit(view=None)
+                await prompt.edit(view=_static_panel(question))
             return reply
 
     if view.cancelled:
         with suppress(discord.HTTPException):
-            await prompt.edit(content="❌ Cancelled.", view=None)
+            await prompt.edit(view=_static_panel("Cancelled."))
         return None
 
     with suppress(discord.HTTPException):
-        await prompt.edit(content=f"⏱️ No reply within {int(timeout)} seconds. Cancelled.", view=None)
+        await prompt.edit(view=_static_panel(f"⏱️ No reply within {int(timeout)} seconds. Cancelled."))
     return None
