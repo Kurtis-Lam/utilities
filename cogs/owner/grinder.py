@@ -1131,8 +1131,8 @@ class GrinderCog(commands.Cog):
             if duration:
                 embed.add_field(name="⏱️ Duration", value=f"**{duration}** (resumes <t:{int(pause_until / 1000)}:R>)", inline=False)
 
-            confirm_view = BulkConfirmView(ctx.author, confirm_label="Pause")
-            confirm_view.message = await ctx.reply(embed=embed, view=confirm_view, mention_author=False)
+            confirm_view = BulkConfirmView(ctx.author, embed, confirm_label="Pause")
+            confirm_view.message = await ctx.reply(view=confirm_view, mention_author=False)
             await confirm_view.wait()
 
             if confirm_view.value is True:
@@ -1265,8 +1265,8 @@ class GrinderCog(commands.Cog):
                 color=discord.Color.green()
             )
 
-            confirm_view = BulkConfirmView(ctx.author, confirm_label="Resume")
-            confirm_view.message = await ctx.reply(embed=embed, view=confirm_view, mention_author=False)
+            confirm_view = BulkConfirmView(ctx.author, embed, confirm_label="Resume")
+            confirm_view.message = await ctx.reply(view=confirm_view, mention_author=False)
             await confirm_view.wait()
 
             if confirm_view.value is True:
