@@ -1,16 +1,16 @@
 import discord
 
-try:
-    from views.common_views import warning_embed
-except ImportError:
-    def warning_embed(description: str) -> discord.Embed:
-        return discord.Embed(title="⚠️ Warning", description=description, color=discord.Color.gold())
+from views.common_views import BaseLayout, container_from_embed
 
 
-class PaginatorView(discord.ui.View):
+class PaginatorView(BaseLayout):
     """
-    Interactive pagination view for browsing through a list of discord.Embed pages.
-    Supports left/right arrow navigation, user interaction checks, and button disable on timeout.
+    Interactive pagination for browsing through a list of discord.Embed pages.
+
+    The page and its arrow buttons live together inside one embed-style container
+    (Components V2), so send it with ``await ctx.reply(view=view, mention_author=False)``
+    and set ``view.message`` to the returned message.
+    Supports left/right (and optionally first/last) navigation, user checks and button disable on timeout.
     """
 
     def __init__(
@@ -20,102 +20,71 @@ class PaginatorView(discord.ui.View):
         timeout: float = 180.0,
         show_first_last: bool = False,
     ):
-        super().__init__(timeout=timeout)
+        super().__init__(author_id=user_id, timeout=timeout)
         self.pages = pages
         self.user_id = user_id
         self.current_page = 0
-        self.message: discord.Message | None = None
+
+        self.first_button: discord.ui.Button | None = None
+        self.last_button: discord.ui.Button | None = None
 
         if show_first_last and len(pages) > 2:
             self.first_button = discord.ui.Button(
-                style=discord.ButtonStyle.secondary,
-                emoji="⏮️",
-                custom_id="nav_first",
-                disabled=True,
+                style=discord.ButtonStyle.secondary, emoji="⏮️", disabled=True
             )
             self.first_button.callback = self._on_first_click
-            self.add_item(self.first_button)
 
         self.prev_button = discord.ui.Button(
-            style=discord.ButtonStyle.secondary,
-            emoji="◀️",
-            custom_id="nav_prev",
-            disabled=True,
+            style=discord.ButtonStyle.secondary, emoji="◀️", disabled=True
         )
         self.prev_button.callback = self._on_prev_click
-        self.add_item(self.prev_button)
 
         self.next_button = discord.ui.Button(
-            style=discord.ButtonStyle.secondary,
-            emoji="▶️",
-            custom_id="nav_next",
-            disabled=(len(pages) <= 1),
+            style=discord.ButtonStyle.secondary, emoji="▶️", disabled=(len(pages) <= 1)
         )
         self.next_button.callback = self._on_next_click
-        self.add_item(self.next_button)
 
         if show_first_last and len(pages) > 2:
             self.last_button = discord.ui.Button(
-                style=discord.ButtonStyle.secondary,
-                emoji="⏭️",
-                custom_id="nav_last",
-                disabled=(len(pages) <= 1),
+                style=discord.ButtonStyle.secondary, emoji="⏭️", disabled=(len(pages) <= 1)
             )
             self.last_button.callback = self._on_last_click
-            self.add_item(self.last_button)
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if self.user_id is not None and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                embed=warning_embed("Not your menu."),
-                ephemeral=True,
-            )
-            return False
-        return True
+        self.render()
 
-    def _update_buttons(self):
+    def render(self) -> None:
+        self.clear_items()
+        buttons = [b for b in (self.first_button, self.prev_button, self.next_button, self.last_button) if b]
+        self.add_item(container_from_embed(self.pages[self.current_page], discord.ui.ActionRow(*buttons)))
+
+    def _update_buttons(self) -> None:
         is_first = self.current_page == 0
         is_last = self.current_page == len(self.pages) - 1
 
         self.prev_button.disabled = is_first
         self.next_button.disabled = is_last
-
-        if hasattr(self, "first_button"):
+        if self.first_button is not None:
             self.first_button.disabled = is_first
-        if hasattr(self, "last_button"):
+        if self.last_button is not None:
             self.last_button.disabled = is_last
 
-    async def _on_first_click(self, interaction: discord.Interaction):
-        self.current_page = 0
+    async def _go_to(self, interaction: discord.Interaction, page: int) -> None:
+        self.current_page = max(0, min(page, len(self.pages) - 1))
         self._update_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+        self.render()
+        await interaction.response.edit_message(view=self)
+
+    async def _on_first_click(self, interaction: discord.Interaction):
+        await self._go_to(interaction, 0)
 
     async def _on_prev_click(self, interaction: discord.Interaction):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._update_buttons()
-            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+        await self._go_to(interaction, self.current_page - 1)
 
     async def _on_next_click(self, interaction: discord.Interaction):
-        if self.current_page < len(self.pages) - 1:
-            self.current_page += 1
-            self._update_buttons()
-            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+        await self._go_to(interaction, self.current_page + 1)
 
     async def _on_last_click(self, interaction: discord.Interaction):
-        self.current_page = len(self.pages) - 1
-        self._update_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
-
-    async def on_timeout(self):
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
-            except (discord.NotFound, discord.HTTPException):
-                pass
+        await self._go_to(interaction, len(self.pages) - 1)
 
 
 # Aliases for compatibility across different import naming conventions
