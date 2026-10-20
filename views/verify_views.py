@@ -10,7 +10,7 @@ import discord
 from PIL import Image, ImageDraw, ImageFont
 from discord.ui import Button, ChannelSelect, Modal, RoleSelect, TextInput
 
-from views.common_views import EmbedLayout, container_from_embed, error_embed, make_embed, success_embed
+from views.common_views import BaseLayout, EmbedLayout, container_from_embed, error_embed, make_embed, success_embed
 
 # Characters that are difficult to confuse in small or distorted text are excluded.
 CAPTCHA_LETTERS = "abcdefghjkmnprstuvwxyz"
@@ -196,16 +196,31 @@ class VerificationPanelView(discord.ui.LayoutView):
         await self.cog.start_captcha(interaction)
 
 
-class CaptchaPromptView(discord.ui.View):
-    def __init__(self, cog, expected: str, config: dict, user_id: int, expires_at: float):
+class CaptchaPromptView(BaseLayout):
+    """The CAPTCHA embed (with its image) and the 'Enter the text' button together in one container."""
+
+    IMAGE_URL = "attachment://verification.png"
+
+    def __init__(self, cog, expected: str, config: dict, user_id: int, expires_at: float, embed: discord.Embed | None = None):
         super().__init__(timeout=max(1, expires_at - time.time()))
         self.cog, self.expected, self.config = cog, expected, config
         self.user_id, self.expires_at = user_id, expires_at
         self.attempts = 0
-        self.message: discord.Message | None = None
+        self.embed = embed or make_embed("Complete verification")
         self.enter_button = Button(label=str(config.get("enter_button_label", "Enter the text"))[:80], style=discord.ButtonStyle.primary, emoji="⌨️")
         self.enter_button.callback = self.open_modal
-        self.add_item(self.enter_button)
+        self.add_item(container_from_embed(self.embed, discord.ui.ActionRow(self.enter_button), image=self.IMAGE_URL))
+
+    async def close_prompt(self) -> None:
+        """Remove the button (the CAPTCHA stays visible) once the attempt is over."""
+        self.stop()
+        self.clear_items()
+        self.add_item(container_from_embed(self.embed, image=self.IMAGE_URL))
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                pass
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -215,20 +230,12 @@ class CaptchaPromptView(discord.ui.View):
             await interaction.response.send_message(embed=error_embed("This CAPTCHA expired. Press Verify again to get a new one."), ephemeral=True)
             self.stop()
             return False
+        if self.message is None:
+            self.message = interaction.message
         return True
 
     async def open_modal(self, interaction: discord.Interaction):
         await interaction.response.send_modal(CaptchaAnswerModal(self))
-
-    async def on_timeout(self):
-        for item in self.children:
-            if hasattr(item, "disabled"):
-                item.disabled = True
-        if self.message is not None:
-            try:
-                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
-            except discord.HTTPException:
-                pass
 
 
 class CaptchaAnswerModal(Modal, title="Server Verification"):
@@ -258,24 +265,14 @@ class CaptchaAnswerModal(Modal, title="Server Verification"):
             await prompt.cog.complete_verification(interaction.guild, interaction.user, prompt.config)
         except (discord.Forbidden, discord.HTTPException, ValueError) as exc:
             return await interaction.response.send_message(embed=error_embed(f"Could not finish verification: {exc}"), ephemeral=True)
-        prompt.stop()
-        if prompt.message is not None:
-            try:
-                await prompt.message.edit(view=None, allowed_mentions=discord.AllowedMentions.none())
-            except discord.HTTPException:
-                pass
+        await prompt.close_prompt()
         message = str(prompt.config.get("success_message", "✅ Verification complete. You now have access to the server."))
         await interaction.response.send_message(embed=make_embed("✅ Verified", message), ephemeral=True)
 
     async def _wrong(self, interaction: discord.Interaction, message: str):
         prompt = self.prompt_view
         if prompt.attempts >= max(1, min(10, int(prompt.config.get("max_attempts", 3)))):
-            prompt.stop()
-            if prompt.message is not None:
-                try:
-                    await prompt.message.edit(view=None, allowed_mentions=discord.AllowedMentions.none())
-                except discord.HTTPException:
-                    pass
+            await prompt.close_prompt()
             text = str(prompt.config.get("failure_message", "Too many incorrect attempts. Press Verify again for a new CAPTCHA."))
         else:
             text = f"{message} Attempts remaining: `{max(0, int(prompt.config.get('max_attempts', 3)) - prompt.attempts)}`."
