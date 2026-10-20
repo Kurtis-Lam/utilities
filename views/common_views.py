@@ -6,8 +6,6 @@ Everything visual lives here so the whole bot stays consistent:
 * ``themed()``      – force that color onto an embed built elsewhere (cogs, config modules).
 * ``*_embed()``     – small ready-made embeds for success / error / warning / info replies
   (errors are one line: the message is the title).
-* ``BaseView``      – owner-only check + auto-disable on timeout + safe page swapping.
-* ``ConfirmView``   – red Confirm / grey Cancel prompt, no emojis (same API as before).
 * ``BaseLayout``    – owner-only check + auto-disable on timeout for Components V2 layouts.
 * ``ConfirmLayout`` – Confirm / Cancel prompt with the buttons inside the embed-style container.
 * ``confirm()``     – one-call helper around ``ConfirmLayout``. Returns the finished layout:
@@ -75,7 +73,8 @@ def error_embed(text: str) -> discord.Embed:
 
 
 def warning_embed(text: str, title: str | None = None) -> discord.Embed:
-    return make_embed(title=title, description=f"⚠️ {text}")
+    """Red ⚠️ embed: counts as an error message, so it deletes itself after a few seconds."""
+    return discord.Embed(title=title, description=f"⚠️ {text}", color=discord.Color.red())
 
 
 def info_embed(text: str) -> discord.Embed:
@@ -100,103 +99,6 @@ def extract_id(raw: str) -> str | None:
     return match.group(0) if match else None
 
 
-# --- Base view -----------------------------------------------------------------
-
-class BaseView(discord.ui.View):
-    """View with an optional owner lock and clean timeout behaviour.
-
-    * ``author_id``  – if set, only that user may press the controls.
-    * ``message``    – the message the view is attached to. It is filled in
-      automatically on the first interaction (or set it yourself after sending).
-      When the view times out the controls are greyed out instead of silently
-      dying, which avoids the confusing "This interaction failed" message.
-    * ``swap()``     – replace the current page with a new embed + view and make
-      sure the old view's timeout can never overwrite the new page.
-    """
-
-    def __init__(self, *, author_id: int | None = None, timeout: float | None = 180):
-        super().__init__(timeout=timeout)
-        self.author_id = author_id
-        self.message: discord.Message | None = None
-        self.superseded = False
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if self.author_id is not None and interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                embed=warning_embed("Not your menu."),
-                ephemeral=True,
-            )
-            return False
-        if self.message is None:
-            self.message = interaction.message
-        return True
-
-    def disable_all(self) -> None:
-        for child in self.children:
-            child.disabled = True  # type: ignore[attr-defined]
-
-    async def on_timeout(self) -> None:
-        if self.superseded or self.message is None:
-            return
-        self.disable_all()
-        try:
-            await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
-        except discord.HTTPException:
-            pass
-
-    async def swap(
-        self,
-        interaction: discord.Interaction,
-        *,
-        embed: discord.Embed | None = None,
-        view: discord.ui.View | None = None,
-    ) -> None:
-        """Replace this page (embed + view) in place."""
-        self.superseded = True
-        if isinstance(view, BaseView):
-            view.message = interaction.message
-        await interaction.response.edit_message(embed=themed(embed), view=view)
-
-
-# --- Confirm prompt ------------------------------------------------------------
-
-class ConfirmView(BaseView):
-    """Confirm / Cancel prompt. ``await view.wait()`` then read ``view.value``
-    (True = confirmed, False = cancelled, None = timed out)."""
-
-    def __init__(
-        self,
-        author: discord.Member | discord.User,
-        *,
-        confirm_label: str = "Confirm",
-        cancel_label: str = "Cancel",
-        timeout: float = 30.0,
-    ):
-        super().__init__(author_id=author.id, timeout=timeout)
-        self.author = author
-        self.value: bool | None = None
-        self._sending = False
-        self.confirm_button.label = confirm_label
-        self.cancel_button.label = cancel_label
-
-    async def _finish(self, interaction: discord.Interaction, value: bool) -> None:
-        self.value = value
-        self.disable_all()
-        await interaction.response.edit_message(view=self)
-        self.stop()
-
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
-    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._finish(interaction, True)
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._finish(interaction, False)
-
-    async def on_timeout(self) -> None:
-        self.value = None
-        await super().on_timeout()
-
 # --- Components V2: buttons inside the embed-style container -----------------
 
 def first_text(message: discord.Message | None) -> str:
@@ -217,8 +119,12 @@ def container_from_embed(
     embed: discord.Embed,
     *rows: discord.ui.Item,
     color: discord.Color | int | None = None,
+    image: str | None = None,
 ) -> discord.ui.Container:
+    """Turn an embed into a container. ``image`` (a URL or ``attachment://name``) is shown at the top."""
     container = discord.ui.Container(accent_colour=color or embed.color or EMBED_COLOR)
+    if image:
+        container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(image)))
 
     head: list[str] = []
     if embed.title:
@@ -263,6 +169,9 @@ def container_from_embed(
 
 
 class BaseLayout(discord.ui.LayoutView):
+    # Owner-only panels set this so other people pressing the controls get no reply at all.
+    silent_to_others = False
+
     def __init__(self, *, author_id: int | None = None, timeout: float | None = 180):
         super().__init__(timeout=timeout)
         self.author_id = author_id
@@ -271,8 +180,10 @@ class BaseLayout(discord.ui.LayoutView):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.author_id is not None and interaction.user.id != self.author_id:
+            if self.silent_to_others:
+                return False
             await interaction.response.send_message(
-                embed=warning_embed("Not your menu."),
+                embed=error_embed("Not your menu."),
                 ephemeral=True,
             )
             return False
