@@ -6,9 +6,9 @@ from typing import NamedTuple, Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
-import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import db
 
+from cogs.owner.utils import init_firebase
 from views.common_views import error_embed, first_text, make_embed, success_embed
 from views.embeds import handle_command_error, send_usage
 from views.grinder_views import BulkConfirmView, ConfigView
@@ -24,11 +24,7 @@ MODE_PARAMS_INFO = {
 }
 
 # --- FIREBASE SETUP ---
-if not firebase_admin._apps:
-    cred = credentials.Certificate("firebase_key.json")
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://versatile-kl-default-rtdb.firebaseio.com/'
-    })
+init_firebase()  # reads the database URL ("database_url") from firebase_key.json
 
 ref = db.reference("grinder")
 
@@ -577,7 +573,6 @@ def build_logs_embed(guild: discord.Guild, logs: dict) -> discord.Embed:
     entries = [
         ("🔔 Alerts", "alerts", "Captcha flags and warnings"),
         ("🎯 Autocatch", "autocatch", "Catch results"),
-        ("🔀 Switch", "switch", "Account switch notices"),
     ]
     for title, key, desc in entries:
         cid = logs.get(key)
