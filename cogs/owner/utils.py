@@ -1,9 +1,51 @@
 import asyncio
+import json
 import os
 
 from discord.ext import commands
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+FIREBASE_KEY_FILE = "firebase_key.json"
+
+
+def init_firebase(key_path: str = FIREBASE_KEY_FILE):
+    """Initializes the Firebase Admin SDK once and returns the database URL.
+
+    The Realtime Database URL is read from the service-account file itself, from the extra
+    field ``"database_url"`` (``"databaseURL"`` is accepted too), e.g.::
+
+        {
+          "type": "service_account",
+          "project_id": "...",
+          ...
+          "database_url": "https://<your-db-name>-default-rtdb.firebaseio.com/"
+        }
+
+    Raises FileNotFoundError / ValueError with a readable message when the file or the field is missing.
+    """
+    import firebase_admin
+    from firebase_admin import credentials
+
+    path = key_path if os.path.isabs(key_path) else os.path.join(os.getcwd(), key_path)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"'{key_path}' not found. Download your Firebase service account key and save it as '{key_path}'.")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ValueError(f"Could not read '{key_path}': {e}") from e
+
+    url = str(data.get("database_url") or data.get("databaseURL") or "").strip()
+    if not url:
+        raise ValueError(
+            f"'{key_path}' has no \"database_url\" field. Add your Realtime Database URL to it, e.g. "
+            '"database_url": "https://<your-db-name>-default-rtdb.firebaseio.com/"'
+        )
+
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(credentials.Certificate(path), {"databaseURL": url})
+    return url
 
 
 class OwnerCog(commands.Cog):
