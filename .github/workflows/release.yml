@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next version
+        id: version
+        run: |
+          set -euo pipefail
+
+          LAST_TAG="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "tag=v1.0.0" >> "$GITHUB_OUTPUT"
+            echo "previous=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION="${LAST_TAG#v}"
+          MAJOR="${VERSION%%.*}"
+          REST="${VERSION#*.}"
+          MINOR="${REST%%.*}"
+          PATCH="${REST#*.}"
+
+          MESSAGES="$(git log --format=%B "${LAST_TAG}..HEAD")"
+
+          if printf '%s' "$MESSAGES" | grep -qi '#major'; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif printf '%s' "$MESSAGES" | grep -qi '#minor'; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+
+          echo "tag=v${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_OUTPUT"
+          echo "previous=${LAST_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_TAG: ${{ steps.version.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.version.outputs.previous }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            gh release create "$NEW_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$NEW_TAG" \
+              --generate-notes \
+              --notes-start-tag "$PREVIOUS_TAG"
+          else
+            gh release create "$NEW_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$NEW_TAG" \
+              --generate-notes
+          fi
