@@ -3,15 +3,13 @@ import re
 import time
 import uuid
 
-import firebase_admin
 from discord import app_commands
 from discord.ext import commands
-from firebase_admin import credentials, db
+from firebase_admin import db
 
-from cogs.owner.utils import OwnerCog, Progress, run_cmd, safe_edit, safe_send
+from cogs.owner.utils import OwnerCog, Progress, init_firebase, run_cmd, safe_edit, safe_send
 
 # --- GRINDER REMOTE UPDATE (Firebase signal) ---
-FIREBASE_DB_URL = "https://versatile-kl-default-rtdb.firebaseio.com/"
 GRINDER_UPDATE_PATH = "grinder_update"   # request + status live here (kept out of `grinder` on purpose)
 GRINDER_ACK_TIMEOUT = 20                 # seconds to wait for the JS engine to pick the signal up
 GRINDER_TOTAL_TIMEOUT = 600              # hard cap for the whole update
@@ -29,10 +27,7 @@ def describe_source(remote_url: str, branch: str) -> str:
 
 
 def _grinder_update_ref():
-    if not firebase_admin._apps:
-        firebase_admin.initialize_app(
-            credentials.Certificate("firebase_key.json"), {"databaseURL": FIREBASE_DB_URL}
-        )
+    init_firebase()  # reads the database URL ("database_url") from firebase_key.json
     return db.reference(GRINDER_UPDATE_PATH)
 
 
