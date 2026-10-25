@@ -132,7 +132,7 @@ Use `.help <command>` in Discord for arguments, aliases and examples.
 - A [MongoDB](https://www.mongodb.com/) database (Atlas works fine)
 - A Discord bot token with the **Message Content** and **Server Members** privileged intents enabled
 - Optional: one or more [OpenRouter](https://openrouter.ai) API keys for the AI chatbot
-- Optional: a Firebase service account (only for the owner `grinder` / `pull grinder` features)
+- Optional: a Firebase service account key saved as `firebase_key.json` (only for the owner `grinder` / `pull grinder` features), see [Firebase key](#firebase-key-optional)
 
 ### Installation
 
@@ -187,7 +187,30 @@ Create a `config.json` next to `main.py`:
 | `AI_CHATBOT_KEY_ACCOUNTS` | – | Account label per key, so keys from one account share quota tracking |
 | `AI_CHATBOT_FALLBACK_MODELS` | – | Models to try when the main one fails |
 
-> Remove from `COGS` any cog you do not want. Note that the AI cog refuses to load without an OpenRouter key, and `grinder` needs `firebase_key.json`.
+> Remove from `COGS` any cog you do not want. Note that the AI cog refuses to load without an OpenRouter key, and `grinder` needs `firebase_key.json` (with a `database_url` field).
+
+### Firebase key (optional)
+
+The owner-only `grinder` and `pull grinder` commands talk to a Firebase Realtime Database. Download a service account key from the Firebase console (**Project settings → Service accounts → Generate new private key**), save it as `firebase_key.json` next to `main.py`, and add your database URL to it as an extra `database_url` field:
+
+```json
+{
+  "type": "service_account",
+  "project_id": "grinder-12345",
+  "private_key_id": "...",
+  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-xxxxx@grinder-12345.iam.gserviceaccount.com",
+  "client_id": "...",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "...",
+  "universe_domain": "googleapis.com",
+  "database_url": "https://grinder-12345-default-rtdb.firebaseio.com/"
+}
+```
+
+Never commit this file. See the [grinder engine](https://github.com/Kurtis-Lam/self-bot) for the full linking guide.
 
 ### Extra files used by the Pokétwo features
 
