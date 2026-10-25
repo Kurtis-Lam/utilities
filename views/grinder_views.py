@@ -249,7 +249,7 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
     )
     target = ui.TextInput(
         label="Target / Arguments / Channel IDs",
-        placeholder="spam: chid  •  autocatch: [guild/chid (default: this server)], pikachu, list.json",
+        placeholder="spam: chid  •  autocatch: [guild/chid (default: this server)], pikachu, list.json [--pingonly]",
         required=False,
     )
 
@@ -271,6 +271,11 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
             )
 
         raw_target = self.target.value.strip() if self.target.value else ""
+        raw_target, ping_only = config.extract_pingonly(raw_target)
+        if ping_only and mode_val != "autocatch":
+            return await interaction.response.send_message(
+                embed=error_embed("`--pingonly` only works with `autocatch` mode."), ephemeral=True
+            )
 
         # spam needs a channel id (chid)
         if mode_val == "spam" and not raw_target.isdigit():
@@ -307,13 +312,16 @@ class AddConfigModal(ui.Modal, title="Add Configuration"):
         added_count = 0
         for idx in acc_indices:
             for tgt in targets_list:
-                configs.append({
+                new_cfg = {
                     "mode": mode_val,
                     "accIndex": idx,
                     "target": tgt.strip(),
                     "paused": False,
                     "pauseUntil": None,
-                })
+                }
+                if ping_only:
+                    new_cfg["pingOnly"] = True
+                configs.append(new_cfg)
                 added_count += 1
 
         await config.save_guild_configs(guild_id, configs)
