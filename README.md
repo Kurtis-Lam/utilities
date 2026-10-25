@@ -96,30 +96,189 @@ Every command works both as a **prefix command** (default prefix `.`) and as a *
 - `pull` – pull the latest code from git and restart (`force`, `hard` options), with live progress.
 - `reload`, `sync` (slash commands), `restart`.
 - `stats` – bot, process and host system statistics. `gitstats` – current branch and commit.
-- `grinder` – configuration manager for an external grinder engine (backed by Firebase).
+- `pause` / `resume` – pause or resume configs of the external grinder engine.
+
+> 🔐 The `.grinder` command and `.pull grinder` are **for owners only**. Owners are the user IDs listed in `OWNER_IDS` in `config.json`; nobody else can run them. They belong to the external self-bot engine, so they are not documented here. To integrate the self-bot, see **https://github.com/Kurtis-Lam/self-bot**.
 
 ---
 
-## 📋 Command overview
+## 📋 Command reference
+
+Every command works as `.command` (prefix) and `/command` (slash). Use `.help <command>` in Discord for arguments and examples. Commands marked **Admin** need the *Administrator* permission, **Mod** commands need the matching moderation permission, and **Owner** commands can only be used by the user IDs in `OWNER_IDS` (`config.json`).
 
 <details>
-<summary><b>Click to expand the full command list</b></summary>
+<summary><b>General &amp; utilities</b></summary>
 
-| Category | Commands |
-| --- | --- |
-| **General** | `help`, `ping` |
-| **Utilities** | `remind` (`rm`, `remindme`), `reminders`, `timer`, `roll`, `ai` (`config`, `enable`, `disable`, `add`, `remove`, `reset`, `memory`, `info`) |
-| **Moderation** | `kick`, `ban`, `mute`, `unmute`, `muterole`, `nick`, `warn`, `warns`, `kicked`, `banned`, `mutelogs`, `whois` (`userinfo`, `ui`), `membercount` (`mc`), `automod` (`am`: `set`, `action`, `warn`, `disable`) |
-| **Messages** | `messages` (`msgcount`), `timediff` (`td`), `forward` (`fwd`), `snipe`, `purge`, `pin`, `unpin`, `pins`, `echo`, `stick`, `unstick`, `sticks` |
-| **Server** | `createchannel`, `deletechannel`, `renamechannel`, `movechannel`, `lockchannel`, `unlockchannel`, `hidechannel`, `unhidechannel`, `nuke`, `createcategory`, `deletecategory`, `renamecategory`, `lockcategory`, `unlockcategory`, `hidecategory`, `unhidecategory`, `giverole`, `removerole`, `createrole`, `deleterole`, `setperms` |
-| **Community** | `verify`, `tickets`, `giveaway` (`gw`), `invites` (`inv`), `joins`, `gtn` |
-| **Pokétwo – pings** | `sh`, `cl` (`add`, `remove`, `clear`, `list`), `reserves` (`list`, `all`, `add`, `remove`, `clear`), `tp`, `rp`, `afk` |
-| **Pokétwo – locks** | `lock`, `unlock`, `unlockallchannels`, `lockstats`, `autolockdm` |
-| **Pokétwo – config** | `config autolock`, `config timer`, `set` (`lockdelay`, `locktime`, `whitelist`, `restrictunlockers`, `use-standard`, `shtimer`, `cltimer`, `rptimer`, `tptimer`, `rarerole`, `regionalrole`, `gigantamaxrole`, `paradoxrole`, `eeveelutionsrole`), `toggle` (`naming`, `lockdelay`, `locktime`, `restrictunlockers`, `timer`, `shtimer`, `cltimer`, `rptimer`, `tptimer`), `settings`, `channelsettings`, `serversettings`, `starboard` |
-| **Pokétwo – tools** | `rec`, `dex`, `extract`, `catchtime`, `catches`, `catchleaderboard`, `catcheslink` |
-| **Owner** | `pull`, `reload`, `sync`, `restart`, `stats`, `gitstats`, `grinder` |
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `help [command]` | | Shows all commands, or details of one (`.help <cog>`, `.help <group> <sub>`). |
+| `ping` | | Bot latency. |
+| `remind <time> <text>` | `rm`, `remindme` | Sets a reminder. |
+| `reminders` | | Lists your reminders. |
+| `reminders remove <id>` | `r` | Removes a reminder by ID. |
+| `timer <time> [name]` | | Starts a timer and pings you when it ends. |
+| `roll [min] [max]` | | Random number (1-100 by default). |
+| `invites [member]` | `inv` | Your invite statistics (admins can look up others). |
+| `gtn <lower> <upper> <prize>` | | **Admin.** Starts a Guess the Number game. |
+| `gtn hint` / `gtn end` | | **Admin.** Narrows the range / ends the game. |
 
-Use `.help <command>` in Discord for arguments, aliases and examples.
+</details>
+
+<details>
+<summary><b>AI chatbot</b></summary>
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `ai` | | Opens the chatbot overview. |
+| `ai config` | | **Admin.** Chatbot channel settings. |
+| `ai enable` / `ai disable` | | **Admin.** Enable / disable the chatbot in the current channel. |
+| `ai add` / `ai remove` | `a` / `r` | **Admin.** Add / remove chatbot channels. |
+| `ai reset` | | Clear your memory in the channel. |
+| `ai memory` | | Show what the bot remembers. |
+| `ai info` | | **Owner.** Model status and daily usage. |
+
+</details>
+
+<details>
+<summary><b>Moderation</b></summary>
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `kick`, `ban` | | **Mod.** Remove a member. |
+| `mute <member> [time] [reason]`, `unmute` | | **Mod.** Timed mute using the mute role. |
+| `muterole [role]` | | **Admin.** Show or set the mute role. |
+| `nick <member> [name]` | | **Mod.** Change or reset a nickname. |
+| `warn <member> [reason]` | | **Mod.** Warn a member. `warn remove <id>` (`r`) removes a warn. |
+| `warns [member]` | | Show warnings. `warns remove <id>` (`r`) removes one. |
+| `kicked`, `banned`, `mutelogs` | | History lookups for a user. |
+| `whois [member]` | `userinfo`, `ui` | Member info. |
+| `membercount` | `mc` | Server member count. |
+| `automod set <channel> <kick\|ban>` | `am` | **Admin.** Sets the trap channel and punishment. |
+| `automod action <kick\|ban>` | | **Admin.** Changes the punishment. |
+| `automod warn` | `warning` | **Admin.** Posts the warning message in the trap channel. |
+| `automod disable` | `off` | **Admin.** Turns the trap channel off. |
+
+</details>
+
+<details>
+<summary><b>Messages</b></summary>
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `messages [member]` | `msgcount` | Message counts. |
+| `timediff <msg1> <msg2>` | `tdiff`, `td` | Time between two messages. |
+| `forward` | `fwd` | Forward a message to a channel. |
+| `snipe` | | Last deleted messages (up to 10). |
+| `purge <amount> [user\|*]` | | Bulk delete messages. |
+| `pin`, `unpin`, `pins` | | Pin / unpin a message, view pins (channel or server). |
+| `echo <text>` | | Repeats a message. |
+| `stick`, `unstick` | | Keep a message at the bottom of a channel / remove it. |
+| `sticks` | | View sticky messages. `sticks remove` (`r`) removes one. |
+
+</details>
+
+<details>
+<summary><b>Server management</b></summary>
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `createchannel` / `deletechannel` / `renamechannel` / `movechannel` | `cch` / `dch` / `rch` / `movech` | Manage text channels. |
+| `lockchannel` / `unlockchannel` / `hidechannel` / `unhidechannel` | `lch` / `uch` / `hch` / `uhch` | Channel permissions for a user or role. |
+| `nuke` | | Clone and replace a channel. |
+| `createcategory` / `deletecategory` / `renamecategory` | `ccat` / `dcat` / `rcat` | Manage categories. |
+| `lockcategory` / `unlockcategory` / `hidecategory` / `unhidecategory` | `lcat` / `ucat` / `hcat` / `uhcat` | Category permissions. |
+| `giverole` / `removerole` | `gr` / `rr` | Give or remove a role (optionally time-limited). |
+| `createrole` / `deleterole` | `cr` / `dr` | Create or delete a role. |
+| `setperms` | | Edit role permissions. |
+
+</details>
+
+<details>
+<summary><b>Community</b></summary>
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `verify` | `verification` | **Admin.** CAPTCHA verification panel. |
+| `tickets` | `ticket`, `ticketsetup` | **Admin.** Configure and publish support ticket panels. |
+| `joins` | | **Admin.** Welcome messages, greet pings and autoroles. |
+| `giveaway create` | `gw`, `start` | Create a giveaway. |
+| `giveaway end` / `list` | | End a giveaway / list giveaways. |
+| `giveaway participants` | `entries` | Show entrants. |
+| `giveaway reroll` | | Pick a new winner. |
+
+</details>
+
+<details>
+<summary><b>Pokétwo – pings &amp; locks</b></summary>
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `sh [pokemon]` | | View or set your Shiny Hunt target. |
+| `cl add` / `remove` / `clear` / `list` | `a` / `r` / `c`, `reset` / `l` | Manage your collection list. |
+| `reserves list` | `l` | Show your reserves. |
+| `reserves all` / `add` / `remove` / `clear` | `a` / `r` / `c` | **Admin.** Manage reserves for members. |
+| `tp` | | View or toggle your Type Pings. |
+| `rp` | | View or toggle your Region Pings. |
+| `afk` | `setafk` | Toggle AFK and choose which pings you still get. |
+| `lock` / `unlock` | `l` / `u` | Lock / unlock the current channel. |
+| `unlockallchannels` | `uac` | Unlock every channel. |
+| `lockstats` | `ls` | **Admin.** Overview of locked channels. |
+| `autolockdm` | `aldm` | Your autolock DM settings. |
+
+</details>
+
+<details>
+<summary><b>Pokétwo – configuration</b></summary>
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `config autolock` | `c al` | **Admin.** Configure autolocks. |
+| `config timer` | `c t` | **Admin.** Configure catch timers. |
+| `spawns` | `s` | **Admin.** Edit rare, regional and user autolocks. |
+| `set lockdelay` / `locktime` | `ld` / `lt` | Lock delay and lock time. |
+| `set whitelist` | `wl` | Whitelist channels or categories. |
+| `set restrictunlockers` | `ru` | Only pinged users may unlock. |
+| `set use-standard` | `standard` | Copy the standard profile onto a lock. |
+| `set shtimer` / `cltimer` / `rptimer` / `tptimer` | | Timer settings per ping type. |
+| `set rarerole` / `regionalrole` / `gigantamaxrole` / `paradoxrole` / `eeveelutionsrole` | | Roles pinged for each spawn category. |
+| `toggle naming` | | Pokémon naming per channel or server. |
+| `toggle lockdelay` / `locktime` / `restrictunlockers` | | Switch these lock options on or off. |
+| `toggle timer` / `shtimer` / `cltimer` / `rptimer` / `tptimer` | | Switch catch timers on or off. |
+| `settings`, `channelsettings`, `serversettings` | `chsettings`; `svsettings`, `ssettings` | Show current settings. |
+| `starboard` | | View or set the notable-catch channel. `starboard reset` removes it. |
+
+</details>
+
+<details>
+<summary><b>Pokétwo – tools &amp; statistics</b></summary>
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `rec` | `recognize` | Identify a Pokémon from an image. |
+| `dex <name or number>` | `pokedex` | Pokédex lookup. |
+| `extract` | `ex` | Extract names/numbers/IDs from a Pokétwo embed. |
+| `catchtime <object id>` | `ct` | Creation time hidden in a MongoDB ObjectId. |
+| `catches [member]` | | Your catch stats. |
+| `catchleaderboard [timeframe]` | `clb` | Server leaderboard (daily, weekly, monthly, alltime). |
+| `catcheslink <guild 1> <guild 2>` | | **Admin.** Link two servers so their catches merge. |
+
+</details>
+
+<details>
+<summary><b>Owner</b></summary>
+
+| Command | Aliases | Description |
+| --- | --- | --- |
+| `pull [force] [hard]` | | Pull the latest code from git and restart this bot. |
+| `reload [cog]` | | Reload one cog or all cogs. |
+| `sync` | | Sync slash commands with Discord. |
+| `restart` | | Restart the bot. |
+| `stats` | `botinfo`, `system`, `info` | Bot, process and host statistics. |
+| `gitstats` | | Current git branch and commit. |
+| `pause [numbers] [time]` | `p` | Pause grinder configs (all, or the numbers you list). |
+| `resume [numbers] [time]` | `r` | Resume grinder configs (all, or the numbers you list). |
+
+`.grinder` and `.pull grinder` are also owner-only commands. See the note under [Owner tools](#-owner-tools).
 
 </details>
 
@@ -132,7 +291,6 @@ Use `.help <command>` in Discord for arguments, aliases and examples.
 - A [MongoDB](https://www.mongodb.com/) database (Atlas works fine)
 - A Discord bot token with the **Message Content** and **Server Members** privileged intents enabled
 - Optional: one or more [OpenRouter](https://openrouter.ai) API keys for the AI chatbot
-- Optional: a Firebase service account key saved as `firebase_key.json` (only for the owner `grinder` / `pull grinder` features), see [Firebase key](#firebase-key-optional)
 
 ### Installation
 
@@ -169,7 +327,7 @@ Create a `config.json` next to `main.py`:
     "poketwo_management": ["set", "toggle", "settings"],
     "poketwo_helper": ["afk", "autolock", "autolockdm", "catches", "lockunlock", "pings", "recognizer", "starboard"],
     "poketwo_utils": ["catchtime", "dex", "extract", "hintsolver"],
-    "owner": ["utils", "gitstats", "grinder", "pull", "reload", "restart", "stats"]
+    "owner": ["utils", "gitstats", "pull", "reload", "restart", "stats"]
   }
 }
 ```
@@ -187,30 +345,11 @@ Create a `config.json` next to `main.py`:
 | `AI_CHATBOT_KEY_ACCOUNTS` | – | Account label per key, so keys from one account share quota tracking |
 | `AI_CHATBOT_FALLBACK_MODELS` | – | Models to try when the main one fails |
 
-> Remove from `COGS` any cog you do not want. Note that the AI cog refuses to load without an OpenRouter key, and `grinder` needs `firebase_key.json` (with a `database_url` field).
+> Remove from `COGS` any cog you do not want. Note that the AI cog refuses to load without an OpenRouter key.
 
-### Firebase key (optional)
+### Self-bot integration (optional)
 
-The owner-only `grinder` and `pull grinder` commands talk to a Firebase Realtime Database. Download a service account key from the Firebase console (**Project settings → Service accounts → Generate new private key**), save it as `firebase_key.json` next to `main.py`, and add your database URL to it as an extra `database_url` field:
-
-```json
-{
-  "type": "service_account",
-  "project_id": "grinder-12345",
-  "private_key_id": "...",
-  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
-  "client_email": "firebase-adminsdk-xxxxx@grinder-12345.iam.gserviceaccount.com",
-  "client_id": "...",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "...",
-  "universe_domain": "googleapis.com",
-  "database_url": "https://grinder-12345-default-rtdb.firebaseio.com/"
-}
-```
-
-Never commit this file. See the [grinder engine](https://github.com/Kurtis-Lam/self-bot) for the full linking guide.
+For self-bot integration (`.grinder`, `.pause`, `.resume`, `.pull grinder`), see **https://github.com/Kurtis-Lam/self-bot**.
 
 ### Extra files used by the Pokétwo features
 
@@ -246,7 +385,7 @@ cogs/
 ├── poketwo_config/      autolock / timer configuration menus
 ├── poketwo_management/  set, toggle, settings commands
 ├── poketwo_utils/       dex, hint solver, extract, catchtime
-└── owner/               pull, reload, restart, stats, gitstats, grinder
+└── owner/               pull, reload, restart, stats, gitstats
 views/                   Buttons, menus, embeds and Components V2 layouts for every cog
 ```
 
