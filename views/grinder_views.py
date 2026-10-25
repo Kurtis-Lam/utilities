@@ -966,14 +966,12 @@ class GrinderLogsView(EmbedLayout):
         self.alerts_btn.callback = self.set_alerts
         self.autocatch_btn = ui.Button(label="🎯 Set Autocatch", style=discord.ButtonStyle.blurple, custom_id="log_autocatch")
         self.autocatch_btn.callback = self.set_autocatch
-        self.switch_btn = ui.Button(label="🔀 Set Switch", style=discord.ButtonStyle.blurple, custom_id="log_switch")
-        self.switch_btn.callback = self.set_switch
         self.render()
 
     def rows(self):
         return [
             [self.nav_configs_btn, self.nav_accounts_btn],
-            [self.alerts_btn, self.autocatch_btn, self.switch_btn],
+            [self.alerts_btn, self.autocatch_btn],
         ]
 
     async def nav_configs(self, interaction: discord.Interaction):
@@ -994,6 +992,3 @@ class GrinderLogsView(EmbedLayout):
 
     async def set_autocatch(self, interaction: discord.Interaction):
         await interaction.response.send_modal(SetLogModal("autocatch"))
-
-    async def set_switch(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(SetLogModal("switch"))
