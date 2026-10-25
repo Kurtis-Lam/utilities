@@ -17,7 +17,7 @@ from views.grinder_views import BulkConfirmView, ConfigView
 VALID_MODES = ["autocatch", "spam", "dotcatch", "commaedit"]
 
 MODE_PARAMS_INFO = {
-    "autocatch": {"required": ["Account Index"], "optional": ["Target ID"]},
+    "autocatch": {"required": ["Account Index"], "optional": ["Target ID", "--pingonly"]},
     "spam": {"required": ["Account Index", "Channel ID"], "optional": []},
     "dotcatch": {"required": ["Account Index", "Channel ID"], "optional": []},
     "commaedit": {"required": ["Account Index", "Channel ID"], "optional": []},
@@ -201,6 +201,21 @@ def format_id_with_name(id_str: str, guild: Optional[discord.Guild] = None) -> s
     if name:
         return f"{raw_id} [{name}]"
     return raw_id
+
+
+# --- HELPER: EXTRACT THE --pingonly FLAG ---
+_PINGONLY_RE = re.compile(r"(?<![^\s,])--ping-?only(?![^\s,])", re.IGNORECASE)
+
+
+def extract_pingonly(raw: str) -> tuple[str, bool]:
+    """Removes the --pingonly flag from an argument string. Returns (cleaned_args, flag_present)."""
+    raw = raw or ""
+    if not _PINGONLY_RE.search(raw):
+        return raw.strip(), False
+    cleaned = _PINGONLY_RE.sub(" ", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*,\s*(,\s*)*", ", ", cleaned).strip(" ,")
+    return cleaned, True
 
 
 # --- HELPER: SPLIT AN AUTOCATCH-STYLE TARGET BY CONTENT ---
@@ -630,6 +645,8 @@ async def build_mode_configs_embed(guild: discord.Guild, configs: list, accounts
 
             acc_str = f" (Acc #{acc_idx})" if acc_idx > 0 else " (Removed Acc)"
             line = f"`[#{idx}]` {user_mention}{display_name}{acc_str}"
+            if mode == "autocatch" and cfg.get("pingOnly") is True:
+                line += " | 🔔 **Ping Only**"
 
             paused = cfg.get("paused", False)
             pause_until = cfg.get("pauseUntil")
@@ -854,7 +871,7 @@ async def grindconfig(ctx: commands.Context):
 @app_commands.describe(
     mode="Mode to add (autocatch, spam, dotcatch or commaedit).",
     acc_idx="Account number to use (1-based).",
-    args="Mode arguments separated by commas (channel ID, pokemons, datafile.json...).",
+    args="Mode arguments separated by commas (channel ID, pokemons, datafile.json...). autocatch: add --pingonly.",
 )
 @app_commands.choices(mode=[app_commands.Choice(name=m, value=m) for m in VALID_MODES])
 @commands.is_owner()
@@ -863,9 +880,9 @@ async def grindconfig_add(
     mode: str = commands.parameter(description="Mode name (autocatch, spam, dotcatch, commaedit)."),
     acc_idx: int = commands.parameter(description="Account index (1-based)."),
     *,
-    args: str = commands.parameter(default="", description="Arguments separated by commas.")
+    args: str = commands.parameter(default="", description="Arguments separated by commas. autocatch also accepts --pingonly.")
 ):
-    """Add a mode configuration: .grinder add {mode} {account index} {args separated by commas}"""
+    """Add a mode configuration: .grinder add {mode} {account index} {args separated by commas} [--pingonly]"""
     if not ctx.guild:
         await ctx.reply(embed=error_embed("Server only."), mention_author=False)
         return
@@ -891,6 +908,10 @@ async def grindconfig_add(
         return
 
     token = accounts[acc_idx - 1]
+    args, ping_only = extract_pingonly(args)
+    if ping_only and mode_lower != "autocatch":
+        await ctx.reply(embed=error_embed("`--pingonly` only works with `autocatch` mode."), mention_author=False)
+        return
     arg_list = [a.strip() for a in args.split(",") if a.strip()]
 
     # Validate mode-specific required arguments
@@ -919,6 +940,8 @@ async def grindconfig_add(
         "target": target_str,
         "paused": False
     }
+    if ping_only:
+        new_cfg["pingOnly"] = True
 
     configs.append(new_cfg)
     await save_guild_configs(guild_id, configs)
@@ -930,6 +953,8 @@ async def grindconfig_add(
     desc = f"Added config `[#{new_index}]` for {user_mention} (Acc #{acc_idx})\n**Mode:** `{mode_lower}`"
     if target_str:
         desc += f"\n**Target/Args:** `{target_str}`"
+    if ping_only:
+        desc += "\n**Ping Only:** `True`"
 
     await ctx.reply(embed=success_embed(desc), mention_author=False)
 
