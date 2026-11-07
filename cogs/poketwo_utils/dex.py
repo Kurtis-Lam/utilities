@@ -1,4 +1,6 @@
+import asyncio
 import io
+from collections import OrderedDict
 import re
 import unicodedata
 from typing import Optional
@@ -152,6 +154,9 @@ class Dex(commands.Cog):
         self.bot = bot
         self.pokedex = {}
         self.alt_index = {}
+        self._lookup = {}
+        self._numbers = {}
+        self._img_cache = OrderedDict()
 
     async def cog_command_error(self, ctx: commands.Context, error):
         await handle_command_error(ctx, error)
@@ -189,10 +194,45 @@ class Dex(commands.Cog):
             else:
                 self.pokedex = {}
             self.alt_index = build_alt_index(self.pokedex)
+            self._build_lookup()
         except Exception as e:
             print(f"❌ Failed to load Pokédex from MongoDB: {e}")
             self.pokedex = {}
             self.alt_index = {}
+            self._lookup = {}
+
+    def _build_lookup(self):
+        lookup = {}
+        numbers = {}
+        for name, info in self.pokedex.items():
+            lookup.setdefault(name.lower(), name)
+            lookup.setdefault(normalize_key(name), name)
+            number = str(info.get("pokedex_number", "")).lstrip("#")
+            if number:
+                numbers.setdefault(number, name)
+        self._lookup = lookup
+        self._numbers = numbers
+
+    async def _fetch_image(self, keys: list) -> Optional[tuple]:
+        """Returns (key, bytes) for the first key (in priority order) that has an image."""
+        if not keys:
+            return None
+        for key in keys:
+            cached = self._img_cache.get(key)
+            if cached is not None:
+                self._img_cache.move_to_end(key)
+                return key, cached
+        found = {}
+        async for doc in self.img_collection.find({"_id": {"$in": keys}}):
+            if "image" in doc:
+                found[doc["_id"]] = bytes(doc["image"])
+        for key in keys:
+            if key in found:
+                self._img_cache[key] = found[key]
+                while len(self._img_cache) > 48:
+                    self._img_cache.popitem(last=False)
+                return key, found[key]
+        return None
 
     @commands.hybrid_command(
         name="dex",
@@ -211,20 +251,10 @@ class Dex(commands.Cog):
         if not self.pokedex:
             return await ctx.reply(embed=warn_embed("Pokédex not loaded yet."), mention_author=False)
 
-        matched_name = None
-        data = None
-
-        for name, info in self.pokedex.items():
-            if name.lower() == query_clean or normalize_key(name) == normalize_key(query_clean):
-                matched_name = name
-                data = info
-                break
-
-            dex_num = str(info.get("pokedex_number", "")).lstrip("#")
-            if dex_num == query_clean:
-                matched_name = name
-                data = info
-                break
+        matched_name = self._lookup.get(query_clean) or self._lookup.get(normalize_key(query_clean))
+        if matched_name is None:
+            matched_name = self._numbers.get(query_clean)
+        data = self.pokedex.get(matched_name) if matched_name else None
 
         if not data:
             for key in name_keys(query.strip().lstrip("#")):
@@ -256,23 +286,19 @@ class Dex(commands.Cog):
         if normalize_key(matched_name) == "missingno":
             img_lookup_keys.insert(0, "missingno")
 
-        img_doc = None
-        for key in img_lookup_keys:
-            img_doc = await self.img_collection.find_one({"_id": key})
-            if img_doc and "image" in img_doc:
-                break
+        normal_result, shiny_img = await asyncio.gather(
+            self._fetch_image(img_lookup_keys),
+            self._load_shiny_image(matched_name),
+        )
 
         file = None
         normal_img = None
 
-        if img_doc and "image" in img_doc:
-            image_bytes = img_doc["image"]
+        if normal_result:
+            image_bytes = normal_result[1]
             filename = f"{normalize_key(matched_name)}.png"
             normal_img = (filename, image_bytes)
-
-            image_stream = io.BytesIO(image_bytes)
-            file = discord.File(fp=image_stream, filename=filename)
-
+            file = discord.File(fp=io.BytesIO(image_bytes), filename=filename)
             embed.set_thumbnail(url=f"attachment://{filename}")
 
         # 1. Types (safely handles null / None)
@@ -359,7 +385,6 @@ class Dex(commands.Cog):
         )
 
         # Shiny image (pokeimgs doc "shiny <name>") -> sparkles toggle button
-        shiny_img = await self._load_shiny_image(matched_name)
         view = None
         if shiny_img:
             view = ShinyView(ctx.author.id, embed, normal_img, shiny_img)
@@ -374,11 +399,10 @@ class Dex(commands.Cog):
     async def _load_shiny_image(self, matched_name: str) -> Optional[tuple]:
         """Returns (filename, bytes) for the shiny sprite from pokeimgs ("shiny <name>"), or None."""
         keys = [f"shiny {key}" for key in image_ids(matched_name)]
-        for key in keys:
-            doc = await self.img_collection.find_one({"_id": key})
-            if doc and "image" in doc:
-                filename = f"shiny_{normalize_key(matched_name).replace(' ', '_')}.png"
-                return (filename, bytes(doc["image"]))
+        result = await self._fetch_image(keys)
+        if result:
+            filename = f"shiny_{normalize_key(matched_name).replace(' ', '_')}.png"
+            return (filename, result[1])
         return None
 
 
