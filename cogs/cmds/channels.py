@@ -9,11 +9,21 @@ from discord.ext import commands
 from views.common_views import confirm, confirm_and_run
 from views.embeds import handle_common_error, send_usage
 from views.loading import loading
-from views.prompts import ask, is_skip, one_line
+from views.prompts import ask, exact_category, is_skip, normalize_name, one_line, raw_args, split_name_and_target
 
-def _normalize(text: str) -> str:
-    """Lower-case and treat '-', '_' and repeated spaces as one space ("staff-area" == "Staff  Area")."""
-    return " ".join(re.sub(r"[-_]+", " ", text).lower().split())
+_normalize = normalize_name
+
+_PREACTIONS = {"prelock", "prehide", "both"}
+_CHANNEL_REF = re.compile(r"<#(\d+)>|(\d{15,25})")
+
+
+def _text_channel(guild: discord.Guild, text: str):
+    """A text channel by <#mention> or ID (None when the text isn't one)."""
+    match = _CHANNEL_REF.fullmatch(text.strip())
+    if not match:
+        return None
+    channel = guild.get_channel(int(match.group(1) or match.group(2)))
+    return channel if isinstance(channel, discord.TextChannel) else None
 
 
 def find_category(guild: discord.Guild, query: str):
@@ -41,6 +51,12 @@ def find_category(guild: discord.Guild, query: str):
         if matches:
             return None, matches
     return None, []
+
+
+async def _update_overwrite(channel, target, **changes):
+    overwrite = channel.overwrites_for(target)
+    overwrite.update(**changes)
+    await channel.set_permissions(target, overwrite=None if overwrite.is_empty() else overwrite)
 
 
 class Channels(commands.Cog):
@@ -78,17 +94,24 @@ class Channels(commands.Cog):
         prehide = False
 
         if ctx.interaction is None:
-            content = ctx.message.content.lower()
+            # Prefix command: read the raw text so the name can contain spaces. The name ends
+            # where an existing category (mention / ID / exact name) begins.
+            args = raw_args(ctx)
+            prelock = bool(re.search(r"(?i)--prelock", args))
+            prehide = bool(re.search(r"(?i)--prehide", args))
+            args = re.sub(r"(?i)--(prelock|prehide)", "", args).strip()
 
-            # Check and parse flags safely from the raw message content for prefix commands
-            if "--prelock" in content:
-                prelock = True
-            if "--prehide" in content:
-                prehide = True
+            words = args.split()
+            if len(words) > 1 and words[-1].lower() in _PREACTIONS:
+                choice = words.pop().lower()
+                prelock = prelock or choice in ("prelock", "both")
+                prehide = prehide or choice in ("prehide", "both")
+                args = " ".join(words)
 
-            # Remove flags from the parsed name in case they were captured in quotes or text
-            name = re.sub(r'(?i)--prelock', '', name or "").strip()
-            name = re.sub(r'(?i)--prehide', '', name).strip()
+            name, found, unresolved = split_name_and_target(args, lambda q: exact_category(ctx.guild, q))
+            if unresolved:
+                return await ctx.reply(one_line(f"❌ Couldn't find the category `{unresolved}`. Cancelled."), mention_author=False)
+            category = found
         else:
             name = (name or "").strip()
             if preaction in ("prelock", "both"):
@@ -230,6 +253,13 @@ class Channels(commands.Cog):
     ):
         target_channel = channel or ctx.channel
 
+        if ctx.interaction is None:
+            # Prefix command: the new name may contain spaces; it ends where a channel mention / ID begins.
+            new_name, found, unresolved = split_name_and_target(raw_args(ctx), lambda q: _text_channel(ctx.guild, q))
+            if unresolved:
+                return await ctx.reply(one_line(f"❌ Couldn't find the channel `{unresolved}`. Cancelled."), mention_author=False)
+            target_channel = found or ctx.channel
+
         # No name given -> ask the questions one by one (30 seconds each)
         if not new_name:
             reply = await ask(
@@ -328,7 +358,7 @@ class Channels(commands.Cog):
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
-        await target_channel.set_permissions(role_or_member, send_messages=False)
+        await _update_overwrite(target_channel, role_or_member, send_messages=False)
         
         embed = discord.Embed(
             description=f"🔒 {target_channel.mention} has been locked for {role_or_member.mention}.",
@@ -350,7 +380,7 @@ class Channels(commands.Cog):
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
-        await target_channel.set_permissions(role_or_member, send_messages=True)
+        await _update_overwrite(target_channel, role_or_member, send_messages=None)
         
         embed = discord.Embed(
             description=f"🔓 {target_channel.mention} has been unlocked for {role_or_member.mention}.",
@@ -372,7 +402,7 @@ class Channels(commands.Cog):
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
-        await target_channel.set_permissions(role_or_member, view_channel=False)
+        await _update_overwrite(target_channel, role_or_member, view_channel=False)
         
         embed = discord.Embed(
             description=f"🙈 {target_channel.mention} is now hidden from {role_or_member.mention}.",
@@ -394,7 +424,7 @@ class Channels(commands.Cog):
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
-        await target_channel.set_permissions(role_or_member, view_channel=True)
+        await _update_overwrite(target_channel, role_or_member, view_channel=None)
         
         embed = discord.Embed(
             description=f"👁️ {target_channel.mention} is now visible to {role_or_member.mention}.",
