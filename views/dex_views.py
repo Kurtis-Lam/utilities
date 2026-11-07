@@ -24,7 +24,7 @@ class ShinyView(BaseLayout):
         current = self.shiny if self.showing_shiny else self.normal
         image = f"attachment://{current[0]}" if current else None
         self.add_item(
-            container_from_embed(self.embed, discord.ui.ActionRow(self.button), image=image)
+            container_from_embed(self.embed, discord.ui.ActionRow(self.button), thumbnail=image)
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
