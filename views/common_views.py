@@ -120,8 +120,10 @@ def container_from_embed(
     *rows: discord.ui.Item,
     color: discord.Color | int | None = None,
     image: str | None = None,
+    thumbnail: str | None = None,
 ) -> discord.ui.Container:
-    """Turn an embed into a container. ``image`` (a URL or ``attachment://name``) is shown at the top."""
+    """Turn an embed into a container. ``image`` (a URL or ``attachment://name``) is shown at the top;
+    ``thumbnail`` is a small picture shown at the top right next to the text."""
     container = discord.ui.Container(accent_colour=color or embed.color or EMBED_COLOR)
     if image:
         container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(image)))
@@ -159,8 +161,16 @@ def container_from_embed(
     if not texts:
         texts.append("\u200b")
 
-    for text in texts:
-        container.add_item(discord.ui.TextDisplay(text))
+    if thumbnail and len(texts) <= 3:
+        container.add_item(
+            discord.ui.Section(
+                *(discord.ui.TextDisplay(text) for text in texts),
+                accessory=discord.ui.Thumbnail(thumbnail),
+            )
+        )
+    else:
+        for text in texts:
+            container.add_item(discord.ui.TextDisplay(text))
     if rows:
         container.add_item(discord.ui.Separator())
         for row in rows:
