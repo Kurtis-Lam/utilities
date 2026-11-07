@@ -333,9 +333,15 @@ class Utilities(commands.Bot):
                 self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
                     MONGO_URI,
                     tlsCAFile=certifi.where(),
-                    maxPoolSize=2,
-                    minPoolSize=0,
+                    maxPoolSize=50,
+                    minPoolSize=5,
+                    maxIdleTimeMS=300000,
+                    connectTimeoutMS=5000,
+                    socketTimeoutMS=20000,
                     serverSelectionTimeoutMS=5000,
+                    retryWrites=True,
+                    retryReads=True,
+                    compressors="zlib",
                 )
             except Exception as e:
                 print(f"⚠️ MongoDB client could not be created: {e}")
@@ -344,6 +350,23 @@ class Utilities(commands.Bot):
 
         # Which cogs to load is defined in config.json ("COGS")
         self.cogs_dict = COGS
+
+    async def _prepare_mongo(self):
+        if self.mongo_client is None:
+            return
+        try:
+            await self.mongo_client.admin.command("ping")
+            db = self.mongo_client["utilities"]
+            await asyncio.gather(
+                db["locked_channels"].create_index("guild_id"),
+                db["locked_channels"].create_index("unlock_at", sparse=True),
+                db["catches"].create_index(
+                    [("group_id", 1), ("timeframe", 1), ("key", 1), ("count", -1)]
+                ),
+                db["catches"].create_index([("user_id", 1), ("group_id", 1)]),
+            )
+        except Exception as e:
+            print(f"⚠️ MongoDB warm-up/index setup failed: {e}")
 
     async def get_context(self, origin, *, cls=UtilitiesContext):
         return await super().get_context(origin, cls=cls)
@@ -457,6 +480,8 @@ class Utilities(commands.Bot):
             self.session = aiohttp.ClientSession(connector=connector)
         except Exception as e:
             print(f"⚠️ Could not create HTTP session: {e}")
+
+        await self._prepare_mongo()
 
         print("\n📦 Loading cogs...")
         for category, cogs in self.cogs_dict.items():
