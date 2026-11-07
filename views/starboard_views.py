@@ -170,7 +170,7 @@ def build_jump_layout(embed: discord.Embed, jump_url: str, image: Optional[str] 
         container_from_embed(
             embed,
             discord.ui.ActionRow(discord.ui.Button(label="Jump to Message", url=jump_url)),
-            image=image,
+            thumbnail=image,
         )
     )
     return view
