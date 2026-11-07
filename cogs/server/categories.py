@@ -13,6 +13,12 @@ from views.prompts import ask, exact_category, is_skip, one_line, raw_args, spli
 from views.loading import loading
 
 
+async def _update_overwrite(channel, target, **changes):
+    overwrite = channel.overwrites_for(target)
+    overwrite.update(**changes)
+    await channel.set_permissions(target, overwrite=None if overwrite.is_empty() else overwrite)
+
+
 class Categories(commands.Cog):
 
     def __init__(self, bot):
@@ -496,9 +502,7 @@ class Categories(commands.Cog):
             return await ctx.reply(embed=embed, mention_author=False)
 
         role_or_member = target or ctx.guild.default_role
-        await target_category.set_permissions(
-            role_or_member, send_messages=False, connect=False
-        )
+        await _update_overwrite(target_category, role_or_member, send_messages=False, connect=False)
 
         for channel in target_category.channels:
             await channel.edit(sync_permissions=True)
@@ -553,9 +557,7 @@ class Categories(commands.Cog):
             return await ctx.reply(embed=embed, mention_author=False)
 
         role_or_member = target or ctx.guild.default_role
-        await target_category.set_permissions(
-            role_or_member, send_messages=True, connect=True
-        )
+        await _update_overwrite(target_category, role_or_member, send_messages=None, connect=None)
 
         for channel in target_category.channels:
             await channel.edit(sync_permissions=True)
@@ -610,9 +612,7 @@ class Categories(commands.Cog):
             return await ctx.reply(embed=embed, mention_author=False)
 
         role_or_member = target or ctx.guild.default_role
-        await target_category.set_permissions(
-            role_or_member, view_channel=False
-        )
+        await _update_overwrite(target_category, role_or_member, view_channel=False)
 
         for channel in target_category.channels:
             await channel.edit(sync_permissions=True)
@@ -667,9 +667,7 @@ class Categories(commands.Cog):
             return await ctx.reply(embed=embed, mention_author=False)
 
         role_or_member = target or ctx.guild.default_role
-        await target_category.set_permissions(
-            role_or_member, view_channel=True
-        )
+        await _update_overwrite(target_category, role_or_member, view_channel=None)
 
         for channel in target_category.channels:
             await channel.edit(sync_permissions=True)
