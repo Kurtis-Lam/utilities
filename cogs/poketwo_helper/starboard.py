@@ -176,6 +176,19 @@ class Starboard(commands.Cog):
                 return None
         return channel
 
+    async def _first_image(self, keys: list[str]) -> Optional[bytes]:
+        """One query for every candidate id; returns the bytes of the best-priority match."""
+        if not keys:
+            return None
+        found = {}
+        async for doc in self.img_collection.find({"_id": {"$in": keys}}):
+            if "image" in doc:
+                found[doc["_id"]] = bytes(doc["image"])
+        for key in keys:
+            if key in found:
+                return found[key]
+        return None
+
     async def _get_shiny_image(self, names: list[str]) -> Optional[discord.File]:
         """Loads the shiny sprite from pokeimgs, stored under ids like "shiny pikachu"."""
         keys = []
@@ -184,11 +197,10 @@ class Starboard(commands.Cog):
                 if f"shiny {key}" not in keys:
                     keys.append(f"shiny {key}")
         try:
-            for key in keys:
-                doc = await self.img_collection.find_one({"_id": key})
-                if doc and "image" in doc:
-                    filename = "shiny_" + re.sub(r"\W+", "_", normalize_key(names[-1])) + ".png"
-                    return discord.File(fp=io.BytesIO(bytes(doc["image"])), filename=filename)
+            data = await self._first_image(keys)
+            if data:
+                filename = "shiny_" + re.sub(r"\W+", "_", normalize_key(names[-1])) + ".png"
+                return discord.File(fp=io.BytesIO(data), filename=filename)
         except Exception:
             log.exception("Starboard: shiny image lookup failed for %s", names)
         log.warning("Starboard: no shiny image for %s", names)
@@ -210,7 +222,6 @@ class Starboard(commands.Cog):
             shiny_file = await self._get_shiny_image(names)
             if shiny_file:
                 return shiny_file
-            # fall through to the normal image if no shiny image exists
 
         lookup_keys = []
         for name in names:
@@ -219,11 +230,10 @@ class Starboard(commands.Cog):
                     lookup_keys.append(key)
 
         try:
-            for key in lookup_keys:
-                doc = await self.img_collection.find_one({"_id": key})
-                if doc and "image" in doc:
-                    filename = re.sub(r"\W+", "_", normalize_key(names[-1])) + ".png"
-                    return discord.File(fp=io.BytesIO(doc["image"]), filename=filename)
+            data = await self._first_image(lookup_keys)
+            if data:
+                filename = re.sub(r"\W+", "_", normalize_key(names[-1])) + ".png"
+                return discord.File(fp=io.BytesIO(data), filename=filename)
         except Exception:
             log.exception("Starboard: image lookup failed for %s", pokemon)
         return None
