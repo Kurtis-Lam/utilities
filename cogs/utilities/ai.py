@@ -1713,11 +1713,11 @@ class AIChat(commands.Cog):
             pass
 
     async def _send_result(self, message: discord.Message, text: str):
-        """Sends the final answer as #0414c7 embed(s) with timestamp & model info appended to the message text."""
+        """Sends the final answer as #0414c7 embed(s) with a small model and timestamp line at the bottom."""
         now_ts = int(datetime.now(timezone.utc).timestamp())
-        meta_info = f"\n\n--------------------------------------------------------------------------------\n**Model:** `{self.current_model}`, at <t:{now_ts}:f> (<t:{now_ts}:R>)"
+        meta_info = f"\n\n-# `{self.current_model}` • <t:{now_ts}:f> • <t:{now_ts}:R>"
 
-        chunks = split_message(text, EMBED_DESCRIPTION_LIMIT)
+        chunks = split_message(text, EMBED_DESCRIPTION_LIMIT - len(meta_info))
         for i, chunk in enumerate(chunks):
             # Append meta_info to the last chunk
             if i == len(chunks) - 1:
