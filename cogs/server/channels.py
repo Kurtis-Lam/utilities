@@ -53,6 +53,12 @@ def find_category(guild: discord.Guild, query: str):
     return None, []
 
 
+async def _update_overwrite(channel, target, **changes):
+    overwrite = channel.overwrites_for(target)
+    overwrite.update(**changes)
+    await channel.set_permissions(target, overwrite=None if overwrite.is_empty() else overwrite)
+
+
 class Channels(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -352,7 +358,7 @@ class Channels(commands.Cog):
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
-        await target_channel.set_permissions(role_or_member, send_messages=False)
+        await _update_overwrite(target_channel, role_or_member, send_messages=False)
         
         embed = discord.Embed(
             description=f"🔒 {target_channel.mention} has been locked for {role_or_member.mention}.",
@@ -374,7 +380,7 @@ class Channels(commands.Cog):
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
-        await target_channel.set_permissions(role_or_member, send_messages=True)
+        await _update_overwrite(target_channel, role_or_member, send_messages=None)
         
         embed = discord.Embed(
             description=f"🔓 {target_channel.mention} has been unlocked for {role_or_member.mention}.",
@@ -396,7 +402,7 @@ class Channels(commands.Cog):
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
-        await target_channel.set_permissions(role_or_member, view_channel=False)
+        await _update_overwrite(target_channel, role_or_member, view_channel=False)
         
         embed = discord.Embed(
             description=f"🙈 {target_channel.mention} is now hidden from {role_or_member.mention}.",
@@ -418,7 +424,7 @@ class Channels(commands.Cog):
     ):
         target_channel = channel or ctx.channel
         role_or_member = target or ctx.guild.default_role
-        await target_channel.set_permissions(role_or_member, view_channel=True)
+        await _update_overwrite(target_channel, role_or_member, view_channel=None)
         
         embed = discord.Embed(
             description=f"👁️ {target_channel.mention} is now visible to {role_or_member.mention}.",
