@@ -3,29 +3,31 @@ from typing import Optional
 
 import discord
 
-from views.common_views import BaseLayout, container_from_embed, error_embed
+from views.common_views import error_embed
 
 
-class ShinyView(BaseLayout):
-    """Sparkles toggle inside the dex embed: red = normal sprite, green = shiny sprite."""
+class ShinyView(discord.ui.View):
+    """Classic-embed shiny toggle, keeping the Pokédex's three-column field layout."""
 
     def __init__(self, author_id: int, embed: discord.Embed, normal: Optional[tuple], shiny: tuple):
-        super().__init__(author_id=author_id, timeout=180)
-        self.embed = embed
-        self.normal = normal  # (filename, bytes) or None
-        self.shiny = shiny  # (filename, bytes)
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.embed = embed.copy()
+        self.normal = normal
+        self.shiny = shiny
         self.showing_shiny = False
         self.button = discord.ui.Button(emoji="✨", style=discord.ButtonStyle.danger)
         self.button.callback = self.sparkles
-        self.render()
+        self.add_item(self.button)
 
-    def render(self) -> None:
-        self.clear_items()
+    def render_embed(self) -> discord.Embed:
+        rendered = self.embed.copy()
         current = self.shiny if self.showing_shiny else self.normal
-        image = f"attachment://{current[0]}" if current else None
-        self.add_item(
-            container_from_embed(self.embed, discord.ui.ActionRow(self.button), thumbnail=image)
-        )
+        if current:
+            rendered.set_thumbnail(url=f"attachment://{current[0]}")
+        else:
+            rendered.remove_thumbnail()
+        return rendered
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -45,5 +47,17 @@ class ShinyView(BaseLayout):
         )
         current = self.shiny if self.showing_shiny else self.normal
         attachments = [discord.File(fp=io.BytesIO(current[1]), filename=current[0])] if current else []
-        self.render()
-        await interaction.response.edit_message(attachments=attachments, view=self)
+        await interaction.response.edit_message(
+            embed=self.render_embed(),
+            attachments=attachments,
+            view=self,
+        )
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
