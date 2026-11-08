@@ -13,14 +13,23 @@ from discord.ext import commands
 from views.common_views import ConfirmLayout, error_embed, make_embed, success_embed
 from views.embeds import handle_command_error
 from views.ticket_transcript import build_ticket_transcript
-from views.tickets_views import OTHER_KEY, TicketControlView, TicketDashboardView, TicketPanelView, other_option
+from views.setup_wizard import SetupWizard, Step, start_wizard
+from views.tickets_views import (
+    OTHER_KEY,
+    TicketControlView,
+    TicketDashboardView,
+    TicketOptionSelectView,
+    TicketOtherReasonModal,
+    TicketPanelView,
+    other_option,
+)
 
 
 def _defaults(guild_id: int) -> dict:
     return {
         "_id": str(guild_id),
         "panel_title": "Need help?",
-        "panel_description": "Choose a category below to open a private support ticket.",
+        "panel_description": "Open a private ticket and our team will reply soon.",
         "panel_button_label": "Create Ticket",
         "panel_button_emoji": "🎫",
         "panel_options_mode": "create",
@@ -83,25 +92,52 @@ def _channel_slug(template: str, user: discord.abc.User, number: int, option_lab
     return (name or f"ticket-{user.id}")[:95]
 
 
-@app_commands.default_permissions(administrator=True)
-@commands.hybrid_command(name="tickets", aliases=["ticket", "ticketsetup"], description="Configure and publish support ticket panels.")
-@commands.guild_only()
-@commands.has_permissions(administrator=True)
-async def tickets_command(ctx: commands.Context):
-    cog = ctx.bot.get_cog("Tickets")
-    if cog is None:
-        return await ctx.reply(embed=error_embed("Ticket system is not loaded."), mention_author=False)
-    if not cog._db_ready():
-        return await ctx.reply(embed=error_embed("MongoDB is not configured; ticket settings are unavailable."), mention_author=False)
-    config = await cog.get_config(ctx.guild.id)
-    view = TicketDashboardView(cog, config, ctx.guild, ctx.author.id)
-    # EmbedLayout renders its embed inside a Components V2 container; do not pass embed= separately.
-    view.message = await ctx.reply(view=view, mention_author=False)
+def _option_lines(options: list[dict]) -> str:
+    lines = []
+    for option in options:
+        label = str(option.get("label", "Ticket"))
+        emoji = option.get("emoji") or ""
+        description = str(option.get("description") or "")
+        line = f"{emoji} {label}".strip()
+        lines.append(f"{line} | {description}" if description else line)
+    return "\n".join(lines)
 
 
-@tickets_command.error
-async def tickets_command_error(ctx: commands.Context, error: Exception):
-    await handle_command_error(ctx, error)
+def _parse_option_lines(text: str) -> list[dict]:
+    """``emoji Label | description`` per line -> option dicts (emoji and description are optional)."""
+    parsed = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        head, _, description = line.partition("|")
+        head, description = head.strip(), description.strip()
+        emoji = None
+        first, _, rest = head.partition(" ")
+        if rest.strip() and (re.fullmatch(r"<a?:\w{2,32}:\d{15,25}>", first) or not any(c.isascii() and c.isalnum() for c in first)):
+            emoji, head = first, rest.strip()
+        if not head:
+            continue
+        parsed.append({"label": head[:80], "description": description[:100], "emoji": emoji})
+    return parsed
+
+
+def _validate_options(text: str) -> str | None:
+    parsed = _parse_option_lines(text)
+    if not parsed:
+        return "Add at least one ticket type, one per line."
+    if len(parsed) > 24:
+        return "Discord supports up to 24 ticket types."
+    return None
+
+
+def _option_key(label: str, taken: set[str]) -> str:
+    base = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:30] or "option"
+    key, n = base, 2
+    while key in taken or key == OTHER_KEY:
+        key, n = f"{base}_{n}", n + 1
+    taken.add(key)
+    return key
 
 
 class Tickets(commands.Cog):
@@ -109,6 +145,262 @@ class Tickets(commands.Cog):
         self.bot = bot
         self._delete_tasks: dict[int, asyncio.Task] = {}
         self._background_tasks: set[asyncio.Task] = set()
+
+    async def cog_command_error(self, ctx: commands.Context, error: Exception):
+        await handle_command_error(ctx, error)
+
+    async def _require_db(self, ctx: commands.Context) -> bool:
+        if self._db_ready():
+            return True
+        await ctx.reply(embed=error_embed("MongoDB is not configured; ticket settings are unavailable."), mention_author=False)
+        return False
+
+    @commands.hybrid_group(
+        name="tickets",
+        aliases=["ticket"],
+        invoke_without_command=True,
+        fallback="panel",
+        description="Configure and publish support ticket panels.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def tickets_command(self, ctx: commands.Context):
+        if not await self._require_db(ctx):
+            return
+        config = await self.get_config(ctx.guild.id)
+        view = TicketDashboardView(self, config, ctx.guild, ctx.author.id)
+        # EmbedLayout renders its embed inside a Components V2 container; do not pass embed= separately.
+        view.message = await ctx.reply(view=view, mention_author=False)
+
+    async def publish_panel(self, guild: discord.Guild, channel: discord.TextChannel, config: dict) -> discord.Message:
+        """Post a ticket panel built from the saved settings and remember it so its buttons keep working."""
+        title = str(config.get("panel_title", "Need help?"))
+        description = str(config.get("panel_description", ""))
+        label = str(config.get("panel_button_label", "Create Ticket"))
+        emoji = config.get("panel_button_emoji", "🎫") or None
+        options_mode = config.get("panel_options_mode", "create")
+        options = list(config.get("options", []))
+        allow_other = bool(config.get("allow_other_option", True))
+        view = TicketPanelView(
+            self, label, emoji, make_embed(title, description),
+            options_mode=options_mode, options=options, allow_other_option=allow_other,
+            thumbnail=guild.icon.url if guild.icon else None,
+        )
+        message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+        panels = list(config.get("panels", []))
+        panels.append({
+            "channel_id": channel.id,
+            "message_id": message.id,
+            "title": title,
+            "description": description,
+            "button_label": label,
+            "button_emoji": emoji,
+            "options_mode": options_mode,
+            "options": options,
+            "allow_other_option": allow_other,
+            "created_at": int(time.time()),
+        })
+        await self.save_config_fields(guild.id, {"panels": panels})
+        return message
+
+    def _setup_steps(self) -> list[Step]:
+        return [
+            Step(
+                key="panel_title",
+                title="Panel title",
+                prompt="The short heading members see on the ticket panel.",
+                kind="text",
+                max_length=100,
+                placeholder="Need help?",
+            ),
+            Step(
+                key="panel_description",
+                title="Panel text",
+                prompt="One or two short lines explaining what tickets are for.",
+                kind="paragraph",
+                max_length=300,
+                placeholder="Open a private ticket and our team will reply soon.",
+                hint="Short text looks best on the panel.",
+            ),
+            Step(
+                key="options_text",
+                title="Ticket types",
+                prompt="What can members open a ticket for? One type per line.",
+                kind="paragraph",
+                max_length=1500,
+                placeholder="🎫 General Support | Ask a question",
+                hint="Format: emoji Label | short description (emoji and description are optional). Up to 24 types.",
+                validate=_validate_options,
+                show=lambda v: "*Not set*" if not v else "\n".join(f"• {line}" for line in str(v).splitlines() if line.strip())[:300],
+            ),
+            Step(
+                key="panel_options_mode",
+                title="How members pick a type",
+                prompt="One **Create Ticket** button that opens a private picker, or a separate button for each type directly on the panel?",
+                kind="choice",
+                choices=[("create", "One button"), ("inline", "Button per type")],
+            ),
+            Step(
+                key="panel_button_label",
+                title="Button label",
+                prompt="The text on the Create Ticket button.",
+                kind="text",
+                max_length=40,
+                placeholder="Create Ticket",
+                when=lambda v: v.get("panel_options_mode") != "inline",
+            ),
+            Step(
+                key="default_category_id",
+                title="Ticket category",
+                prompt="New tickets are created inside this category.",
+                kind="channel",
+                optional=True,
+                channel_types=[discord.ChannelType.category],
+                placeholder="Choose a category",
+                hint="Skip to create tickets at the top of the channel list.",
+            ),
+            Step(
+                key="staff_role_ids",
+                title="Support roles",
+                prompt="Which roles can see and answer tickets? They are pinged when a ticket opens.",
+                kind="roles",
+                optional=True,
+                maximum=10,
+            ),
+            Step(
+                key="log_channel_id",
+                title="Log channel",
+                prompt="Where should closed-ticket transcripts and logs go?",
+                kind="channel",
+                optional=True,
+            ),
+            Step(
+                key="max_open_tickets",
+                title="Open tickets per member",
+                prompt="How many tickets can one member have open at once? Use 0 for no limit.",
+                kind="number",
+                minimum=0,
+                maximum=25,
+            ),
+            Step(
+                key="transcripts_enabled",
+                title="Transcripts",
+                prompt="Save a transcript when a ticket is closed?",
+                kind="toggle",
+            ),
+            Step(
+                key="panel_channel",
+                title="Post the panel",
+                prompt="Pick a channel and I'll post the panel there when you save.",
+                kind="channel",
+                optional=True,
+                hint="Skip to save the settings only. You can post a panel later with the dashboard.",
+            ),
+        ]
+
+    async def _finish_setup(self, interaction: discord.Interaction, values: dict) -> str:
+        guild = interaction.guild
+        config = await self.get_config(guild.id)
+
+        category_id = values.get("default_category_id")
+        if category_id and not isinstance(guild.get_channel(int(category_id)), discord.CategoryChannel):
+            raise ValueError("The selected ticket category no longer exists.")
+        staff_ids = [int(r) for r in (values.get("staff_role_ids") or [])]
+        if any(guild.get_role(r) is None or guild.get_role(r).is_default() for r in staff_ids):
+            raise ValueError("One of the support roles can't be used (it's @everyone or no longer exists).")
+
+        parsed = _parse_option_lines(values.get("options_text") or "")
+        limit = 24 if config.get("allow_other_option", True) else 25
+        if not parsed or len(parsed) > limit:
+            raise ValueError(f"Add between 1 and {limit} ticket types.")
+        existing = {str(o.get("label", "")).casefold(): o for o in config.get("options", [])}
+        taken = {str(o.get("key")) for o in config.get("options", [])}
+        options = []
+        for item in parsed:
+            old = existing.get(item["label"].casefold())
+            options.append({
+                "key": old["key"] if old else _option_key(item["label"], taken),
+                "label": item["label"],
+                "description": item["description"],
+                "emoji": item["emoji"],
+                "category_id": old.get("category_id") if old else None,
+                "ping_role_ids": old.get("ping_role_ids", []) if old else [],
+                "open_message": old.get("open_message", "") if old else "",
+            })
+
+        mode = values.get("panel_options_mode") or "create"
+        if mode == "inline" and len(options) + (1 if config.get("allow_other_option", True) else 0) > 25:
+            raise ValueError("A panel with a button per type holds up to 25 buttons. Remove a type or turn off the Other option.")
+
+        fields = {
+            "panel_title": values.get("panel_title") or config.get("panel_title"),
+            "panel_description": values.get("panel_description") or config.get("panel_description"),
+            "options": options,
+            "panel_options_mode": mode,
+            "panel_button_label": values.get("panel_button_label") or config.get("panel_button_label", "Create Ticket"),
+            "default_category_id": int(category_id) if category_id else None,
+            "staff_role_ids": staff_ids,
+            "log_channel_id": int(values["log_channel_id"]) if values.get("log_channel_id") else None,
+            "max_open_tickets": int(values.get("max_open_tickets") or 0),
+            "transcripts_enabled": bool(values.get("transcripts_enabled", True)),
+        }
+        await self.save_config_fields(guild.id, fields)
+        config.update(fields)
+
+        lines = [
+            f"**Ticket types:** {len(options)}",
+            f"**Category:** {f'<#{category_id}>' if category_id else 'none'}",
+            f"**Support roles:** {' '.join(f'<@&{r}>' for r in staff_ids) or 'none'}",
+            f"**Log channel:** {'<#' + str(fields['log_channel_id']) + '>' if fields['log_channel_id'] else 'none'}",
+            f"**Open tickets per member:** {fields['max_open_tickets'] or 'unlimited'}",
+        ]
+        panel_channel = guild.get_channel(int(values["panel_channel"])) if values.get("panel_channel") else None
+        if panel_channel is not None:
+            if not isinstance(panel_channel, discord.TextChannel):
+                raise ValueError("The panel channel must be a text channel.")
+            message = await self.publish_panel(guild, panel_channel, config)
+            lines.append(f"**Panel:** posted in {panel_channel.mention} ([jump]({message.jump_url}))")
+        else:
+            lines.append("**Panel:** not posted this time")
+        lines.append("-# Panels that are already posted keep their old text. Post a new one to use the changes.")
+        return "\n".join(lines)
+
+    @tickets_command.command(name="setup", description="Guided ticket setup. Run it again any time to change settings.")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def tickets_setup(self, ctx: commands.Context):
+        if not await self._require_db(ctx):
+            return
+        config = await self.get_config(ctx.guild.id)
+        initial = {
+            "panel_title": config.get("panel_title", "Need help?"),
+            "panel_description": config.get("panel_description", ""),
+            "options_text": _option_lines(config.get("options", [])),
+            "panel_options_mode": config.get("panel_options_mode", "create"),
+            "panel_button_label": config.get("panel_button_label", "Create Ticket"),
+            "default_category_id": int(config["default_category_id"]) if config.get("default_category_id") else None,
+            "staff_role_ids": [int(r) for r in config.get("staff_role_ids", []) if str(r).isdigit()],
+            "log_channel_id": int(config["log_channel_id"]) if config.get("log_channel_id") else None,
+            "max_open_tickets": int(config.get("max_open_tickets", 3) or 0),
+            "transcripts_enabled": bool(config.get("transcripts_enabled", True)),
+            "panel_channel": None,
+        }
+        wizard = SetupWizard(
+            title="🎫 Ticket Setup",
+            steps=self._setup_steps(),
+            initial=initial,
+            on_finish=self._finish_setup,
+            author_id=ctx.author.id,
+            guild=ctx.guild,
+        )
+        await start_wizard(ctx, wizard)
+
+    @commands.command(name="ticketsetup", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def ticketsetup_alias(self, ctx: commands.Context):
+        await self.tickets_setup.callback(self, ctx)
 
     @property
     def config_collection(self):
@@ -599,5 +891,3 @@ class Tickets(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Tickets(bot))
-    if bot.get_command("tickets") is None:
-        bot.add_command(tickets_command)
