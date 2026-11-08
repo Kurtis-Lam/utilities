@@ -2,7 +2,7 @@
 
 Commands (all hybrid: work as ``.giveaway ...`` and as ``/giveaway ...``):
 
-* ``giveaway create <duration> <winners> <prize> [channel]``  start a giveaway
+* ``giveaway create [duration] [winners] [prize] [channel]``  start a giveaway (anything left out is asked one question at a time)
 * ``giveaway end <giveaway>``                                  end one right now
 * ``giveaway list``                                            active / ended giveaways
 * ``giveaway participants <giveaway>``                         who entered
@@ -26,6 +26,7 @@ from pymongo import ReturnDocument
 from views.embeds import BRAND_COLOR, err_embed, handle_command_error, info_embed, ok_embed, send_usage, warn_embed
 from views.loading import loading
 from views.navigate import PaginatorView
+from views.prompts import ask, is_skip
 from views.giveaway_views import EnterView, LeaveView
 from views.common_views import EMBED_COLOR, make_embed
 
@@ -454,6 +455,66 @@ class Giveaway(commands.Cog):
     # Commands
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Questions for `giveaway create` without arguments
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_duration(text: str) -> typing.Optional[str]:
+        seconds = parse_duration(text)
+        if seconds is None:
+            return "That isn't a duration. Use something like `30m`, `2h` or `1d12h`."
+        if not (MIN_SECONDS <= seconds <= MAX_SECONDS):
+            return f"The duration must be between {format_seconds(MIN_SECONDS)} and {format_seconds(MAX_SECONDS)}."
+        return None
+
+    @staticmethod
+    def _check_winners(text: str) -> typing.Optional[str]:
+        if not text.strip().isdigit() or not (1 <= int(text.strip()) <= MAX_WINNERS):
+            return f"Send a number from 1 to {MAX_WINNERS}."
+        return None
+
+    @staticmethod
+    def _check_prize(text: str) -> typing.Optional[str]:
+        if not text.strip():
+            return "Send the prize."
+        if len(text.strip()) > MAX_PRIZE_LENGTH:
+            return f"The prize can be at most {MAX_PRIZE_LENGTH} characters."
+        return None
+
+    async def _ask_value(self, ctx: commands.Context, question: str, check) -> typing.Optional[str]:
+        """Ask until the answer passes ``check`` (3 tries). None = cancelled, timed out or gave up."""
+        for _ in range(3):
+            reply = await ask(ctx, question, timeout=60)
+            if reply is None:
+                return None
+            text = reply.content.strip()
+            problem = check(text)
+            if problem is None:
+                return text
+            await ctx.send(embed=err_embed(problem), delete_after=8)
+        await ctx.send(embed=err_embed("Too many invalid answers. Giveaway cancelled."), delete_after=8)
+        return None
+
+    async def _ask_channel(self, ctx: commands.Context):
+        """The channel to host it in. ``None`` = this channel (skipped), ``False`` = stop."""
+        for _ in range(3):
+            reply = await ask(
+                ctx,
+                "Which channel should it be posted in?\nMention it or send its ID, or say `skip` to use this channel.",
+                timeout=60,
+            )
+            if reply is None:
+                return False
+            if is_skip(reply.content):
+                return None
+            try:
+                return await commands.TextChannelConverter().convert(ctx, reply.content.strip())
+            except commands.BadArgument:
+                await ctx.send(embed=err_embed("I couldn't find that text channel."), delete_after=8)
+        await ctx.send(embed=err_embed("Too many invalid answers. Giveaway cancelled."), delete_after=8)
+        return False
+
     @commands.hybrid_group(
         name="giveaway",
         aliases=["gw"],
@@ -469,8 +530,8 @@ class Giveaway(commands.Cog):
     @giveaway.command(
         name="create",
         aliases=["start"],
-        usage="<duration> <winners> <prize> [channel]",
-        description="Creates a new giveaway.",
+        usage="[duration] [winners] [prize] [channel]",
+        description="Creates a new giveaway. Leave out the details and I'll ask for them.",
     )
     @app_commands.describe(
         duration="How long it runs, e.g. 30m, 2h, 1d12h (10 seconds to 30 days).",
@@ -483,9 +544,9 @@ class Giveaway(commands.Cog):
     async def giveaway_create(
         self,
         ctx: commands.Context,
-        duration: str = commands.parameter(description="How long it runs, e.g. 30m, 2h, 1d12h (10 seconds to 30 days)."),
-        winners: int = commands.parameter(description="How many winners to pick (1-20)."),
-        prize: str = commands.parameter(description="What is being given away (use quotes for several words)."),
+        duration: typing.Optional[str] = commands.parameter(default=None, description="How long it runs, e.g. 30m, 2h, 1d12h (10 seconds to 30 days)."),
+        winners: typing.Optional[int] = commands.parameter(default=None, description="How many winners to pick (1-20)."),
+        prize: typing.Optional[str] = commands.parameter(default=None, description="What is being given away (use quotes for several words)."),
         channel: typing.Optional[discord.TextChannel] = commands.parameter(
             default=None,
             description="Channel to host the giveaway in (defaults to this channel).",
@@ -493,6 +554,35 @@ class Giveaway(commands.Cog):
     ):
         if not await self._require_db(ctx):
             return
+
+        # Anything that wasn't given is asked for, one question at a time. With no details at all the
+        # channel is asked too; otherwise it stays the current channel unless it was given.
+        fully_interactive = duration is None and winners is None and prize is None and channel is None
+        if duration is None:
+            duration = await self._ask_value(
+                ctx,
+                "How long should the giveaway run?\nFor example `30m`, `2h` or `1d12h`.",
+                self._check_duration,
+            )
+            if duration is None:
+                return
+        if winners is None:
+            answer = await self._ask_value(
+                ctx,
+                f"How many winners should there be? (1-{MAX_WINNERS})",
+                self._check_winners,
+            )
+            if answer is None:
+                return
+            winners = int(answer)
+        if prize is None:
+            prize = await self._ask_value(ctx, "What is the prize?", self._check_prize)
+            if prize is None:
+                return
+        if fully_interactive:
+            channel = await self._ask_channel(ctx)
+            if channel is False:
+                return
 
         seconds = parse_duration(duration)
         if seconds is None:
