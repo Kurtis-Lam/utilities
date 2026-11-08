@@ -117,7 +117,10 @@ USAGE_EXAMPLES = {
     "selfrole": [
         "{p}selfrole",
         "{p}selfrole add 123456789012345678 🎮 Gaming Members ✨ VIP Members",
-        "{p}selfrole remove",
+        "{p}selfrole add (I'll ask which message)",
+        "Reply to a message with: {p}selfrole add 🎮 Gaming Members",
+        "{p}selfrole remove 123456789012345678",
+        "{p}selfrole remove (I'll ask which message)",
     ],
     # messages
     "purge": ["{p}purge 10", "{p}purge 25 @user", "{p}purge *"],
@@ -131,6 +134,7 @@ USAGE_EXAMPLES = {
     "stick": ["{p}stick Please read the rules!"],
     # giveaway
     "giveaway create": [
+        "{p}giveaway create (I'll ask each detail)",
         "{p}giveaway create 1h 1 Nitro",
         "{p}gw create 2d 3 \"Discord Nitro\" #giveaways",
         "{p}giveaway create 30m 1 Pizza",
