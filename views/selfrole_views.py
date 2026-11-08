@@ -155,7 +155,9 @@ class SelfRoleConfigModal(discord.ui.Modal, title="Configure Self-Role Panel"):
         super().__init__()
         self.dashboard = dashboard
         config = dashboard.config
-        self.channel_id.default = str(config.get("channel_id") or dashboard.guild.system_channel_id or "")[:25]
+        system_channel = dashboard.guild.system_channel
+        default_channel_id = system_channel.id if system_channel is not None else ""
+        self.channel_id.default = str(config.get("channel_id") or default_channel_id)[:25]
         self.title_input.default = str(config.get("title", "Choose Your Roles"))[:256]
         self.description_input.default = str(config.get("description", "Use the options below to manage your server roles."))[:3000]
         self.mode_input.default = str(config.get("mode", "buttons"))
@@ -245,3 +247,88 @@ class SelfRoleConfigModal(discord.ui.Modal, title="Configure Self-Role Panel"):
         await interaction.followup.send(embed=success_embed(f"Self-role panel published in {channel.mention}.\n[Jump to panel]({message.jump_url})"), ephemeral=True)
         self.dashboard.config = await self.dashboard.cog.get_selfrole_config(interaction.guild.id)
         await self.dashboard.refresh_message()
+
+
+class SelfRoleRemoveView(discord.ui.View):
+    """Button selector for removing role mappings from a server's self-role panel."""
+
+    def __init__(self, cog, guild_id: int, author_id: int, config: dict):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.author_id = int(author_id)
+        self.config = config
+        self._build_buttons()
+
+    def embed(self) -> discord.Embed:
+        mappings = self.config.get("roles", [])
+        description = (
+            "Click an emoji button to remove that mapping. Each click removes it immediately."
+            if mappings else "There are no self-role mappings left to remove."
+        )
+        embed = make_embed("Remove Self-Roles", description)
+        embed.add_field(name="Mappings remaining", value=str(len(mappings)), inline=True)
+        return embed
+
+    def _build_buttons(self) -> None:
+        self.clear_items()
+        guild = self.cog.bot.get_guild(self.guild_id)
+        for index, mapping in enumerate(self.config.get("roles", [])[:25]):
+            emoji = str(mapping.get("emoji", "▫️"))
+            role_id = int(mapping.get("role_id", 0) or 0)
+            role = guild.get_role(role_id) if guild else None
+            label = (role.name if role else mapping.get("role_name") or f"Role {role_id}")[:80]
+            try:
+                button_emoji = discord.PartialEmoji.from_str(emoji)
+            except (TypeError, ValueError):
+                button_emoji = None
+
+            button = discord.ui.Button(
+                label=label,
+                emoji=button_emoji,
+                style=discord.ButtonStyle.danger,
+                row=index // 5,
+            )
+
+            async def remove(interaction: discord.Interaction, selected_emoji=emoji, selected_role_id=role_id):
+                if interaction.user.id != self.author_id:
+                    return await interaction.response.send_message(
+                        embed=error_embed("Only the administrator who opened this selector can use it."),
+                        ephemeral=interaction.guild_id is not None,
+                    )
+                ephemeral = interaction.guild_id is not None
+                await interaction.response.defer()
+                result = await self.cog.remove_selfrole_mapping(
+                    self.guild_id,
+                    selected_emoji,
+                    selected_role_id,
+                )
+                self.config = await self.cog.get_selfrole_config(self.guild_id)
+                self._build_buttons()
+                await interaction.edit_original_response(
+                    embed=self.embed(),
+                    view=self if self.config.get("roles") else None,
+                )
+                if result is not None:
+                    await interaction.followup.send(embed=result, ephemeral=ephemeral)
+
+            button.callback = remove
+            self.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=error_embed("Only the administrator who opened this selector can use it."),
+                ephemeral=interaction.guild_id is not None,
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
