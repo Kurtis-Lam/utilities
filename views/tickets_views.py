@@ -48,8 +48,10 @@ def ticket_config_embed(config: dict, guild: discord.Guild | None) -> discord.Em
     button_emoji = config.get("panel_button_emoji", "🎫")
     embed.add_field(name="Create button", value=f"{button_emoji + ' ' if button_emoji else ''}{config.get('panel_button_label', 'Create Ticket')}", inline=True)
     on_off = lambda value: "On" if value else "Off"
+    display_mode = "Direct option buttons" if config.get("panel_options_mode", "create") == "inline" else "Create button → private selector"
     settings = (
-        f"Panels: {len(panels)} • Opener close: {on_off(config.get('allow_user_close', True))} • "
+        f"Panels: {len(panels)} • Option display: {display_mode} • "
+        f"Opener close: {on_off(config.get('allow_user_close', True))} • "
         f"Claiming: {on_off(config.get('allow_claim', True))} • Transcripts: {on_off(config.get('transcripts_enabled', True))} • "
         f"Other option: {on_off(config.get('allow_other_option', True))}"
     )
@@ -72,14 +74,41 @@ def _field(value: str, *, label: str, max_length: int = 4000, required: bool = F
 
 
 class TicketPanelView(discord.ui.LayoutView):
-    """Persistent panel. The create button lives inside the panel container; the message ID maps the interaction to its settings."""
+    """Persistent ticket panel with either a create button or direct option buttons."""
 
-    def __init__(self, cog, button_label: str = "Create Ticket", button_emoji: str | None = "🎫", embed: discord.Embed | None = None):
+    def __init__(self, cog, button_label: str = "Create Ticket", button_emoji: str | None = "🎫",
+                 embed: discord.Embed | None = None, *, options_mode: str = "create",
+                 options: list[dict] | None = None, allow_other_option: bool = True):
         super().__init__(timeout=None)
         self.cog = cog
-        button = Button(label=(button_label or "Create Ticket")[:80], emoji=button_emoji or None, style=discord.ButtonStyle.primary, custom_id="tickets:create")
-        button.callback = self.create_ticket_callback
-        self.add_item(container_from_embed(embed or make_embed(), discord.ui.ActionRow(button)))
+        rows = []
+        if options_mode == "inline":
+            choices = list(options or [])[:max_options({"allow_other_option": allow_other_option})]
+            if allow_other_option:
+                choices.append(other_option())
+            buttons = []
+            for option in choices[:25]:
+                option_key = str(option.get("key", "general"))
+                button = Button(
+                    label=str(option.get("label", "Ticket"))[:80],
+                    emoji=option.get("emoji") or None,
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"tickets:inline:{option_key}",
+                )
+
+                async def choose(interaction: discord.Interaction, selected_key=option_key):
+                    await self.cog.handle_inline_option(interaction, selected_key)
+
+                button.callback = choose
+                buttons.append(button)
+            for offset in range(0, len(buttons), 5):
+                rows.append(discord.ui.ActionRow(*buttons[offset:offset + 5]))
+        else:
+            button = Button(label=(button_label or "Create Ticket")[:80], emoji=button_emoji or None,
+                            style=discord.ButtonStyle.primary, custom_id="tickets:create")
+            button.callback = self.create_ticket_callback
+            rows.append(discord.ui.ActionRow(button))
+        self.add_item(container_from_embed(embed or make_embed(), *rows))
 
     async def create_ticket_callback(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.message is None:
@@ -233,20 +262,28 @@ class TicketDashboardView(EmbedLayout):
         self.refresh_btn.callback = self.refresh
         self.other_btn = Button(emoji="❓")
         self.other_btn.callback = self.toggle_other
+        self.panel_mode_btn = Button(emoji="🔘", style=discord.ButtonStyle.secondary)
+        self.panel_mode_btn.callback = self.toggle_panel_mode
         self._sync_other_button()
+        self._sync_panel_mode_button()
         self.render()
 
     def rows(self):
         return [
             [self.base_btn, self.roles_btn, self.messages_btn],
             [self.security_btn, self.add_option_btn, self.edit_option_btn, self.remove_option_btn],
-            [self.post_panel_btn, self.other_btn, self.refresh_btn],
+            [self.post_panel_btn, self.other_btn, self.panel_mode_btn, self.refresh_btn],
         ]
 
     def _sync_other_button(self):
         enabled = bool(self.config.get("allow_other_option", True))
         self.other_btn.label = f"Other Option: {'On' if enabled else 'Off'}"
         self.other_btn.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary
+
+    def _sync_panel_mode_button(self):
+        inline = self.config.get("panel_options_mode", "create") == "inline"
+        self.panel_mode_btn.label = "Options: Direct" if inline else "Options: Create"
+        self.panel_mode_btn.style = discord.ButtonStyle.success if inline else discord.ButtonStyle.secondary
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.author_id is not None and interaction.user.id != self.author_id:
@@ -260,6 +297,7 @@ class TicketDashboardView(EmbedLayout):
     async def reload_config(self):
         self.config = await self.cog.get_config(self.guild.id)
         self._sync_other_button()
+        self._sync_panel_mode_button()
         self.set_embed(ticket_config_embed(self.config, self.guild))
 
     async def toggle_other(self, interaction: discord.Interaction):
@@ -269,6 +307,18 @@ class TicketDashboardView(EmbedLayout):
             return await interaction.response.send_message(embed=error_embed("Remove a ticket option first. Discord menus hold 25 entries and the Other option needs one."), ephemeral=True)
         await interaction.response.defer()
         await self.cog.save_config_fields(self.guild.id, {"allow_other_option": enable})
+        await self.reload_config()
+        await interaction.edit_original_response(view=self)
+
+    async def toggle_panel_mode(self, interaction: discord.Interaction):
+        config = await self.cog.get_config(self.guild.id)
+        new_mode = "create" if config.get("panel_options_mode", "create") == "inline" else "inline"
+        if new_mode == "inline":
+            button_count = len(config.get("options", [])) + (1 if config.get("allow_other_option", True) else 0)
+            if button_count > 25:
+                return await interaction.response.send_message(embed=error_embed("Direct panels support up to 25 buttons. Remove ticket options before enabling this mode."), ephemeral=True)
+        await interaction.response.defer()
+        await self.cog.save_config_fields(self.guild.id, {"panel_options_mode": new_mode})
         await self.reload_config()
         await interaction.edit_original_response(view=self)
 
@@ -681,20 +731,40 @@ class PostTicketPanelModal(Modal, title="Publish Ticket Panel"):
         channel = interaction.guild.get_channel(channel_ids[0]) if channel_ids and interaction.guild else None
         if not isinstance(channel, discord.TextChannel):
             return await interaction.response.send_message(embed=error_embed("Choose a text channel ID or mention."), ephemeral=True)
-        if not self.dashboard.config.get("options"):
+        config = await self.dashboard.cog.get_config(self.dashboard.guild.id)
+        if not config.get("options"):
             return await interaction.response.send_message(embed=error_embed("Add at least one ticket option before publishing a panel."), ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
         label = self.button_label.value.strip() or "Create Ticket"
         emoji = self.button_emoji.value.strip() or None
         embed = make_embed(self.title_input.value, self.description_input.value)
+        options_mode = config.get("panel_options_mode", "create")
+        options_snapshot = list(config.get("options", []))
+        allow_other = bool(config.get("allow_other_option", True))
+        panel_view = TicketPanelView(
+            self.dashboard.cog, label, emoji, embed,
+            options_mode=options_mode,
+            options=options_snapshot,
+            allow_other_option=allow_other,
+        )
         try:
-            message = await channel.send(view=TicketPanelView(self.dashboard.cog, label, emoji, embed), allowed_mentions=discord.AllowedMentions.none())
+            message = await channel.send(view=panel_view, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException as exc:
             hint = " Check that the button emoji is valid and usable by the bot." if emoji else ""
             return await interaction.followup.send(embed=error_embed(f"Could not post the panel: {exc}.{hint}"), ephemeral=True)
-        config = await self.dashboard.cog.get_config(self.dashboard.guild.id)
         panels = list(config.get("panels", []))
-        panels.append({"channel_id": channel.id, "message_id": message.id, "title": self.title_input.value, "description": self.description_input.value, "button_label": label, "button_emoji": emoji, "created_at": int(time.time())})
+        panels.append({
+            "channel_id": channel.id,
+            "message_id": message.id,
+            "title": self.title_input.value,
+            "description": self.description_input.value,
+            "button_label": label,
+            "button_emoji": emoji,
+            "options_mode": options_mode,
+            "options": options_snapshot,
+            "allow_other_option": allow_other,
+            "created_at": int(time.time()),
+        })
         await self.dashboard.cog.save_config_fields(self.dashboard.guild.id, {"panels": panels, "panel_button_label": label, "panel_button_emoji": emoji})
         await interaction.followup.send(embed=success_embed(f"Ticket panel published in {channel.mention}.\n[Jump to panel]({message.jump_url})"), ephemeral=True)
         await self.dashboard.refresh_message()
