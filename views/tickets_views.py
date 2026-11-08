@@ -8,6 +8,7 @@ import discord
 from discord.ui import Button, Modal, Select, TextInput
 
 from views.common_views import BaseLayout, EmbedLayout, container_from_embed, error_embed, make_embed, success_embed
+from views.panel_style import panel_container
 
 OTHER_KEY = "__other__"
 
@@ -78,7 +79,8 @@ class TicketPanelView(discord.ui.LayoutView):
 
     def __init__(self, cog, button_label: str = "Create Ticket", button_emoji: str | None = "🎫",
                  embed: discord.Embed | None = None, *, options_mode: str = "create",
-                 options: list[dict] | None = None, allow_other_option: bool = True):
+                 options: list[dict] | None = None, allow_other_option: bool = True,
+                 thumbnail: str | None = None):
         super().__init__(timeout=None)
         self.cog = cog
         rows = []
@@ -108,7 +110,14 @@ class TicketPanelView(discord.ui.LayoutView):
                             style=discord.ButtonStyle.primary, custom_id="tickets:create")
             button.callback = self.create_ticket_callback
             rows.append(discord.ui.ActionRow(button))
-        self.add_item(container_from_embed(embed or make_embed(), *rows))
+        embed = embed or make_embed("Need help?", "Open a private ticket and our team will reply soon.")
+        self.add_item(panel_container(
+            embed.title or "",
+            embed.description or "",
+            *rows,
+            small="Private: only you and our staff can see your ticket",
+            thumbnail=thumbnail,
+        ))
 
     async def create_ticket_callback(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.message is None:
@@ -746,6 +755,7 @@ class PostTicketPanelModal(Modal, title="Publish Ticket Panel"):
             options_mode=options_mode,
             options=options_snapshot,
             allow_other_option=allow_other,
+            thumbnail=interaction.guild.icon.url if interaction.guild.icon else None,
         )
         try:
             message = await channel.send(view=panel_view, allowed_mentions=discord.AllowedMentions.none())
