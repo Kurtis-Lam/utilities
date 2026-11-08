@@ -114,6 +114,11 @@ USAGE_EXAMPLES = {
         "{p}cr Staff #FF0000 basic @user1 @user2",
     ],
     "deleterole": ["{p}deleterole @role", "{p}dr VIP Members"],
+    "selfrole": [
+        "{p}selfrole",
+        "{p}selfrole add 123456789012345678 🎮 Gaming Members ✨ VIP Members",
+        "{p}selfrole remove",
+    ],
     # messages
     "purge": ["{p}purge 10", "{p}purge 25 @user", "{p}purge *"],
     "forward": [
