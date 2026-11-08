@@ -23,6 +23,7 @@ def _defaults(guild_id: int) -> dict:
         "panel_description": "Choose a category below to open a private support ticket.",
         "panel_button_label": "Create Ticket",
         "panel_button_emoji": "🎫",
+        "panel_options_mode": "create",
         "allow_other_option": True,
         "choose_option_message": "Choose the category that best matches your request.",
         "default_category_id": None,
@@ -126,8 +127,25 @@ class Tickets(commands.Cog):
         try:
             await self.tickets_collection.create_index([("guild_id", 1), ("opener_id", 1), ("closed", 1)])
             await self.tickets_collection.create_index([("closed", 1), ("closed_at", 1)])
+            panel_configs = await self.config_collection.find({"panels.0": {"$exists": True}}).to_list(length=None)
+            for config in panel_configs:
+                for panel in config.get("panels", []):
+                    message_id = int(panel.get("message_id", 0) or 0)
+                    if not message_id:
+                        continue
+                    options_mode = panel.get("options_mode", config.get("panel_options_mode", "create"))
+                    panel_view = TicketPanelView(
+                        self,
+                        panel.get("button_label", "Create Ticket"),
+                        panel.get("button_emoji", "🎫"),
+                        make_embed(panel.get("title", config.get("panel_title", "Need help?")), panel.get("description", config.get("panel_description", ""))),
+                        options_mode=options_mode,
+                        options=panel.get("options", config.get("options", [])),
+                        allow_other_option=panel.get("allow_other_option", config.get("allow_other_option", True)),
+                    )
+                    self.bot.add_view(panel_view, message_id=message_id)
         except Exception as exc:
-            print(f"Tickets Cog: could not create indexes: {exc}")
+            print(f"Tickets Cog: could not initialise indexes or persistent panels: {exc}")
 
     async def cog_unload(self):
         for task in self._delete_tasks.values():
@@ -174,6 +192,22 @@ class Tickets(commands.Cog):
 
     def _db_ready(self) -> bool:
         return self.bot.mongo_client is not None
+
+    async def handle_inline_option(self, interaction: discord.Interaction, option_key: str):
+        if interaction.guild is None or interaction.message is None:
+            return await interaction.response.send_message(embed=error_embed("Use this panel inside the server."), ephemeral=True)
+        if not self._db_ready():
+            return await interaction.response.send_message(embed=error_embed("Ticket storage is unavailable. Please contact an administrator."), ephemeral=True)
+        config = await self.get_config(interaction.guild.id)
+        panel = next((p for p in config.get("panels", []) if int(p.get("message_id", 0)) == interaction.message.id), None)
+        if panel is None:
+            return await interaction.response.send_message(embed=error_embed("This ticket panel is no longer configured. Ask an administrator to repost it."), ephemeral=True)
+        if option_key == OTHER_KEY:
+            if not config.get("allow_other_option", True):
+                return await interaction.response.send_message(embed=error_embed("The Other option is currently disabled."), ephemeral=True)
+            selector = TicketOptionSelectView(self, config, panel, interaction.user.id)
+            return await interaction.response.send_modal(TicketOtherReasonModal(selector))
+        await self.create_ticket(interaction, option_key, config, panel)
 
     async def create_ticket(self, interaction: discord.Interaction, option_key: str, config: dict, panel: dict, reason: str | None = None):
         if interaction.guild is None or interaction.user.bot:
