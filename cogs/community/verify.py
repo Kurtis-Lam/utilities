@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from views.common_views import error_embed, make_embed, success_embed
 from views.embeds import handle_command_error
+from views.setup_wizard import SetupWizard, Step, start_wizard
 from views.verify_views import (
     CaptchaPromptView,
     VerificationConfigView,
@@ -28,13 +29,13 @@ def _defaults(guild_id: int) -> dict:
         "captcha_length": 6,
         "max_attempts": 3,
         "captcha_expiry_seconds": 180,
-        "panel_title": "Verify to access the server",
-        "panel_description": "Press Verify and enter the letters and numbers shown in the CAPTCHA to unlock the server.",
+        "panel_title": "Verify to enter",
+        "panel_description": "Press the button below and type the code you're shown.",
         "captcha_title": "Complete verification",
-        "prompt_description": "Enter the lowercase letters and numbers shown. Similar-looking characters (such as 0, o, i and l) are excluded.",
+        "prompt_description": "Type the characters from the image. Lowercase letters and numbers only.",
         "enter_button_label": "Enter the text",
-        "success_message": "Verification complete. You now have access to the server.",
-        "failure_message": "Too many incorrect attempts. Press Verify again for a new CAPTCHA.",
+        "success_message": "You're in. Welcome to the server!",
+        "failure_message": "Too many wrong attempts. Press Verify to get a new code.",
         "verify_button_label": "Verify",
         "verify_panel_message_id": None,
         "verification_initialized": False,
@@ -44,30 +45,193 @@ def _defaults(guild_id: int) -> dict:
     }
 
 
-@app_commands.default_permissions(administrator=True)
-@commands.hybrid_command(name="verify", aliases=["verification"], description="Configure the server's CAPTCHA verification system.")
-@commands.guild_only()
-@commands.has_permissions(administrator=True)
-async def verify_command(ctx: commands.Context):
-    cog = ctx.bot.get_cog("Verification")
-    if cog is None:
-        return await ctx.reply(embed=error_embed("Verification module is unavailable."), mention_author=False)
-    if not cog._db_ready():
-        return await ctx.reply(embed=error_embed("MongoDB is not configured; verification settings are unavailable."), mention_author=False)
-    config = await cog.get_config(ctx.guild.id)
-    view = VerificationConfigView(cog, config, ctx.guild, ctx.author.id)
-    # EmbedLayout renders its embed inside a Components V2 container; do not pass embed= separately.
-    view.message = await ctx.reply(view=view, mention_author=False)
-
-
-@verify_command.error
-async def verify_command_error(ctx: commands.Context, error: Exception):
-    await handle_command_error(ctx, error)
-
-
 class Verification(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def cog_command_error(self, ctx: commands.Context, error: Exception):
+        await handle_command_error(ctx, error)
+
+    async def _require_db(self, ctx: commands.Context) -> bool:
+        if self._db_ready():
+            return True
+        await ctx.reply(embed=error_embed("MongoDB is not configured; verification settings are unavailable."), mention_author=False)
+        return False
+
+    @commands.hybrid_group(
+        name="verify",
+        aliases=["verification"],
+        invoke_without_command=True,
+        fallback="panel",
+        description="Configure the server's CAPTCHA verification system.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def verify_command(self, ctx: commands.Context):
+        if not await self._require_db(ctx):
+            return
+        config = await self.get_config(ctx.guild.id)
+        view = VerificationConfigView(self, config, ctx.guild, ctx.author.id)
+        # EmbedLayout renders its embed inside a Components V2 container; do not pass embed= separately.
+        view.message = await ctx.reply(view=view, mention_author=False)
+
+    def _setup_steps(self, initialized: bool) -> list[Step]:
+        return [
+            Step(
+                key="verify_channel_id",
+                title="Verification channel",
+                prompt="New members only see this channel until they verify. The panel with the Verify button goes here.",
+                kind="channel",
+                channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            ),
+            Step(
+                key="unverified_role_id",
+                title="Unverified role",
+                prompt="The role that holds members back until they pass the CAPTCHA.",
+                kind="role",
+                optional=True,
+                hint="Skip and I'll create an Unverified role for you.",
+            ),
+            Step(
+                key="verified_role_id",
+                title="Verified role",
+                prompt="The role members receive after passing the CAPTCHA.",
+                kind="role",
+                optional=True,
+                hint="Skip and I'll create a Verified role when the panel is posted.",
+            ),
+            Step(
+                key="captcha_length",
+                title="Code length",
+                prompt="How many characters should the CAPTCHA have?",
+                kind="number",
+                minimum=3,
+                maximum=12,
+                hint="6 is a good balance.",
+            ),
+            Step(
+                key="max_attempts",
+                title="Attempts",
+                prompt="How many wrong answers before the code is replaced?",
+                kind="number",
+                minimum=1,
+                maximum=10,
+            ),
+            Step(
+                key="panel_title",
+                title="Panel title",
+                prompt="The short heading on the verification panel.",
+                kind="text",
+                max_length=100,
+                placeholder="Verify to enter",
+            ),
+            Step(
+                key="panel_description",
+                title="Panel text",
+                prompt="One or two short lines telling members what to do.",
+                kind="paragraph",
+                max_length=300,
+                placeholder="Press the button below and type the code you're shown.",
+            ),
+            Step(
+                key="verify_button_label",
+                title="Button label",
+                prompt="The text on the Verify button.",
+                kind="text",
+                max_length=40,
+                placeholder="Verify",
+            ),
+            Step(
+                key="post",
+                title="Post the panel",
+                prompt=(
+                    "Post (or refresh) the verification panel now?"
+                    if initialized
+                    else "Post the panel and switch verification on now?"
+                ),
+                kind="toggle",
+                hint="" if initialized else "This hides every other channel from members who haven't verified yet, so choose No if you want to check things first.",
+            ),
+        ]
+
+    async def _finish_setup(self, interaction: discord.Interaction, values: dict) -> str:
+        guild = interaction.guild
+        channel = guild.get_channel(int(values["verify_channel_id"])) if values.get("verify_channel_id") else None
+        if not isinstance(channel, discord.TextChannel):
+            raise ValueError("Pick a text channel for verification.")
+        config = await self.get_config(guild.id)
+
+        fields = {
+            "captcha_length": max(3, min(12, int(values.get("captcha_length") or 6))),
+            "max_attempts": max(1, min(10, int(values.get("max_attempts") or 3))),
+            "panel_title": values.get("panel_title") or config.get("panel_title"),
+            "panel_description": values.get("panel_description") or config.get("panel_description"),
+            "verify_button_label": values.get("verify_button_label") or config.get("verify_button_label", "Verify"),
+        }
+        await self.save_config_fields(guild.id, fields)
+
+        unverified = guild.get_role(int(values["unverified_role_id"])) if values.get("unverified_role_id") else None
+        verified = guild.get_role(int(values["verified_role_id"])) if values.get("verified_role_id") else None
+        if unverified is not None:
+            await self.set_unverified_role(guild, unverified)
+        if verified is not None:
+            await self.set_verified_role(guild, verified)
+        elif config.get("verified_role_id"):
+            await self.set_verified_role(guild, None)
+        channel = await self.set_verification_channel(guild, channel)
+        config = await self.get_config(guild.id)
+
+        unverified_id, verified_id = config.get("unverified_role_id"), config.get("verified_role_id")
+        lines = [
+            f"**Channel:** {channel.mention}",
+            f"**Unverified role:** {f'<@&{unverified_id}>' if unverified_id else 'none'}",
+            f"**Verified role:** {f'<@&{verified_id}>' if verified_id else 'created when the panel is posted'}",
+            f"**CAPTCHA:** {fields['captcha_length']} characters, {fields['max_attempts']} attempts",
+        ]
+        if values.get("post"):
+            message = await self.post_verification_panel(guild, channel, config)
+            if message is None:
+                raise ValueError("I saved the settings but couldn't post the panel. Check my permissions in the verification channel.")
+            lines.append(f"**Panel:** posted ([jump]({message.jump_url}))")
+        else:
+            lines.append("**Panel:** not posted this time")
+        return "\n".join(lines)
+
+    @verify_command.command(name="setup", description="Guided verification setup. Run it again any time to change settings.")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def verify_setup(self, ctx: commands.Context):
+        if not await self._require_db(ctx):
+            return
+        config = await self.get_config(ctx.guild.id)
+        initialized = bool(config.get("verification_initialized"))
+
+        def existing_role(key: str):
+            role_id = config.get(key)
+            return int(role_id) if role_id and ctx.guild.get_role(int(role_id)) else None
+
+        channel_id = config.get("verify_channel_id")
+        initial = {
+            "verify_channel_id": int(channel_id) if channel_id and ctx.guild.get_channel(int(channel_id)) else None,
+            "unverified_role_id": existing_role("unverified_role_id"),
+            "verified_role_id": existing_role("verified_role_id"),
+            "captcha_length": int(config.get("captcha_length", 6)),
+            "max_attempts": int(config.get("max_attempts", 3)),
+            "panel_title": config.get("panel_title", "Verify to enter"),
+            "panel_description": config.get("panel_description", "Press the button below and type the code you're shown."),
+            "verify_button_label": config.get("verify_button_label", "Verify"),
+            "post": initialized,
+        }
+        wizard = SetupWizard(
+            title="🛡️ Verification Setup",
+            steps=self._setup_steps(initialized),
+            initial=initial,
+            on_finish=self._finish_setup,
+            author_id=ctx.author.id,
+            guild=ctx.guild,
+        )
+        await start_wizard(ctx, wizard)
 
     @property
     def collection(self):
@@ -496,8 +660,8 @@ class Verification(commands.Cog):
             verified_role = guild.get_role(int(verified_id)) if verified_id else None
             assigned = await self._assign_unverified_to_existing_members(guild, role, verified_role)
             await self.save_config_fields(guild.id, {"verification_initialized": True, "initial_members_assigned": assigned})
-        title = str(config.get("panel_title", "Verify to access the server"))
-        description = str(config.get("panel_description", "Press Verify and enter the letters and numbers shown in the CAPTCHA to unlock the server."))
+        title = str(config.get("panel_title", "Verify to enter"))
+        description = str(config.get("panel_description", "Press the button below and type the code you're shown."))
         embed = make_embed(title, description)
         old_id = config.get("verify_panel_message_id")
         old_message = None
@@ -506,7 +670,7 @@ class Verification(commands.Cog):
                 old_message = await channel.fetch_message(int(old_id))
             except discord.HTTPException:
                 old_message = None
-        view = VerificationPanelView(self, str(config.get("verify_button_label", "Verify")), embed)
+        view = VerificationPanelView(self, str(config.get("verify_button_label", "Verify")), embed, thumbnail=guild.icon.url if guild.icon else None)
         if old_message is not None and not old_message.flags.components_v2:
             # A classic embed message can't be turned into a container message: replace it.
             try:
@@ -550,7 +714,7 @@ class Verification(commands.Cog):
         length = max(3, min(12, int(config.get("captcha_length", 6))))
         expected = generate_captcha_text(length)
         file = await asyncio.to_thread(make_captcha_image, expected)
-        embed = make_embed(str(config.get("captcha_title", "Complete verification")), str(config.get("prompt_description", "Enter the lowercase letters and numbers shown. Similar-looking characters (such as 0, o, i and l) are excluded.")))
+        embed = make_embed(str(config.get("captcha_title", "Complete verification")), str(config.get("prompt_description", "Type the characters from the image. Lowercase letters and numbers only.")))
         view = CaptchaPromptView(self, expected, config, interaction.user.id, time.time() + max(30, min(600, int(config.get("captcha_expiry_seconds", 180)))), embed)
         try:
             view.message = await interaction.followup.send(file=file, view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), wait=True)
@@ -584,5 +748,3 @@ class Verification(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Verification(bot))
-    if bot.get_command("verify") is None:
-        bot.add_command(verify_command)
