@@ -3,6 +3,7 @@
 Commands (hybrid: work as ``.automod ...`` and as ``/automod ...``):
 
 * ``automod``                           open the admin panel (send the warning message, switch kick/ban)
+* ``automod setup``                     guided setup; run it again later to change anything
 * ``automod set <channel> <kick|ban>``  choose the trap channel and the punishment
 * ``automod action <kick|ban>``         change only the punishment
 * ``automod warn``                      post the red warning message in the trap channel
@@ -27,6 +28,7 @@ from discord.ext import commands
 from views.automod_views import ACTION_WORDS, AutomodPanelView, AutomodWarningView
 from views.embeds import BRAND_COLOR, err_embed, handle_command_error, info_embed, ok_embed
 from views.navigate import PaginatorView
+from views.setup_wizard import SetupWizard, Step, start_wizard
 
 LOG_PAGE_SIZE = 10
 LOG_FETCH_LIMIT = 500
@@ -386,6 +388,7 @@ class Automod(commands.Cog):
         name="automod",
         aliases=["am"],
         invoke_without_command=True,
+        fallback="panel",
         description="Kick or ban anyone who talks in a trap channel (administrators only).",
     )
     @app_commands.default_permissions(administrator=True)
@@ -396,6 +399,88 @@ class Automod(commands.Cog):
             return
         view = await self._panel_view(ctx.guild, ctx.author)
         view.message = await ctx.reply(view=view, mention_author=False)
+
+    def _setup_steps(self, guild: discord.Guild) -> list[Step]:
+        return [
+            Step(
+                key="channel_id",
+                title="Trap channel",
+                prompt="Pick the channel nobody should talk in. Anyone who isn't an administrator and sends a message there is punished instantly.",
+                kind="channel",
+                hint="Administrators and the server owner are never punished.",
+            ),
+            Step(
+                key="action",
+                title="Punishment",
+                prompt="What should happen to someone who talks in the trap channel?",
+                kind="choice",
+                choices=[("kick", "Kick"), ("ban", "Ban")],
+            ),
+            Step(
+                key="warn",
+                title="Warning message",
+                prompt="Post the red warning message in the trap channel now? It tells people what happens and shows a live counter.",
+                kind="toggle",
+            ),
+        ]
+
+    async def _finish_setup(self, interaction: discord.Interaction, values: dict) -> str:
+        guild = interaction.guild
+        channel = guild.get_channel(values["channel_id"]) if values.get("channel_id") else None
+        if not isinstance(channel, discord.TextChannel):
+            raise ValueError("Pick a text channel for the trap.")
+        action = values.get("action") or "kick"
+        old = self._config.get(guild.id) or {}
+        moved = old.get("channel_id") != channel.id
+
+        fields = {"channel_id": channel.id, "action": action}
+        if moved:
+            old_channel = guild.get_channel(old.get("channel_id", 0))
+            if old_channel is not None and old.get("warning_message_id"):
+                try:
+                    await old_channel.get_partial_message(old["warning_message_id"]).delete()
+                except discord.HTTPException:
+                    pass
+            fields["warning_message_id"] = None
+        await self._save_config(guild.id, **fields)
+
+        lines = [
+            f"**Trap channel:** {channel.mention}",
+            f"**Punishment:** {ACTION_WORDS[action]['verb'].capitalize()}",
+        ]
+        me = guild.me.guild_permissions
+        if (action == "kick" and not me.kick_members) or (action == "ban" and not me.ban_members):
+            lines.append(f"⚠️ I still need the **{'Kick' if action == 'kick' else 'Ban'} Members** permission.")
+        if values.get("warn"):
+            ok, detail = await self.send_warning(guild)
+            lines.append(f"**Warning message:** posted in {detail}" if ok else f"⚠️ {detail}")
+        else:
+            self.schedule_refresh(guild.id)
+            lines.append("**Warning message:** not posted (use the warning button in `automod`)")
+        return "\n".join(lines)
+
+    @automod.command(name="setup", description="Guided automod setup. Run it again any time to change settings.")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def automod_setup(self, ctx: commands.Context):
+        if not await self._require_db(ctx):
+            return
+        cfg = self._config.get(ctx.guild.id) or {}
+        channel_id = cfg.get("channel_id")
+        initial = {
+            "channel_id": channel_id if channel_id and ctx.guild.get_channel(channel_id) else None,
+            "action": cfg.get("action", "kick"),
+            "warn": not cfg.get("warning_message_id"),
+        }
+        wizard = SetupWizard(
+            title="🛡️ Automod Setup",
+            steps=self._setup_steps(ctx.guild),
+            initial=initial,
+            on_finish=self._finish_setup,
+            author_id=ctx.author.id,
+            guild=ctx.guild,
+        )
+        await start_wizard(ctx, wizard)
 
     @automod.command(name="set", usage="<channel> <kick|ban>", description="Sets the trap channel and the punishment.")
     @app_commands.describe(channel="The trap channel.", action="Kick or ban whoever sends a message there.")
