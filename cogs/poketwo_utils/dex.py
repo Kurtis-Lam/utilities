@@ -157,6 +157,8 @@ class Dex(commands.Cog):
         self._lookup = {}
         self._numbers = {}
         self._img_cache = OrderedDict()
+        self._image_locks: dict[str, asyncio.Lock] = {}
+        self._image_cache_limit = 4096
 
     async def cog_command_error(self, ctx: commands.Context, error):
         await handle_command_error(ctx, error)
@@ -178,17 +180,16 @@ class Dex(commands.Cog):
         return self.db["pokeimgs"]
 
     async def cog_load(self):
-        """Warms up the database connection and loads the Pokédex asynchronously on boot."""
-        try:
-            await self.mongo_client.admin.command('ping')
-            await self.load_pokedex()
-        except Exception as e:
-            print(f"Dex Cog: MongoDB warmup or Pokédex loading failed: {e}")
+        """Loads the Pokédex after the shared MongoDB client has been warmed up by the bot."""
+        if self.mongo_client is None:
+            print("Dex Cog: MongoDB is not configured; Pokédex lookups are unavailable.")
+            return
+        await self.load_pokedex()
 
     async def load_pokedex(self):
         """Loads pokedex document from MongoDB Atlas into memory asynchronously."""
         try:
-            doc = await self.collection.find_one({"_id": "pokedex"})
+            doc = await self.collection.find_one({"_id": "pokedex"}, {"data": 1})
             if doc and "data" in doc:
                 self.pokedex = doc["data"]
             else:
@@ -205,6 +206,8 @@ class Dex(commands.Cog):
         lookup = {}
         numbers = {}
         for name, info in self.pokedex.items():
+            if not isinstance(info, dict):
+                continue
             lookup.setdefault(name.lower(), name)
             lookup.setdefault(normalize_key(name), name)
             number = str(info.get("pokedex_number", "")).lstrip("#")
@@ -213,26 +216,59 @@ class Dex(commands.Cog):
         self._lookup = lookup
         self._numbers = numbers
 
-    async def _fetch_image(self, keys: list) -> Optional[tuple]:
-        """Returns (key, bytes) for the first key (in priority order) that has an image."""
-        if not keys:
-            return None
-        for key in keys:
-            cached = self._img_cache.get(key)
-            if cached is not None:
-                self._img_cache.move_to_end(key)
-                return key, cached
-        found = {}
-        async for doc in self.img_collection.find({"_id": {"$in": keys}}):
-            if "image" in doc:
-                found[doc["_id"]] = bytes(doc["image"])
-        for key in keys:
-            if key in found:
-                self._img_cache[key] = found[key]
-                while len(self._img_cache) > 48:
+    async def _fetch_pokemon_images(self, matched_name: str) -> tuple[Optional[tuple], Optional[tuple]]:
+        """Fetch normal and shiny images in one MongoDB round trip, then retain positive and negative cache entries."""
+        normal_keys = image_ids(matched_name)
+        if normalize_key(matched_name) == "missingno" and "missingno" not in normal_keys:
+            normal_keys.insert(0, "missingno")
+        shiny_keys = [f"shiny {key}" for key in image_ids(matched_name)]
+        all_keys = list(dict.fromkeys(normal_keys + shiny_keys))
+        if not all_keys:
+            return None, None
+
+        lock_key = normalize_key(matched_name) or matched_name.casefold()
+        image_lock = self._image_locks.setdefault(lock_key, asyncio.Lock())
+        async with image_lock:
+            missing = []
+            for key in all_keys:
+                if key in self._img_cache:
+                    self._img_cache.move_to_end(key)
+                else:
+                    missing.append(key)
+            if missing:
+                found = {}
+                cursor = self.img_collection.find(
+                    {"_id": {"$in": missing}},
+                    {"image": 1},
+                )
+                documents = await cursor.to_list(length=len(missing))
+                for doc in documents:
+                    image_data = doc.get("image")
+                    if image_data is not None:
+                        found[doc["_id"]] = bytes(image_data)
+                for key in missing:
+                    self._img_cache[key] = found.get(key)
+                while len(self._img_cache) > self._image_cache_limit:
                     self._img_cache.popitem(last=False)
-                return key, found[key]
-        return None
+
+            normal_result = None
+            for key in normal_keys:
+                value = self._img_cache.get(key)
+                if value is not None:
+                    self._img_cache.move_to_end(key)
+                    normal_result = (key, value)
+                    break
+
+            shiny_result = None
+            for key in shiny_keys:
+                value = self._img_cache.get(key)
+                if value is not None:
+                    self._img_cache.move_to_end(key)
+                    filename = f"shiny_{normalize_key(matched_name).replace(' ', '_')}.png"
+                    shiny_result = (filename, value)
+                    break
+
+        return normal_result, shiny_result
 
     @commands.hybrid_command(
         name="dex",
@@ -281,15 +317,7 @@ class Dex(commands.Cog):
             description=description
         )
 
-        # Explicit image lookup key (maps "MissingNo." or "missingno" -> "missingno")
-        img_lookup_keys = image_ids(matched_name)
-        if normalize_key(matched_name) == "missingno":
-            img_lookup_keys.insert(0, "missingno")
-
-        normal_result, shiny_img = await asyncio.gather(
-            self._fetch_image(img_lookup_keys),
-            self._load_shiny_image(matched_name),
-        )
+        normal_result, shiny_img = await self._fetch_pokemon_images(matched_name)
 
         file = None
         normal_img = None
@@ -396,14 +424,6 @@ class Dex(commands.Cog):
         if view:
             view.message = msg
 
-    async def _load_shiny_image(self, matched_name: str) -> Optional[tuple]:
-        """Returns (filename, bytes) for the shiny sprite from pokeimgs ("shiny <name>"), or None."""
-        keys = [f"shiny {key}" for key in image_ids(matched_name)]
-        result = await self._fetch_image(keys)
-        if result:
-            filename = f"shiny_{normalize_key(matched_name).replace(' ', '_')}.png"
-            return (filename, result[1])
-        return None
 
 
 async def setup(bot):
