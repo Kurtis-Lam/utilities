@@ -305,17 +305,15 @@ class Dex(commands.Cog):
             return
 
         dex_num = str(data.get("pokedex_number", "???")).lstrip("#")
-        embed_title = f"#{dex_num} — {matched_name}"
+        embed_title = f"#{dex_num} - {matched_name}"
 
-        description = data.get("description", "")
+        description = str(data.get("description") or "")
         evolution = data.get("evolution", "")
         if evolution:
-            description += f"\n\n**Evolution**\n{evolution}"
+            description = f"{description}\n\n**Evolution**\n{evolution}" if description else f"**Evolution**\n{evolution}"
+        description = description[:4096]
 
-        embed = make_embed(
-            title=embed_title,
-            description=description
-        )
+        embed = make_embed(title=embed_title, description=description or None)
 
         normal_result, shiny_img = await self._fetch_pokemon_images(matched_name)
 
@@ -329,37 +327,25 @@ class Dex(commands.Cog):
             file = discord.File(fp=io.BytesIO(image_bytes), filename=filename)
             embed.set_thumbnail(url=f"attachment://{filename}")
 
-        # 1. Types (safely handles null / None)
+        # Keep fields in three inline columns, matching a compact Pokédex card.
         raw_types = data.get("types")
         if isinstance(raw_types, list):
-            types_formatted = "\n".join(
-                f"{TYPE_EMOJIS.get(t.lower(), '')} {t}".strip()
-                for t in raw_types
-            )
+            types_formatted = "\n".join(str(t) for t in raw_types)
         elif isinstance(raw_types, str):
             types_formatted = raw_types
         else:
             types_formatted = "N/A"
+        embed.add_field(name="Types", value=types_formatted[:1024] or "N/A", inline=True)
+        embed.add_field(name="Region", value=str(data.get("region") or "N/A")[:1024], inline=True)
 
-        embed.add_field(
-            name="Types", value=types_formatted, inline=True
-        )
-
-        # 2. Region
-        embed.add_field(
-            name="Region", value=data.get("region", "N/A"), inline=True
-        )
-
-        # 3. Catchable
         catchable = data.get("catchable")
         catchable_str = (
-            "✅ Yes"
+            "Yes"
             if catchable is True
-            else ("❌ No" if catchable is False else str(catchable))
+            else ("No" if catchable is False else str(catchable or "N/A"))
         )
         embed.add_field(name="Catchable", value=catchable_str, inline=True)
 
-        # 4. Base Stats
         stats = data.get("base_stats", {})
         if isinstance(stats, dict):
             stats_str = (
@@ -373,43 +359,38 @@ class Dex(commands.Cog):
             )
         else:
             stats_str = str(stats)
-        embed.add_field(name="Base Stats", value=stats_str, inline=True)
+        embed.add_field(name="Base Stats", value=stats_str[:1024] or "N/A", inline=True)
 
-        # 5. Names
         raw_names = data.get("names", [])
         names_str = (
             "\n".join(raw_names)
             if isinstance(raw_names, list)
             else str(raw_names)
         )
-        embed.add_field(name="Names", value=names_str or "N/A", inline=True)
+        embed.add_field(name="Names", value=(names_str or "N/A")[:1024], inline=True)
 
-        # 6. Appearance
         app = data.get("appearance", {})
         if isinstance(app, dict):
             app_str = f"Height: {app.get('height', 'N/A')}\nWeight: {app.get('weight', 'N/A')}"
         else:
             app_str = str(app)
-        embed.add_field(name="Appearance", value=app_str, inline=True)
+        embed.add_field(name="Appearance", value=app_str[:1024] or "N/A", inline=True)
 
-        # 7. Gender Ratio
         gr = data.get("gender_ratio", {})
         if isinstance(gr, dict):
             gr_str = f"♂ {gr.get('male', 'N/A')} - ♀ {gr.get('female', 'N/A')}"
         else:
             gr_str = str(gr)
-        embed.add_field(name="Gender Ratio", value=gr_str, inline=True)
+        embed.add_field(name="Gender Ratio", value=gr_str[:1024] or "N/A", inline=True)
 
-        # 8. Egg Groups
         raw_egg = data.get("egg_group", [])
         egg_str = (
             "\n".join(raw_egg) if isinstance(raw_egg, list) else str(raw_egg)
         )
-        embed.add_field(name="Egg Groups", value=egg_str or "N/A", inline=True)
+        embed.add_field(name="Egg Groups", value=(egg_str or "N/A")[:1024], inline=True)
 
-        # 9. Hatch Time
         embed.add_field(
-            name="Hatch Time", value=data.get("hatch_time", "N/A"), inline=True
+            name="Hatch Time", value=str(data.get("hatch_time") or "N/A")[:1024], inline=True
         )
 
         # Shiny image (pokeimgs doc "shiny <name>") -> sparkles toggle button
@@ -417,7 +398,7 @@ class Dex(commands.Cog):
         if shiny_img:
             view = ShinyView(ctx.author.id, embed, normal_img, shiny_img)
 
-        kwargs = {"view": view} if view else {"embed": embed}
+        kwargs = {"embed": view.render_embed(), "view": view} if view else {"embed": embed}
         if file:
             kwargs["file"] = file
         msg = await ctx.reply(**kwargs, mention_author=False)
