@@ -2,17 +2,18 @@ import asyncio
 import re
 import time
 import typing
+import unicodedata
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
 # Import ConfirmView from views/common.py
 from views.common_views import confirm
-from views.embeds import ok_embed, err_embed, handle_common_error, send_usage
+from views.embeds import ok_embed, err_embed, info_embed, handle_common_error, send_usage
 from views.loading import loading
 from views.prompts import raw_args, strip_quotes
 from views.roleviews import RoleChoiceView
-from views.selfrole_views import SelfRoleDashboardView, SelfRolePanelView, selfrole_panel_embed
+from views.selfrole_views import SelfRoleDashboardView, SelfRolePanelView, SelfRoleRemoveView, selfrole_panel_embed
 from views.common_views import error_embed as default_error_embed, make_embed as default_make_embed, success_embed as default_success_embed
 
 
@@ -20,6 +21,19 @@ _DURATION_FULL = re.compile(r"^(?:\d+[smhdw])+$")
 _DURATION_PART = re.compile(r"(\d+)([smhdw])")
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 MAX_ROLE_SECONDS = 365 * 86400
+_CUSTOM_EMOJI_TOKEN = re.compile(r"<a?:[A-Za-z0-9_]{2,32}:\d{15,25}>")
+_KEYCAP_EMOJI_TOKEN = re.compile(r"[0-9#*]\ufe0f?\u20e3")
+_EMOJI_BASE_RANGES = (
+    (0x1F000, 0x1FAFF),
+    (0x2600, 0x27BF),
+    (0x2300, 0x23FF),
+    (0x00A9, 0x00A9),
+    (0x00AE, 0x00AE),
+    (0x203C, 0x203C),
+    (0x2049, 0x2049),
+    (0x2122, 0x2122),
+    (0x2139, 0x2139),
+)
 
 
 def parse_duration(text: str) -> typing.Optional[int]:
@@ -92,6 +106,78 @@ def find_role(guild: discord.Guild, text: str) -> typing.Optional[discord.Role]:
         if not role.is_default() and " ".join(role.name.casefold().split()) == wanted
     ]
     return max(matches, key=lambda role: role.position) if matches else None
+
+
+def _is_emoji_token(token: str) -> bool:
+    """Recognises a single Unicode or custom Discord emoji token in a command string."""
+    if _CUSTOM_EMOJI_TOKEN.fullmatch(token) or _KEYCAP_EMOJI_TOKEN.fullmatch(token):
+        return True
+    if not token:
+        return False
+
+    def is_emoji_base(char: str) -> bool:
+        codepoint = ord(char)
+        return any(start <= codepoint <= end for start, end in _EMOJI_BASE_RANGES)
+
+    if not is_emoji_base(token[0]):
+        return False
+    for char in token[1:]:
+        codepoint = ord(char)
+        if (
+            is_emoji_base(char)
+            or 0x1F3FB <= codepoint <= 0x1F3FF
+            or 0x1F1E6 <= codepoint <= 0x1F1FF
+            or 0xE0020 <= codepoint <= 0xE007F
+            or codepoint in {0x200D, 0x20E3, 0xFE0E, 0xFE0F}
+            or unicodedata.combining(char)
+        ):
+            continue
+        return False
+    return True
+
+
+def parse_selfrole_add_args(guild: discord.Guild, raw: str) -> tuple[int, list[dict]]:
+    """Parse `<message ID> <emoji> <role name with spaces> [<emoji> <role> ...]`."""
+    tokens = raw.split()
+    if not tokens or not re.fullmatch(r"\d{15,25}", tokens[0]):
+        raise ValueError("Start with the message ID, followed by emoji and role pairs.")
+
+    message_id = int(tokens[0])
+    mappings = []
+    seen_emojis = set()
+    index = 1
+    while index < len(tokens):
+        emoji_text = tokens[index]
+        if not _is_emoji_token(emoji_text):
+            raise ValueError(f"`{emoji_text}` is not a recognised emoji. Put an emoji before each role name.")
+        index += 1
+
+        role_tokens = []
+        while index < len(tokens) and not _is_emoji_token(tokens[index]):
+            role_tokens.append(tokens[index])
+            index += 1
+        role_text = strip_quotes(" ".join(role_tokens))
+        if not role_text:
+            raise ValueError(f"No role was supplied after `{emoji_text}`.")
+
+        try:
+            emoji = discord.PartialEmoji.from_str(emoji_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"`{emoji_text}` is not a valid Discord emoji.") from exc
+        emoji_value = str(emoji)
+        if emoji_value in seen_emojis:
+            raise ValueError(f"The emoji `{emoji_value}` appears more than once.")
+        role = find_role(guild, role_text)
+        if role is None:
+            raise ValueError(f"Couldn't find the role `{role_text}`. Role names with spaces are supported.")
+        if role.managed or role.is_default():
+            raise ValueError(f"The role `{role.name}` cannot be self-assigned.")
+        seen_emojis.add(emoji_value)
+        mappings.append({"emoji": emoji_value, "role_id": role.id, "role_name": role.name})
+
+    if not mappings:
+        raise ValueError("Add at least one emoji and role pair after the message ID.")
+    return message_id, mappings
 
 
 def after_first_arg(args: str) -> str:
@@ -285,6 +371,186 @@ class Role(commands.Cog):
         })
         return message
 
+    async def _find_selfrole_message(
+        self,
+        guild: discord.Guild,
+        message_id: int,
+        preferred_channel: discord.abc.Messageable | None = None,
+    ) -> discord.Message | None:
+        """Find a message in this guild, checking the command channel first."""
+        channels = []
+        if isinstance(preferred_channel, (discord.TextChannel, discord.Thread)):
+            channels.append(preferred_channel)
+        channels.extend(guild.text_channels)
+        channels.extend(getattr(guild, "threads", []))
+
+        seen = set()
+        bot_member = guild.me
+        for channel in channels:
+            if channel.id in seen:
+                continue
+            seen.add(channel.id)
+            if bot_member is not None:
+                permissions = channel.permissions_for(bot_member)
+                if not permissions.view_channel or not permissions.read_message_history:
+                    continue
+            try:
+                message = await channel.fetch_message(int(message_id))
+                if message.guild is not None and message.guild.id == guild.id:
+                    return message
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
+        return None
+
+    async def remove_selfrole_mapping(self, guild_id: int, emoji: str, role_id: int):
+        """Delete one emoji-to-role mapping and synchronise its published panel."""
+        config = await self.get_selfrole_config(guild_id)
+        roles = list(config.get("roles", []))
+        target = next(
+            (
+                item for item in roles
+                if str(item.get("emoji", "")) == str(emoji)
+                and int(item.get("role_id", 0) or 0) == int(role_id)
+            ),
+            None,
+        )
+        if target is None:
+            return default_error_embed("That emoji-to-role mapping has already been removed.")
+
+        remaining = [item for item in roles if item is not target]
+        await self.save_selfrole_config(guild_id, {"roles": remaining})
+
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is not None:
+            channel_id = int(config.get("channel_id", 0) or 0)
+            message_id = int(config.get("message_id", 0) or 0)
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(channel_id)
+                except discord.HTTPException:
+                    channel = None
+            if message_id and isinstance(channel, (discord.TextChannel, discord.Thread)):
+                try:
+                    message = await channel.fetch_message(message_id)
+                    if str(config.get("mode", "buttons")).lower() == "reactions":
+                        try:
+                            await message.clear_reaction(discord.PartialEmoji.from_str(emoji))
+                        except discord.HTTPException:
+                            pass
+                    else:
+                        panel_config = {**config, "roles": remaining}
+                        panel_view = SelfRolePanelView(self, guild.id, remaining, guild) if remaining else None
+                        await message.edit(
+                            embed=selfrole_panel_embed(panel_config, guild),
+                            view=panel_view,
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                except discord.HTTPException:
+                    pass
+
+        role_name = target.get("role_name") or f"role `{role_id}`"
+        return default_success_embed(f"Removed the `{emoji}` self-role mapping for **{role_name}**.")
+
+    async def _add_selfrole_reactions(self, ctx, raw: str):
+        try:
+            message_id, mappings = parse_selfrole_add_args(ctx.guild, raw)
+        except ValueError as exc:
+            return await ctx.reply(embed=err_embed("Invalid Self-Role Mapping", str(exc)), mention_author=False)
+
+        message = await self._find_selfrole_message(ctx.guild, message_id, ctx.channel)
+        if message is None:
+            return await ctx.reply(
+                embed=err_embed("Message Not Found", "I couldn't find that message in this server, or I don't have permission to read its channel."),
+                mention_author=False,
+            )
+
+        bot_member = ctx.guild.me
+        if bot_member is None:
+            return await ctx.reply(embed=err_embed("Unavailable", "I couldn't verify my server permissions. Try again shortly."), mention_author=False)
+        channel_permissions = message.channel.permissions_for(bot_member)
+        if not channel_permissions.add_reactions or not channel_permissions.read_message_history:
+            return await ctx.reply(
+                embed=err_embed("Missing Permissions", "I need **Add Reactions** and **Read Message History** in the channel containing that message."),
+                mention_author=False,
+            )
+
+        for item in mappings:
+            role = ctx.guild.get_role(int(item["role_id"]))
+            if role is None:
+                return await ctx.reply(embed=err_embed("Role Not Found", f"The role `{item['role_name']}` no longer exists."), mention_author=False)
+            if role >= bot_member.top_role:
+                return await ctx.reply(embed=err_embed("Role Hierarchy", f"Move my highest role above **{role.name}** before adding it as a self-role."), mention_author=False)
+
+        current = await self.get_selfrole_config(ctx.guild.id)
+        current_message_id = int(current.get("message_id", 0) or 0)
+        same_message = current_message_id == message.id
+        merged = list(current.get("roles", [])) if same_message else []
+        by_emoji = {str(item.get("emoji")): item for item in merged}
+        existing_emojis = set(by_emoji)
+        for item in mappings:
+            by_emoji[item["emoji"]] = item
+        merged = list(by_emoji.values())
+        if len(merged) > 20:
+            return await ctx.reply(embed=err_embed("Too Many Mappings", "Reaction-based self-role panels support up to 20 emoji mappings."), mention_author=False)
+
+        added_reactions = []
+        try:
+            for item in mappings:
+                if item["emoji"] in existing_emojis:
+                    continue
+                await message.add_reaction(item["emoji"])
+                added_reactions.append(item["emoji"])
+        except discord.HTTPException as exc:
+            for added in added_reactions:
+                try:
+                    await message.remove_reaction(added, bot_member)
+                except discord.HTTPException:
+                    pass
+            return await ctx.reply(
+                embed=err_embed("Could Not Add Reaction", f"I couldn't add `{item['emoji']}`. Check Add Reactions and Use External Emojis permissions.\n`{exc}`"),
+                mention_author=False,
+            )
+
+        if same_message and str(current.get("mode", "buttons")).lower() == "buttons":
+            try:
+                await message.edit(view=None)
+            except discord.HTTPException:
+                pass
+
+        await self.save_selfrole_config(ctx.guild.id, {
+            "channel_id": message.channel.id,
+            "message_id": message.id,
+            "title": current.get("title", "Choose Your Roles"),
+            "description": current.get("description", "Use the reactions below to manage your roles."),
+            "mode": "reactions",
+            "roles": merged,
+        })
+        role_lines = [f"{item['emoji']}  <@&{item['role_id']}>" for item in mappings]
+        embed = ok_embed(
+            "Self-Roles Added",
+            f"Added {len(mappings)} emoji mapping(s) to [the message]({message.jump_url}).\n\n" + "\n".join(role_lines),
+            emoji="✅",
+        )
+        await ctx.reply(embed=embed, mention_author=False)
+
+    async def _open_selfrole_remove(self, ctx, config: dict):
+        if not config.get("roles"):
+            return await ctx.reply(embed=info_embed("There are no self-role mappings to remove."), mention_author=False)
+        view = SelfRoleRemoveView(self, ctx.guild.id, ctx.author.id, config)
+        if ctx.interaction is not None:
+            await ctx.interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
+            view.message = await ctx.interaction.original_response()
+            return
+        try:
+            view.message = await ctx.author.send(embed=view.embed(), view=view)
+            await ctx.reply(embed=info_embed("I sent you a private self-role removal selector."), mention_author=False, delete_after=10)
+        except discord.Forbidden:
+            await ctx.reply(
+                embed=err_embed("Private Selector Unavailable", "I couldn't DM you. Run `/selfrole` and choose `remove` in the private slash-command response; prefix commands cannot create ephemeral messages."),
+                mention_author=False,
+            )
+
     async def toggle_selfrole(self, member: discord.Member, role_id: int, *, panel_message_id: int | None = None):
         config = self._selfrole_cache.get(member.guild.id)
         if panel_message_id is not None:
@@ -350,13 +616,31 @@ class Role(commands.Cog):
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
         await self._handle_selfrole_reaction(payload, adding=False)
 
-    @commands.hybrid_command(name="selfrole", description="Configure a self-role panel with emoji reactions or buttons.")
+    @commands.hybrid_command(name="selfrole", description="Configure, add or remove self-role mappings.")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     @commands.bot_has_permissions(manage_roles=True)
-    async def selfrole(self, ctx):
+    @app_commands.describe(args="Leave blank for the dashboard, use `add <message ID> <emoji> <role name> ...`, or `remove`.")
+    async def selfrole(self, ctx, *, args: str = commands.parameter(default="", description="Self-role action and arguments.")):
         if self.mongo_client is None:
             return await ctx.reply(embed=err_embed("MongoDB is not configured; self-role settings are unavailable."), mention_author=False)
+
+        raw = args.strip() if ctx.interaction is not None else raw_args(ctx)
+        if raw:
+            action, _, remainder = raw.partition(" ")
+            action = action.casefold()
+            if action == "add":
+                return await self._add_selfrole_reactions(ctx, remainder.strip())
+            if action in {"remove", "delete", "del", "r"}:
+                if remainder.strip():
+                    return await ctx.reply(embed=err_embed("Usage", "Use `.selfrole remove` and choose the emoji mappings with the buttons."), mention_author=False)
+                config = await self.get_selfrole_config(ctx.guild.id)
+                return await self._open_selfrole_remove(ctx, config)
+            return await ctx.reply(
+                embed=err_embed("Unknown Action", "Use `.selfrole` for the dashboard, `.selfrole add <message ID> <emoji> <role name> ...`, or `.selfrole remove`."),
+                mention_author=False,
+            )
+
         config = await self.get_selfrole_config(ctx.guild.id)
         view = SelfRoleDashboardView(self, ctx.guild, ctx.author.id, config)
         if ctx.interaction is not None:
