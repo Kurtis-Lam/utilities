@@ -15,6 +15,7 @@ from views.navigate import PaginatorView
 MEMBERCOUNT_CACHE_SECONDS = 60
 MAX_REASON_LENGTH = 500
 DEFAULT_REASON = "No reason provided"
+MAX_WHOIS_TARGETS = 10  # Discord allows at most 10 embeds per message
 
 
 class Members(commands.Cog):
@@ -80,48 +81,27 @@ class Members(commands.Cog):
         return amount * multipliers[unit]
 
     # ------------------------------------------------------------------
-    # User Info (.whois)
+    # User Info (.whois) - supports several users at once
     # ------------------------------------------------------------------
 
-    @commands.hybrid_command(
-        name="whois",
-        aliases=["userinfo", "ui"],
-        with_app_command=True,
-        description="Displays information about a server member or user."
-    )
-    @app_commands.describe(target="The member or user ID to look up.")
-    @commands.guild_only()
-    @loading
-    async def whois(
-        self,
-        ctx: commands.Context,
-        target: typing.Union[discord.Member, discord.User] = commands.parameter(default=None, description="The member or user to look up (mention or ID). Leave blank for yourself."),
-    ):
-        if target is None:
-            target = ctx.author
+    async def _resolve_user(self, guild: discord.Guild, user_id: int):
+        """Returns a Member if they're in the server, otherwise a User, otherwise None."""
+        member = guild.get_member(user_id)
+        if member:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except discord.NotFound:
+            pass
+        except discord.HTTPException:
+            pass
+        try:
+            return await self.bot.fetch_user(user_id)
+        except discord.HTTPException:
+            return None
 
-        if isinstance(target, int):
-            member = ctx.guild.get_member(target)
-            if member:
-                target = member
-            else:
-                try:
-                    target = await self.bot.fetch_user(target)
-                except discord.NotFound:
-                    return await ctx.reply(
-                        embed=err_embed("User Not Found", "No user found with that ID."),
-                        mention_author=False
-                    )
-                except discord.HTTPException as e:
-                    return await ctx.reply(
-                        embed=err_embed("Error", f"Failed to fetch user: `{e}`"),
-                        mention_author=False
-                    )
-
-        embed = discord.Embed(
-            title=target.name,
-            color=BRAND_COLOR,
-        )
+    def _build_whois_embed(self, target: typing.Union[discord.Member, discord.User]) -> discord.Embed:
+        embed = discord.Embed(title=target.name, color=BRAND_COLOR)
 
         avatar_url = target.avatar.url if target.avatar else target.default_avatar.url
         embed.set_thumbnail(url=avatar_url)
@@ -143,15 +123,10 @@ class Members(commands.Cog):
             else:
                 joined_val = "Unknown"
 
-            embed.add_field(
-                name="Joined Server At",
-                value=joined_val,
-                inline=False,
-            )
+            embed.add_field(name="Joined Server At", value=joined_val, inline=False)
 
             roles = [role.mention for role in reversed(target.roles) if not role.is_default()]
             roles_str = ", ".join(roles) if roles else "None"
-
             embed.add_field(
                 name=f"Roles [{len(roles)}]",
                 value=roles_str[:1024],
@@ -164,7 +139,78 @@ class Members(commands.Cog):
                 inline=False,
             )
 
-        await ctx.reply(embed=embed, mention_author=False)
+        return embed
+
+    @commands.hybrid_command(
+        name="whois",
+        aliases=["userinfo", "ui"],
+        with_app_command=True,
+        description="Displays information about one or more server members or users."
+    )
+    @app_commands.describe(targets="One or more members or user IDs (e.g. @user1 @user2 @user3).")
+    @commands.guild_only()
+    @loading
+    async def whois(
+        self,
+        ctx: commands.Context,
+        *,
+        targets: str = commands.parameter(default=None, description="One or more members/users (mentions or IDs). Leave blank for yourself."),
+    ):
+        # Pull every user ID out of mentions (<@123>, <@!123>) and raw IDs, keeping order, no duplicates
+        if targets:
+            ids = list(dict.fromkeys(int(i) for i in re.findall(r"\d{15,20}", targets)))
+        else:
+            ids = [ctx.author.id]
+
+        if not ids:
+            return await ctx.reply(
+                embed=err_embed("No Users Found", "Mention one or more users or provide their IDs."),
+                mention_author=False,
+            )
+
+        truncated = len(ids) > MAX_WHOIS_TARGETS
+        ids = ids[:MAX_WHOIS_TARGETS]
+
+        embeds: list[discord.Embed] = []
+        not_found: list[int] = []
+        for user_id in ids:
+            target = await self._resolve_user(ctx.guild, user_id)
+            if target is None:
+                not_found.append(user_id)
+                continue
+            embeds.append(self._build_whois_embed(target))
+
+        if not embeds:
+            return await ctx.reply(
+                embed=err_embed("User Not Found", "No users were found with the given mentions/IDs."),
+                mention_author=False,
+            )
+
+        notes = []
+        if not_found:
+            notes.append("Couldn't find: " + ", ".join(f"`{i}`" for i in not_found))
+        if truncated:
+            notes.append(f"Only the first {MAX_WHOIS_TARGETS} users are shown.")
+        content = "\n".join(notes) if notes else None
+
+        # Discord caps a message at 6000 total embed characters, so split into several messages if needed
+        batches: list[list[discord.Embed]] = []
+        current: list[discord.Embed] = []
+        current_len = 0
+        for embed in embeds:
+            if current and current_len + len(embed) > 5500:
+                batches.append(current)
+                current, current_len = [], 0
+            current.append(embed)
+            current_len += len(embed)
+        if current:
+            batches.append(current)
+
+        for i, batch in enumerate(batches):
+            if i == 0:
+                await ctx.reply(content=content, embeds=batch, mention_author=False)
+            else:
+                await ctx.send(embeds=batch)
 
     # ------------------------------------------------------------------
     # Member count (.membercount) - everyone can use it
