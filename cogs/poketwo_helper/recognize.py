@@ -43,7 +43,7 @@ SIM_CHUNK_ROWS = 2048
 TOP_K_IMAGES = 40
 CLASS_TOP_N = 3
 CLASS_MAX_WEIGHT = 0.75
-RERANK_MARGIN = 0.06
+RERANK_MARGIN = 0.08
 RERANK_MAX_CLASSES = 6
 
 # -------------------------------------------------------------------
@@ -75,8 +75,51 @@ DIFF_DEADZONE = 5.0             # template differences below this are noise
 DIFF_MIN_WEIGHT = 12.0          # minimum discriminative evidence required
 BETA_COL = 0.008                # score penalty per delta E lost head-to-head
 BETA_FIT = 0.005                # score penalty per delta E of poorer shape/fit
+PAIR_FIT_BOOSTS = {
+    frozenset(("palafin", "finizen")): 0.12,
+}
+# Form families are expanded after CLIP ranking so a close form is not lost
+# merely because only one or two of its siblings entered the top image list.
+# Matching uses the species token in the stored label (for example,
+# "blue flower florges" or "psychic silvally").
+FORM_FAMILY_MARKERS = (
+    "flabb", "floette", "florges", "silvally", "arceus", "vivillon",
+    "oricorio", "deerling", "sawsbuck", "burmy", "wormadam", "shellos",
+    "gastrodon", "furfrou", "alcremie", "tatsugiri", "basculin", "lycanroc",
+    "zygarde", "rotom", "unown", "meloetta", "ogerpon", "urshifu",
+    "zacian", "zamazenta", "genesect", "toxtricity", "minior", "kyurem",
+    "necrozma",
+)
+FORM_MAX_ACTIVE_FAMILIES = 2
+# These families are distinguished substantially by palette. Limit (rather
+# than remove) the per-image colour-cast correction so genuine form colours
+# such as flower petals and type plates remain visible to the verifier.
+COLOR_FORM_FAMILIES = frozenset((
+    "flabb", "floette", "florges", "silvally", "arceus", "vivillon",
+    "oricorio", "deerling", "sawsbuck", "alcremie", "basculin", "shellos",
+    "gastrodon", "minior", "necrozma",
+))
+FORM_COLOR_SHIFT_LIMIT = 6.0
+FORM_FAST_VERIFY_THRESHOLD = 8
+FORM_SEED_CLASSES = 3
 FIT_DEADZONE = 2.0
 ADJ_CAP = 0.20
+
+
+def _form_family(name):
+    words = set(str(name).lower().split())
+    # These are alternate Palafin states in the supplied label set and should
+    # compete as one sibling family.
+    if "palafin" in words or "finizen" in words:
+        return "palafin_finizen"
+    for marker in FORM_FAMILY_MARKERS:
+        if marker in words:
+            return marker
+    return None
+
+
+def _form_shift_limit(name):
+    return FORM_COLOR_SHIFT_LIMIT if _form_family(name) in COLOR_FORM_FAMILIES else None
 
 # -------------------------------------------------------------------
 # Runtime / resource parameters
@@ -336,15 +379,21 @@ def _local_placement(cache, groups, q64, prior):
     return best
 
 
-def _class_distance(q_lab, q_pad, t_lab, alpha, oy, ox, tolerant):
-    """Per-pixel delta E between a placed template and the query (median-centred so a
-    global tint cancels out, forgiving TOLERANCE pixels of misalignment)."""
+def _class_distance(q_lab, q_pad, t_lab, alpha, oy, ox, tolerant, shift_limit=None):
+    """Per-pixel delta E for a placed template.
+
+    The median Lab offset normally cancels screenshot-wide colour casts. For
+    palette-based form families it is clipped, not removed completely, so a
+    real flower/type-colour difference is not normalized away.
+    """
     k = t_lab.shape[0]
     core = alpha > 0.5
     if int(core.sum()) < 8:
         return None
 
     shift = np.median((q_lab[oy : oy + k, ox : ox + k] - t_lab)[core], axis=0)
+    if shift_limit is not None:
+        shift = np.clip(shift, -float(shift_limit), float(shift_limit))
     if not tolerant:
         diff = q_lab[oy : oy + k, ox : ox + k] - shift - t_lab
         return np.sqrt((diff * diff).sum(axis=-1))
@@ -359,13 +408,13 @@ def _class_distance(q_lab, q_pad, t_lab, alpha, oy, ox, tolerant):
     return np.sqrt(best)
 
 
-def _error_at(cache, idxs, q_lab, q_pad, k, oy, ox, tolerant):
+def _error_at(cache, idxs, q_lab, q_pad, k, oy, ox, tolerant, shift_limit=None):
     """Fit error of a class (its best template) at one fixed placement
     -> (error, template index, distance map or None)."""
     best = None
     for t in idxs:
         t_lab, alpha = cache.get(t, k)
-        dist = _class_distance(q_lab, q_pad, t_lab, alpha, oy, ox, tolerant)
+        dist = _class_distance(q_lab, q_pad, t_lab, alpha, oy, ox, tolerant, shift_limit)
         if dist is None:
             err = FIT_TRUNC
         else:
@@ -375,7 +424,7 @@ def _error_at(cache, idxs, q_lab, q_pad, k, oy, ox, tolerant):
     return best
 
 
-def _placement_contrast(cache, t, q_lab, q_pad, k, oy, ox, best_err):
+def _placement_contrast(cache, t, q_lab, q_pad, k, oy, ox, best_err, shift_limit=None):
     """How much worse the same template fits when nudged away from its best place
     (sideways and a little smaller/larger). A real match is sharply peaked, a template
     that merely resembles some scenery is not. None when too few probes fit the frame."""
@@ -392,7 +441,7 @@ def _placement_contrast(cache, t, q_lab, q_pad, k, oy, ox, best_err):
         if k2 < K_MIN or k2 > FRAME or not (0 <= y <= FRAME - k2 and 0 <= x <= FRAME - k2):
             continue
         t_lab, alpha = cache.get(t, k2)
-        dist = _class_distance(q_lab, q_pad, t_lab, alpha, y, x, False)
+        dist = _class_distance(q_lab, q_pad, t_lab, alpha, y, x, False, shift_limit)
         if dist is not None:
             errs.append(float((np.minimum(dist, FIT_TRUNC) * alpha).sum() / alpha.sum()))
     if len(errs) < 3:
@@ -478,36 +527,62 @@ def verify_contenders(templates, tpl_index, frame, names, prior=None):
             .mean(axis=(1, 3))
         )
 
-        # 1. every class finds its own best placement
-        own = []
-        for idxs in groups:
-            fit = _fit_class(cache, idxs, q32, q64)
-            if fit is None:
-                return None
-            own.append(fit)
+        # For large families (18 Silvally/Arceus forms, 20 Vivillon patterns,
+        # 28 Unown letters), search a few high-CLIP seed templates for likely
+        # placements, then score every form at those shared placements. This
+        # keeps family-wide checking inexpensive on small CPU hosts.
+        seed_groups = groups
+        if len(groups) > FORM_FAST_VERIFY_THRESHOLD:
+            seed_groups = groups[: min(FORM_SEED_CLASSES, len(groups))]
 
-        # 2. the placement that suits most classes at once wins; a class that only
-        #    matches somewhere odd and small cannot drag everybody there
+        own = []
+        for idxs in seed_groups:
+            fit = _fit_class(cache, idxs, q32, q64)
+            if fit is not None:
+                own.append(fit)
+        if not own:
+            return None
+
+        # The best shared placement is the one that explains the entire
+        # contender set, not just the class that supplied the seed template.
         best_total = None
         for transform in {(f[1], f[2], f[3]) for f in own}:
             total = 0.0
-            for idxs in groups:
-                err, _, _ = _error_at(cache, idxs, q64, q_pad, *transform, False)
+            for name, idxs in zip(names, groups):
+                err, _, _ = _error_at(
+                    cache, idxs, q64, q_pad, *transform, False,
+                    shift_limit=_form_shift_limit(name),
+                )
                 total += min(err, FIT_TRUNC)
             if best_total is None or total < best_total:
                 best_total, shared = total, transform
 
     k, oy, ox = shared
 
-    # 3. every class measured at the shared placement
-    at_shared = [_error_at(cache, idxs, q64, q_pad, k, oy, ox, True) for idxs in groups]
+    # 3. every class measured at the shared placement. Palette-form classes
+    #    retain bounded colour evidence; other classes keep the original
+    #    screenshot-tint compensation.
+    at_shared = [
+        _error_at(
+            cache, idxs, q64, q_pad, k, oy, ox, True,
+            shift_limit=_form_shift_limit(name),
+        )
+        for name, idxs in zip(names, groups)
+    ]
     fit_err = np.array([e for e, _, _ in at_shared], dtype=np.float32)
     fit_min = float(fit_err.min())
 
     trust = float(np.clip((FIT_BAD - fit_min) / (FIT_BAD - FIT_GOOD), 0.0, 1.0))
     best = int(fit_err.argmin())
-    plain_best, _, _ = _error_at(cache, [at_shared[best][1]], q64, q_pad, k, oy, ox, False)
-    contrast = _placement_contrast(cache, at_shared[best][1], q64, q_pad, k, oy, ox, plain_best)
+    best_shift_limit = _form_shift_limit(names[best])
+    plain_best, _, _ = _error_at(
+        cache, [at_shared[best][1]], q64, q_pad, k, oy, ox, False,
+        shift_limit=best_shift_limit,
+    )
+    contrast = _placement_contrast(
+        cache, at_shared[best][1], q64, q_pad, k, oy, ox, plain_best,
+        shift_limit=best_shift_limit,
+    )
     if contrast is None:
         trust *= 0.5
     else:
@@ -524,6 +599,19 @@ def verify_contenders(templates, tpl_index, frame, names, prior=None):
     for i, name in enumerate(names):
         penalty = BETA_FIT * max(0.0, float(fit_err[i]) - fit_min - FIT_DEADZONE)
         penalty += BETA_COL * float(losses[i])
+
+        # Some evolutionary relatives have almost identical CLIP embeddings.
+        # For these known pairs, also trust the absolute sprite-template fit:
+        # it is stronger evidence than the tiny colour-difference map alone.
+        for j, other_name in enumerate(names):
+            if i == j:
+                continue
+            pair_weight = PAIR_FIT_BOOSTS.get(frozenset((name, other_name)), 0.0)
+            if pair_weight:
+                penalty += pair_weight * max(
+                    0.0, float(fit_err[i]) - float(fit_err[j])
+                )
+
         adjust[name] = -min(ADJ_CAP, trust * penalty)
 
     info = {
@@ -639,6 +727,7 @@ class PokemonRecognizer:
         self._calls = 0
         self._prior = {}
         self._class_names = []
+        self._class_id = {}
         self._order = None
         self._starts = None
         self._ends = None
@@ -693,6 +782,7 @@ class PokemonRecognizer:
             )
             counts = np.bincount(ids, minlength=len(class_index))
             self._class_names = list(class_index)
+            self._class_id = dict(class_index)
             self._ends = np.cumsum(counts)
             self._starts = self._ends - counts
             self._order = np.argsort(ids, kind="stable").astype(np.int32)
@@ -839,7 +929,12 @@ class PokemonRecognizer:
         return extras
 
     def _rank(self, sims, frame=None) -> tuple[str, float]:
-        """Class-level scoring over the top images, then pixel verification of close contenders."""
+        """Class-level scoring plus sibling-form verification.
+
+        CLIP still proposes the likely species. If a form family is among the
+        finalists, all stored siblings are brought into the visual comparison,
+        even when their individual image rows fell outside TOP_K_IMAGES.
+        """
         total = sims.shape[0]
         k = min(TOP_K_IMAGES, total)
 
@@ -874,6 +969,34 @@ class PokemonRecognizer:
             )
             contenders.sort(key=lambda item: -item[0])
             contenders = contenders[:RERANK_MAX_CLASSES]
+
+            # Expand each form family represented among the normal finalists.
+            # Compute a proper class score from all of that class's exemplars;
+            # do not require one of its rows to appear in the global top-40.
+            active_families = []
+            for _, name, _ in contenders:
+                family = _form_family(name)
+                if family is not None and family not in active_families:
+                    active_families.append(family)
+                if len(active_families) >= FORM_MAX_ACTIVE_FAMILIES:
+                    break
+            active_families = set(active_families)
+            if active_families and self._order is not None:
+                expanded = {name: (score, name, idxs) for score, name, idxs in contenders}
+                for class_id, name in enumerate(self._class_names):
+                    family = _form_family(name)
+                    if family not in active_families or name in expanded:
+                        continue
+                    rows = self._order[self._starts[class_id] : self._ends[class_id]]
+                    vals = sims[rows]
+                    n_top = min(CLASS_TOP_N, len(vals))
+                    best_rows = np.argpartition(-vals, n_top - 1)[:n_top]
+                    best_rows = best_rows[np.argsort(-vals[best_rows])]
+                    score = CLASS_MAX_WEIGHT * float(vals[best_rows[0]]) + (
+                        1.0 - CLASS_MAX_WEIGHT
+                    ) * float(vals[best_rows].mean())
+                    expanded[name] = (score, name, [int(rows[best_rows[0]])])
+                contenders = sorted(expanded.values(), key=lambda item: -item[0])
 
             if len(contenders) > 1:
                 adjust = self._verify(frame, contenders)
