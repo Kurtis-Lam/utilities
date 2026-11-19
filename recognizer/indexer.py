@@ -1,11 +1,11 @@
 import json
 import os
+import random
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
-import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
 # -------------------------------------------------------------------
@@ -17,15 +17,15 @@ LOCAL_ZIP_FILE = os.path.join(BASE_DIR, "data.zip")
 
 OUTPUT_VECTORS = os.path.join(BASE_DIR, "pokemon_db_vectors.npy")
 OUTPUT_NAMES = os.path.join(BASE_DIR, "pokemon_db_names.json")
-OUTPUT_COLORS = os.path.join(BASE_DIR, "pokemon_db_colors.npy")
+OUTPUT_TEMPLATES = os.path.join(BASE_DIR, "pokemon_db_templates.npy")
+OUTPUT_TEMPLATE_NAMES = os.path.join(BASE_DIR, "pokemon_db_template_names.json")
 
-# If the exact ONNX model used by the bot is present here, the database is built
-# with it so database and query embeddings carry the same quantization noise.
+# The exact ONNX model used by the bot should be present here so database and
+# query embeddings carry the same quantization noise. PyTorch / transformers are
+# only imported if this file is missing and the HuggingFace fallback is needed.
 ONNX_MODEL_PATH = os.path.join(BASE_DIR, "models", "clip_vision_quantized.onnx")
 HF_MODEL_NAME = "openai/clip-vit-base-patch32"
 
-DEVICE = "cpu"
-DTYPE = torch.float32
 CPU_COUNT = os.cpu_count() or 4
 
 # -------------------------------------------------------------------
@@ -37,13 +37,27 @@ TARGET_SIZE = 224
 ZOOM_FACTOR = 0.85
 BG_COLOR = (255, 255, 255)
 
-COLOR_WORK_SIZE = 96
-COLOR_INNER_MARGIN = 0.15
-HUE_BINS = 24
-GRID = 3
-COLOR_DIM = HUE_BINS + GRID * GRID * 3
-SAT_MIN = 40
-VAL_MIN = 100
+# -------------------------------------------------------------------
+# 3. Class template parameters
+#
+# Every class gets one or more small RGBA templates (artwork + mask). The bot
+# aligns a query with the templates of the classes CLIP cannot separate and
+# compares them pixel by pixel.
+#   - transparent artwork (or artwork on a flat background): the images
+#     themselves are the templates (up to TPL_MAX_ALPHA per class)
+#   - opaque spawn screenshots: the per-pixel median of up to TPL_SAMPLES images
+#     is the template and the pixels that stay constant across the images
+#     (the Pokémon, not the changing scenery) become its mask
+# -------------------------------------------------------------------
+TPL_SIZE = 64
+TPL_MAX_ALPHA = 3
+TPL_SAMPLES = 16
+TPL_MIN_MEDIAN = 5
+STAB_LO = 6.0
+STAB_HI = 22.0
+MIN_STABLE_AREA = 0.04
+BORDER_TOL = 40
+FLOOD_TOL = 60
 
 
 def flatten_alpha(img):
@@ -65,46 +79,189 @@ def center_square(img):
     return img.crop((left, top, left + size, top + size))
 
 
-def color_features(square):
-    width, _ = square.size
-    margin = int(width * COLOR_INNER_MARGIN)
-    inner = square.crop((margin, margin, width - margin, width - margin))
-    inner = inner.resize((COLOR_WORK_SIZE, COLOR_WORK_SIZE), Image.Resampling.BOX)
-
-    hsv = np.asarray(inner.convert("HSV"), dtype=np.float32)
-    rgb = np.asarray(inner, dtype=np.float32) / 255.0
-
-    hue = hsv[..., 0]
-    sat = hsv[..., 1]
-    val = hsv[..., 2]
-    mask = (sat >= SAT_MIN) & (val >= VAL_MIN)
-
-    bins = np.minimum((hue[mask] * HUE_BINS / 256.0).astype(np.int32), HUE_BINS - 1)
-    hist = np.bincount(bins, minlength=HUE_BINS).astype(np.float32)
-    hist /= float(COLOR_WORK_SIZE * COLOR_WORK_SIZE)
-    hist = 0.25 * np.roll(hist, 1) + 0.5 * hist + 0.25 * np.roll(hist, -1)
-    hist = np.sqrt(hist)
-
-    cell = COLOR_WORK_SIZE // GRID
-    grid = rgb.reshape(GRID, cell, GRID, cell, 3).mean(axis=(1, 3)).reshape(-1)
-
-    return np.concatenate([hist, grid]).astype(np.float32)
-
-
 def preprocess_image(img):
-    rgb = flatten_alpha(img)
-    square = center_square(rgb)
+    """CHW float32 CLIP tensor."""
+    square = center_square(flatten_alpha(img))
 
     resized = square.resize((TARGET_SIZE, TARGET_SIZE), Image.Resampling.BICUBIC)
     arr = np.asarray(resized, dtype=np.float32)
     arr /= 255.0
     arr -= CLIP_MEAN
     arr /= CLIP_STD
-    arr = np.ascontiguousarray(arr.transpose(2, 0, 1))
-
-    return arr, color_features(square)
+    return np.ascontiguousarray(arr.transpose(2, 0, 1))
 
 
+# -------------------------------------------------------------------
+# 4. Template building
+# -------------------------------------------------------------------
+def box3(x):
+    height, width = x.shape[:2]
+    pad = np.pad(x, ((1, 1), (1, 1)) + ((0, 0),) * (x.ndim - 2), mode="edge")
+    out = np.zeros_like(x, dtype=np.float32)
+    for dy in range(3):
+        for dx in range(3):
+            out += pad[dy : dy + height, dx : dx + width]
+    return out / 9.0
+
+
+def derive_alpha(rgb):
+    """Alpha for artwork sitting on a flat background (flood fill from the border).
+    Returns None when the border is not a uniform colour (i.e. a real scene)."""
+    height, width, _ = rgb.shape
+    ring = np.zeros((height, width), dtype=bool)
+    ring[:2, :] = True
+    ring[-2:, :] = True
+    ring[:, :2] = True
+    ring[:, -2:] = True
+
+    px = rgb.astype(np.int16)
+    border_colour = np.median(px[ring], axis=0)
+    dist = np.abs(px - border_colour).sum(axis=-1)
+    if float((dist[ring] < BORDER_TOL).mean()) < 0.9:
+        return None
+
+    candidate = dist < FLOOD_TOL
+    background = candidate & ring
+    while True:
+        grown = background.copy()
+        grown[1:, :] |= background[:-1, :]
+        grown[:-1, :] |= background[1:, :]
+        grown[:, 1:] |= background[:, :-1]
+        grown[:, :-1] |= background[:, 1:]
+        grown &= candidate
+        if int(grown.sum()) == int(background.sum()):
+            break
+        background = grown
+
+    foreground = ~background
+    eroded = foreground.copy()
+    eroded[1:, :] &= foreground[:-1, :]
+    eroded[:-1, :] &= foreground[1:, :]
+    eroded[:, 1:] &= foreground[:, :-1]
+    eroded[:, :-1] &= foreground[:, 1:]
+
+    share = float(eroded.mean())
+    if not 0.05 <= share <= 0.95:
+        return None
+    return np.round(box3(eroded.astype(np.float32)) * 255.0).astype(np.uint8)
+
+
+def make_thumb(img):
+    """TPL_SIZE x TPL_SIZE x 4 uint8 (RGB + alpha) of the whole image and its kind:
+    'alpha' (real or derived transparency) or 'opaque' (a scene)."""
+    size = TPL_SIZE
+    has_alpha_mode = img.mode in ("RGBA", "LA") or (
+        img.mode == "P" and "transparency" in img.info
+    )
+
+    if has_alpha_mode:
+        rgba = img.convert("RGBA")
+        alpha = np.asarray(rgba.getchannel("A"))
+        if int(alpha.min()) < 250 and float((alpha < 250).mean()) > 0.02:
+            width, height = rgba.size
+            side = max(width, height)
+            canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+            canvas.paste(rgba, ((side - width) // 2, (side - height) // 2))
+            method = Image.Resampling.BOX if side > size else Image.Resampling.BILINEAR
+            return np.array(canvas.resize((size, size), method)), "alpha"
+        rgb = rgba.convert("RGB")
+    else:
+        rgb = img.convert("RGB")
+
+    width, height = rgb.size
+    side = min(width, height)
+    left = (width - side) // 2
+    top = (height - side) // 2
+    square = rgb.crop((left, top, left + side, top + side))
+    method = Image.Resampling.BOX if side > size else Image.Resampling.BILINEAR
+    small = np.asarray(square.resize((size, size), method))
+
+    derived = derive_alpha(small)
+    if derived is not None:
+        return np.dstack([small, derived]), "alpha"
+    return np.dstack([small, np.full((size, size), 255, dtype=np.uint8)]), "opaque"
+
+
+def median_template(thumbs):
+    """Median of opaque screenshots; pixels that stay constant form the mask."""
+    stack = np.stack(thumbs).astype(np.float32)
+    median = np.median(stack, axis=0)
+    spread = np.median(np.abs(stack - median), axis=0).mean(axis=-1)
+
+    alpha = np.clip((STAB_HI - spread) / (STAB_HI - STAB_LO), 0.0, 1.0)
+    alpha = box3(alpha)
+    if float((alpha > 0.5).mean()) < MIN_STABLE_AREA:
+        return None
+
+    out = np.dstack([np.clip(median, 0, 255), alpha * 255.0])
+    return np.round(out).astype(np.uint8)
+
+
+class TemplateBuilder:
+    def __init__(self):
+        self.order = []
+        self.alpha = {}
+        self.opaque = {}
+        self.seen = {}
+        self.rng = random.Random(0)
+
+    def add(self, name, thumb, kind):
+        if name not in self.seen:
+            self.seen[name] = 0
+            self.order.append(name)
+
+        if kind == "alpha":
+            kept = self.alpha.setdefault(name, [])
+            if len(kept) < TPL_MAX_ALPHA:
+                kept.append(thumb)
+            return
+
+        rgb = np.ascontiguousarray(thumb[..., :3])
+        kept = self.opaque.setdefault(name, [])
+        self.seen[name] += 1
+        if len(kept) < TPL_SAMPLES:
+            kept.append(rgb)
+        else:
+            slot = self.rng.randint(0, self.seen[name] - 1)
+            if slot < TPL_SAMPLES:
+                kept[slot] = rgb
+
+    def build(self):
+        templates, names = [], []
+        stats = {"artwork": 0, "median": 0, "plain": 0, "skipped": 0}
+
+        for name in self.order:
+            artwork = self.alpha.get(name)
+            if artwork:
+                templates.extend(artwork)
+                names.extend([name] * len(artwork))
+                stats["artwork"] += 1
+                continue
+
+            scenes = self.opaque.get(name, [])
+            if len(scenes) >= TPL_MIN_MEDIAN:
+                template = median_template(scenes)
+                if template is None:
+                    stats["skipped"] += 1
+                    continue
+                templates.append(template)
+                names.append(name)
+                stats["median"] += 1
+            elif scenes:
+                kept = scenes[:TPL_MAX_ALPHA]
+                solid = np.full((TPL_SIZE, TPL_SIZE, 1), 255, dtype=np.uint8)
+                templates.extend(np.concatenate([rgb, solid], axis=-1) for rgb in kept)
+                names.extend([name] * len(kept))
+                stats["plain"] += 1
+
+        if not templates:
+            return np.zeros((0, TPL_SIZE, TPL_SIZE, 4), dtype=np.uint8), names, stats
+        return np.stack(templates).astype(np.uint8), names, stats
+
+
+# -------------------------------------------------------------------
+# 5. Dataset handling
+# -------------------------------------------------------------------
 def prepare_dataset():
     """Handles dataset extraction for local setup."""
     if os.path.exists(LOCAL_DATA_DIR) and len(os.listdir(LOCAL_DATA_DIR)) > 0:
@@ -122,47 +279,53 @@ def prepare_dataset():
         )
 
 
-# -------------------------------------------------------------------
-# 3. Dataset Definitions
-# -------------------------------------------------------------------
-class PokemonDataset(Dataset):
-    def __init__(self, data_dir: str):
-        self.samples = []
-        valid_extensions = (".png", ".jpg", ".jpeg", ".webp")
+def list_samples(data_dir):
+    samples = []
+    valid_extensions = (".png", ".jpg", ".jpeg", ".webp")
 
-        if os.path.exists(data_dir):
-            for root, _, files in os.walk(data_dir):
-                for file_name in sorted(files):
-                    if file_name.lower().endswith(valid_extensions):
-                        full_path = os.path.join(root, file_name)
-                        pokemon_name = os.path.basename(root)
-                        if pokemon_name == os.path.basename(data_dir):
-                            pokemon_name = "unknown"
-                        self.samples.append((full_path, pokemon_name))
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        path, name = self.samples[idx]
-        try:
-            with Image.open(path) as img:
-                pixels, colors = preprocess_image(img)
-            return pixels, colors, name
-        except Exception:
-            return None
+    if os.path.exists(data_dir):
+        for root, _, files in os.walk(data_dir):
+            for file_name in sorted(files):
+                if file_name.lower().endswith(valid_extensions):
+                    full_path = os.path.join(root, file_name)
+                    pokemon_name = os.path.basename(root)
+                    if pokemon_name == os.path.basename(data_dir):
+                        pokemon_name = "unknown"
+                    samples.append((full_path, pokemon_name))
+    return samples
 
 
-def collate_fn(batch):
-    batch = [item for item in batch if item is not None]
-    if not batch:
+def process_file(path):
+    try:
+        with Image.open(path) as img:
+            img.load()
+            pixels = preprocess_image(img)
+            thumb, kind = make_thumb(img)
+        return pixels, thumb, kind
+    except Exception:
         return None
-    pixels, colors, names = zip(*batch)
-    return np.stack(pixels), np.stack(colors), list(names)
+
+
+def iter_batches(samples, batch_size, workers):
+    """Yields (batch, results); the next batch is decoded while the current one is embedded."""
+    batches = [samples[i : i + batch_size] for i in range(0, len(samples), batch_size)]
+    if not batches:
+        return
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+
+        def submit(batch):
+            return [pool.submit(process_file, path) for path, _ in batch]
+
+        pending = submit(batches[0])
+        for i, batch in enumerate(batches):
+            futures = pending
+            pending = submit(batches[i + 1]) if i + 1 < len(batches) else None
+            yield batch, [f.result() for f in futures]
 
 
 # -------------------------------------------------------------------
-# 4. Embedding backends
+# 6. Embedding backends
 # -------------------------------------------------------------------
 def build_embedder():
     if os.path.exists(ONNX_MODEL_PATH):
@@ -191,15 +354,16 @@ def build_embedder():
 
         return embed
 
+    import torch
     from transformers import CLIPModel
 
-    print("ONNX model not found, loading HuggingFace CLIP model...")
-    model = CLIPModel.from_pretrained(HF_MODEL_NAME).to(DEVICE, dtype=DTYPE).eval()
+    print("ONNX model not found, loading HuggingFace CLIP model (needs torch)...")
+    model = CLIPModel.from_pretrained(HF_MODEL_NAME).to("cpu", dtype=torch.float32).eval()
     torch.set_num_threads(CPU_COUNT)
 
     def embed(pixels: np.ndarray) -> np.ndarray:
         with torch.inference_mode():
-            tensor = torch.from_numpy(pixels).to(DEVICE, dtype=DTYPE)
+            tensor = torch.from_numpy(pixels).to("cpu", dtype=torch.float32)
             outputs = model.get_image_features(pixel_values=tensor)
 
             if hasattr(outputs, "image_embeds"):
@@ -217,68 +381,81 @@ def build_embedder():
 
 
 # -------------------------------------------------------------------
-# 5. Main Execution Block
+# 7. Main Execution Block
 # -------------------------------------------------------------------
 def main():
     prepare_dataset()
 
-    dataset = PokemonDataset(LOCAL_DATA_DIR)
+    samples = list_samples(LOCAL_DATA_DIR)
 
-    if len(dataset) == 0:
+    if len(samples) == 0:
         print(f"Error: No valid images found in '{LOCAL_DATA_DIR}'.")
         return
 
-    print(f"Found {len(dataset)} valid images.")
+    print(f"Found {len(samples)} valid images.")
 
     embed = build_embedder()
+    builder = TemplateBuilder()
 
     batch_size = 32
-    num_workers = min(CPU_COUNT, 8)
-
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=False,
-        persistent_workers=(num_workers > 0),
-        collate_fn=collate_fn,
-    )
+    workers = min(CPU_COUNT, 8)
+    total_batches = (len(samples) + batch_size - 1) // batch_size
 
     all_vectors = []
-    all_colors = []
     all_names = []
 
-    print(f"Extracting features (Batch Size: {batch_size}, Workers: {num_workers})...")
+    print(f"Extracting features (Batch Size: {batch_size}, Workers: {workers})...")
 
-    for batch in tqdm(dataloader, desc="Processing Batches"):
-        if batch is None:
+    for batch, results in tqdm(
+        iter_batches(samples, batch_size, workers),
+        total=total_batches,
+        desc="Processing Batches",
+    ):
+        good = [(item, res) for item, res in zip(batch, results) if res is not None]
+        if not good:
             continue
 
-        pixels, colors, names = batch
+        pixels = np.stack([res[0] for _, res in good])
         features = np.asarray(embed(pixels), dtype=np.float32)
 
         norms = np.linalg.norm(features, axis=-1, keepdims=True)
         norms[norms == 0] = 1.0
-        features = features / norms
+        all_vectors.append(features / norms)
 
-        all_vectors.append(features)
-        all_colors.append(colors)
-        all_names.extend(names)
+        for (_, name), (_, thumb, kind) in good:
+            all_names.append(name)
+            builder.add(name, thumb, kind)
 
-    if all_vectors:
-        vectors = np.concatenate(all_vectors, axis=0).astype(np.float16)
-        colors = np.concatenate(all_colors, axis=0).astype(np.float16)
+    if not all_vectors:
+        print("Error: no image could be processed.")
+        return
 
-        np.save(OUTPUT_VECTORS, vectors)
-        np.save(OUTPUT_COLORS, colors)
-        with open(OUTPUT_NAMES, "w", encoding="utf-8") as f:
-            json.dump(all_names, f)
+    vectors = np.concatenate(all_vectors, axis=0).astype(np.float16)
+    templates, template_names, stats = builder.build()
 
-        print(f"\nDone! Successfully processed {len(all_names)} embeddings.")
-        print(f" -> {OUTPUT_VECTORS}")
-        print(f" -> {OUTPUT_COLORS}")
-        print(f" -> {OUTPUT_NAMES}")
+    np.save(OUTPUT_VECTORS, vectors)
+    with open(OUTPUT_NAMES, "w", encoding="utf-8") as f:
+        json.dump(all_names, f)
+
+    np.save(OUTPUT_TEMPLATES, templates)
+    with open(OUTPUT_TEMPLATE_NAMES, "w", encoding="utf-8") as f:
+        json.dump(template_names, f)
+
+    print(f"\nDone! Successfully processed {len(all_names)} embeddings.")
+    print(f" -> {OUTPUT_VECTORS}")
+    print(f" -> {OUTPUT_NAMES}")
+    print(
+        f"Templates: {len(template_names)} for {len(set(template_names))} classes "
+        f"(artwork: {stats['artwork']}, median: {stats['median']}, "
+        f"single screenshots: {stats['plain']}, skipped: {stats['skipped']})"
+    )
+    print(f" -> {OUTPUT_TEMPLATES}")
+    print(f" -> {OUTPUT_TEMPLATE_NAMES}")
+    if stats["skipped"]:
+        print(
+            f"Note: {stats['skipped']} classes have no stable subject across their images "
+            "and are verified by CLIP only."
+        )
 
 
 if __name__ == "__main__":
