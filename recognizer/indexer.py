@@ -15,16 +15,25 @@ BASE_DIR = os.path.abspath(".")
 LOCAL_DATA_DIR = os.path.join(BASE_DIR, "recognizer/traindata")
 LOCAL_ZIP_FILE = os.path.join(BASE_DIR, "data.zip")
 
-OUTPUT_VECTORS = os.path.join(BASE_DIR, "pokemon_db_vectors.npy")
-OUTPUT_NAMES = os.path.join(BASE_DIR, "pokemon_db_names.json")
-OUTPUT_TEMPLATES = os.path.join(BASE_DIR, "pokemon_db_templates.npy")
-OUTPUT_TEMPLATE_NAMES = os.path.join(BASE_DIR, "pokemon_db_template_names.json")
+MODEL_DIR = os.path.join(BASE_DIR, "models")
+OUTPUT_VECTORS = os.path.join(MODEL_DIR, "pokemon_db_vectors.npy")
+OUTPUT_NAMES = os.path.join(MODEL_DIR, "pokemon_db_names.json")
+OUTPUT_TEMPLATES = os.path.join(MODEL_DIR, "pokemon_db_templates.npy")
+OUTPUT_TEMPLATE_NAMES = os.path.join(MODEL_DIR, "pokemon_db_template_names.json")
 
-# The exact ONNX model used by the bot should be present here so database and
-# query embeddings carry the same quantization noise. PyTorch / transformers are
-# only imported if this file is missing and the HuggingFace fallback is needed.
+# Small, object-only references for known near-identical classes. These are
+# transparent PNGs, so indexing them needs only the existing Pillow/NumPy stack.
+CALIBRATION_TEMPLATES = {
+    "meloetta": "meloetta.png",
+    "white flower flabb": "white_flower_flabb.png",
+    "palafin": "palafin.png",
+    "finizen": "finizen.png",
+}
+CALIBRATION_TEMPLATE_DIR = os.path.join(BASE_DIR, "recognizer", "calibration_templates")
+
+# The exact quantized ONNX model used by the bot is required for indexing.
+# This script deliberately has no PyTorch / Transformers fallback.
 ONNX_MODEL_PATH = os.path.join(BASE_DIR, "models", "clip_vision_quantized.onnx")
-HF_MODEL_NAME = "openai/clip-vit-base-patch32"
 
 CPU_COUNT = os.cpu_count() or 4
 
@@ -328,65 +337,87 @@ def iter_batches(samples, batch_size, workers):
 # 6. Embedding backends
 # -------------------------------------------------------------------
 def build_embedder():
-    if os.path.exists(ONNX_MODEL_PATH):
-        import onnxruntime as ort
-
-        print(f"Using ONNX model for indexing: '{ONNX_MODEL_PATH}'")
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = CPU_COUNT
-        session = ort.InferenceSession(
-            ONNX_MODEL_PATH, sess_options=opts, providers=["CPUExecutionProvider"]
+    """Build the image embedder from the bundled quantized ONNX model only."""
+    if not os.path.exists(ONNX_MODEL_PATH):
+        raise FileNotFoundError(
+            f"Required ONNX model not found at '{ONNX_MODEL_PATH}'. "
+            "PyTorch/Transformers fallback is intentionally disabled."
         )
-        input_name = session.get_inputs()[0].name
-        state = {"batched": True}
 
-        def embed(pixels: np.ndarray) -> np.ndarray:
-            if state["batched"]:
-                try:
-                    return session.run(None, {input_name: pixels})[0]
-                except Exception:
-                    state["batched"] = False
-            rows = [
-                session.run(None, {input_name: pixels[i : i + 1]})[0]
-                for i in range(pixels.shape[0])
-            ]
-            return np.concatenate(rows, axis=0)
+    import onnxruntime as ort
 
-        return embed
-
-    import torch
-    from transformers import CLIPModel
-
-    print("ONNX model not found, loading HuggingFace CLIP model (needs torch)...")
-    model = CLIPModel.from_pretrained(HF_MODEL_NAME).to("cpu", dtype=torch.float32).eval()
-    torch.set_num_threads(CPU_COUNT)
+    print(f"Using ONNX model for indexing: '{ONNX_MODEL_PATH}'")
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = CPU_COUNT
+    opts.inter_op_num_threads = 1
+    opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    session = ort.InferenceSession(
+        ONNX_MODEL_PATH,
+        sess_options=opts,
+        providers=["CPUExecutionProvider"],
+    )
+    input_name = session.get_inputs()[0].name
+    state = {"batched": True}
 
     def embed(pixels: np.ndarray) -> np.ndarray:
-        with torch.inference_mode():
-            tensor = torch.from_numpy(pixels).to("cpu", dtype=torch.float32)
-            outputs = model.get_image_features(pixel_values=tensor)
-
-            if hasattr(outputs, "image_embeds"):
-                features = outputs.image_embeds
-            elif hasattr(outputs, "pooler_output"):
-                features = outputs.pooler_output
-            elif isinstance(outputs, torch.Tensor):
-                features = outputs
-            else:
-                features = outputs[0]
-
-            return features.cpu().to(torch.float32).numpy()
+        if state["batched"]:
+            try:
+                return session.run(None, {input_name: pixels})[0]
+            except Exception:
+                state["batched"] = False
+        rows = [
+            session.run(None, {input_name: pixels[i : i + 1]})[0]
+            for i in range(pixels.shape[0])
+        ]
+        return np.concatenate(rows, axis=0)
 
     return embed
+
+
+def add_calibration_templates(builder):
+    """Add vetted transparent references without requiring OpenCV at runtime."""
+    for pokemon_name, filename in CALIBRATION_TEMPLATES.items():
+        path = os.path.join(CALIBRATION_TEMPLATE_DIR, filename)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with Image.open(path) as img:
+                img.load()
+                thumb, kind = make_thumb(img)
+            if kind != "alpha":
+                print(f"[Indexer] Skipping non-transparent calibration template: {path}")
+                continue
+            builder.add(pokemon_name, thumb, kind)
+        except Exception as exc:
+            print(f"[Indexer] Could not load calibration template {path}: {exc}")
 
 
 # -------------------------------------------------------------------
 # 7. Main Execution Block
 # -------------------------------------------------------------------
 def main():
+    os.makedirs(MODEL_DIR, exist_ok=True)
     prepare_dataset()
 
     samples = list_samples(LOCAL_DATA_DIR)
+
+    # The shipped ZIP intentionally contains only a few correction examples,
+    # not the full original training corpus. Never overwrite a large database
+    # with a tiny partial dataset by accident.
+    if os.path.exists(OUTPUT_NAMES):
+        try:
+            with open(OUTPUT_NAMES, "r", encoding="utf-8") as f:
+                existing_count = len(json.load(f))
+            minimum_safe_count = max(256, int(existing_count * 0.5))
+            if len(samples) < minimum_safe_count:
+                raise RuntimeError(
+                    "Refusing to rebuild the Pokémon database: found "
+                    f"{len(samples)} training images but the existing database "
+                    f"contains {existing_count} rows. Restore the full training "
+                    "dataset before running indexer.py."
+                )
+        except json.JSONDecodeError:
+            print("[Indexer] Existing names file is unreadable; skipping rebuild-size guard.")
 
     if len(samples) == 0:
         print(f"Error: No valid images found in '{LOCAL_DATA_DIR}'.")
@@ -396,6 +427,7 @@ def main():
 
     embed = build_embedder()
     builder = TemplateBuilder()
+    add_calibration_templates(builder)
 
     batch_size = 32
     workers = min(CPU_COUNT, 8)
@@ -430,10 +462,21 @@ def main():
         print("Error: no image could be processed.")
         return
 
-    vectors = np.concatenate(all_vectors, axis=0).astype(np.float16)
+    vectors = np.concatenate(all_vectors, axis=0).astype(np.float32)
+
+    # Apply the same NumPy-only form calibration used by the shipped database.
+    # Keep the helper offline/indexer-only; the bot runtime does not import it.
+    try:
+        from .calibrate_form_weights import calibrate_vectors
+    except ImportError:
+        from calibrate_form_weights import calibrate_vectors
+    vectors, calibration_record = calibrate_vectors(vectors, all_names)
+    vectors = vectors.astype(np.float16)
     templates, template_names, stats = builder.build()
 
     np.save(OUTPUT_VECTORS, vectors)
+    with open(os.path.join(MODEL_DIR, "pokemon_db_calibration.json"), "w", encoding="utf-8") as f:
+        json.dump(calibration_record, f, indent=2)
     with open(OUTPUT_NAMES, "w", encoding="utf-8") as f:
         json.dump(all_names, f)
 
