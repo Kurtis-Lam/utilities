@@ -7,12 +7,10 @@ CONVENTIONAL_COMMITS.md
 
 assets/utilities_new_avatar.jpg
 data/pokeimgs/
-models/pokemon_db.npz
 recognizer/traindata/
-models/old/
 
 firebase_key.json
-config.json
+botconfig.json
 opencode.json
 
 misc.txt
