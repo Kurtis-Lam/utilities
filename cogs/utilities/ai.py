@@ -34,20 +34,20 @@ from views.navigate import PaginatorView
 # ---------------------------------------------------------------------------
 
 _CANDIDATE_CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "config.json"
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "botconfig.json"
 )
 
 if os.path.exists(_CANDIDATE_CONFIG_PATH):
     CONFIG_PATH = os.path.abspath(_CANDIDATE_CONFIG_PATH)
 else:
-    CONFIG_PATH = os.path.abspath("config.json")
+    CONFIG_PATH = os.path.abspath("botconfig.json")
 
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     config = json.load(f)
 
 PROJECT_ROOT = os.path.dirname(CONFIG_PATH)
 
-BOT_PREFIX = config.get("PREFIX", "!")
+BOT_PREFIX = config.get("PREFIX", ".")
 OWNER_IDS = set()
 for _owner_id in config.get("OWNER_IDS", []):
     try:
@@ -61,7 +61,7 @@ if not _raw_keys:
     _legacy_key = config.get("AI_CHATBOT")
     if not _legacy_key:
         raise ValueError(
-            "config.json needs either 'AI_CHATBOT_KEYS' (a list of OpenRouter API keys) "
+            "botconfig.json needs either 'AI_CHATBOT_KEYS' (a list of OpenRouter API keys) "
             "or the legacy 'AI_CHATBOT' (a single key string)."
         )
     _raw_keys = [_legacy_key]
@@ -70,7 +70,7 @@ if isinstance(_raw_keys, str):
 
 OPENROUTER_API_KEYS = [k for k in _raw_keys if k]
 if not OPENROUTER_API_KEYS:
-    raise ValueError("No usable OpenRouter API keys found in config.json.")
+    raise ValueError("No usable OpenRouter API keys found in botconfig.json.")
 
 # --- Account grouping for keys ------------------------------------------
 _raw_key_accounts = config.get("AI_CHATBOT_KEY_ACCOUNTS")
