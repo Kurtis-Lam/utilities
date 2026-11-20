@@ -20,7 +20,7 @@ from cogs.owner.utils import safe_send
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
-    os.chdir(BASE_DIR)  # make relative paths (config.json, cogs/) always work
+    os.chdir(BASE_DIR)  # make relative paths (botconfig.json, cogs/) always work
 except OSError:
     pass
 
@@ -28,18 +28,18 @@ except OSError:
 # Config
 # ----------------------------------------------------------------------------
 config = {}
-config_path = os.path.join(BASE_DIR, "config.json")
+config_path = os.path.join(BASE_DIR, "botconfig.json")
 if os.path.exists(config_path):
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
             if not isinstance(config, dict):
-                raise ValueError("config.json must contain a JSON object")
+                raise ValueError("botconfig.json must contain a JSON object")
     except Exception as e:
-        print(f"❌ Error: could not read 'config.json': {e}")
+        print(f"❌ Error: could not read 'botconfig.json': {e}")
         sys.exit(1)
 else:
-    print("❌ Error: 'config.json' file not found.")
+    print("❌ Error: 'botconfig.json' file not found.")
     sys.exit(1)
 
 TOKEN = config.get("TOKEN")
@@ -47,28 +47,28 @@ MONGO_URI = config.get("MONGO_URI")
 PREFIX = config.get("PREFIX", ".")
 
 if not TOKEN:
-    print("❌ Error: 'TOKEN' missing from config.json.")
+    print("❌ Error: 'TOKEN' missing from botconfig.json.")
     sys.exit(1)
 
 try:
     POKETWO_ID = int(config["POKETWO_ID"])
 except (KeyError, TypeError, ValueError):
-    print("❌ Error: 'POKETWO_ID' missing or invalid in config.json (must be a user ID number).")
+    print("❌ Error: 'POKETWO_ID' missing or invalid in botconfig.json (must be a user ID number).")
     sys.exit(1)
 
 try:
     OWNERS = {int(owner_id) for owner_id in config.get("OWNER_IDS", [])}
 except (TypeError, ValueError):
-    print("❌ Error: 'OWNER_IDS' in config.json must be a list of user ID numbers.")
+    print("❌ Error: 'OWNER_IDS' in botconfig.json must be a list of user ID numbers.")
     sys.exit(1)
 if not OWNERS:
-    print("⚠️ Warning: 'OWNER_IDS' is empty in config.json, nobody can use owner commands.")
+    print("⚠️ Warning: 'OWNER_IDS' is empty in botconfig.json, nobody can use owner commands.")
 
 COGS = config.get("COGS")
 if not isinstance(COGS, dict) or not all(
     isinstance(cogs, list) and all(isinstance(c, str) for c in cogs) for cogs in COGS.values()
 ):
-    print("❌ Error: 'COGS' in config.json must be an object like {\"cmds\": [\"ping\", ...], ...}.")
+    print("❌ Error: 'COGS' in botconfig.json must be an object like {\"cmds\": [\"ping\", ...], ...}.")
     sys.exit(1)
 
 INTENTS = discord.Intents.default()
@@ -348,7 +348,7 @@ class Utilities(commands.Bot):
         else:
             print("⚠️ MONGO_URI missing, MongoDB features are disabled.")
 
-        # Which cogs to load is defined in config.json ("COGS")
+        # Which cogs to load is defined in botconfig.json ("COGS")
         self.cogs_dict = COGS
 
     async def _prepare_mongo(self):
@@ -670,7 +670,7 @@ def main():
     try:
         bot.run(TOKEN)
     except discord.LoginFailure:
-        print("❌ Invalid bot token. Check TOKEN in config.json.")
+        print("❌ Invalid bot token. Check TOKEN in botconfig.json.")
         sys.exit(1)
     except discord.PrivilegedIntentsRequired:
         print("❌ Enable the Message Content / Server Members intents in the Discord developer portal.")
