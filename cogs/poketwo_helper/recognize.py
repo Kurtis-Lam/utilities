@@ -184,7 +184,12 @@ class PokemonRecognizer:
         return self.labels[best_index], float(probabilities[best_index])
 
     async def identify_from_url(self, http_session: Any, image_url: str) -> tuple[str, float]:
-        """Download a Discord image and run CPU inference without blocking the bot loop."""
+        """Download the complete Discord image and run CPU inference.
+
+        Important: aiohttp StreamReader.read(n) may return fewer than n bytes as
+        soon as some data is available. Reading one large chunk this way can
+        therefore hand Pillow an incomplete JPEG/PNG. Iterate until EOF instead.
+        """
         if not image_url:
             raise ValueError("Image URL is empty.")
         try:
@@ -192,17 +197,68 @@ class PokemonRecognizer:
         except ImportError as exc:
             raise RuntimeError("aiohttp is required for URL-based recognition.") from exc
 
-        timeout = aiohttp.ClientTimeout(total=12, connect=4)
-        async with http_session.get(image_url, timeout=timeout) as response:
-            response.raise_for_status()
-            content_length = response.headers.get("Content-Length")
-            if content_length and int(content_length) > 12 * 1024 * 1024:
-                raise ValueError("Image is too large (maximum 12 MB).")
-            image_bytes = await response.content.read(12 * 1024 * 1024 + 1)
-            if len(image_bytes) > 12 * 1024 * 1024:
-                raise ValueError("Image is too large (maximum 12 MB).")
+        max_bytes = 12 * 1024 * 1024
+        timeout = aiohttp.ClientTimeout(total=20, connect=5, sock_read=12)
+        last_error: Exception | None = None
 
-        return await asyncio.to_thread(self.identify_from_bytes, image_bytes)
+        # Retry once if the CDN connection ends mid-image or Pillow detects a
+        # truncated file. Do not enable Pillow's global truncated-image mode:
+        # that can silently turn damaged images into misleading predictions.
+        for attempt in range(2):
+            try:
+                async with http_session.get(
+                    image_url,
+                    timeout=timeout,
+                    allow_redirects=True,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; PokemonRecognizer/1.0)"},
+                ) as response:
+                    response.raise_for_status()
+                    content_length = response.headers.get("Content-Length")
+                    if content_length:
+                        try:
+                            if int(content_length) > max_bytes:
+                                raise ValueError("Image is too large (maximum 12 MB).")
+                        except ValueError as exc:
+                            if "too large" in str(exc):
+                                raise
+                            # Ignore malformed Content-Length; the streamed
+                            # byte limit below remains authoritative.
+                            pass
+
+                    image_buffer = bytearray()
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        image_buffer.extend(chunk)
+                        if len(image_buffer) > max_bytes:
+                            raise ValueError("Image is too large (maximum 12 MB).")
+
+                if not image_buffer:
+                    raise ValueError("The downloaded image is empty.")
+
+                try:
+                    return await asyncio.to_thread(
+                        self.identify_from_bytes, bytes(image_buffer)
+                    )
+                except ValueError as exc:
+                    if "truncated" not in str(exc).casefold() or attempt == 1:
+                        raise
+                    last_error = exc
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last_error = exc
+                if attempt == 1:
+                    raise RuntimeError(
+                        "Could not download the complete image from Discord. "
+                        "Please try again or upload the image again."
+                    ) from exc
+
+            if attempt == 0:
+                await asyncio.sleep(0.25)
+
+        if last_error:
+            raise ValueError(
+                "Discord returned an incomplete image after retrying. "
+                "Please try again or re-upload the image."
+            ) from last_error
+        raise RuntimeError("Image download failed unexpectedly.")
 
     def predict_topk_from_bytes(self, image_bytes: bytes, top_k: int = 5) -> list[tuple[str, float]]:
         """Optional debugging helper returning the highest-scoring labels."""

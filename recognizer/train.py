@@ -55,7 +55,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
-    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes (default: 0 for reliable Windows/CPU training; try 2 on a fast local SSD).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--patience", type=int, default=9)
     parser.add_argument("--freeze-epochs", type=int, default=2)
@@ -216,49 +221,56 @@ def prepare_image(image: Any, image_size: int) -> Any:
 
 
 class PokemonDataset:
-    def __new__(cls, samples: list[tuple[Path, int]], image_size: int, training: bool):
-        # The real Dataset is defined lazily so this module's argument/help paths do not
-        # require importing PyTorch before the user starts training.
-        import torch
-        from PIL import Image
-        from torch.utils.data import Dataset
+    """Picklable map-style dataset used by PyTorch's DataLoader.
+
+    This class intentionally lives at module scope. On Windows, DataLoader workers
+    use the spawn multiprocessing method and must pickle the dataset. Defining the
+    class inside a factory/``__new__`` method causes the exact
+    ``Can't get local object`` failure seen when ``num_workers`` is greater than 0.
+
+    It does not inherit from ``torch.utils.data.Dataset`` so importing this module
+    for ``--help`` does not require importing PyTorch. DataLoader accepts this
+    standard ``__len__``/``__getitem__`` interface.
+    """
+
+    def __init__(self, samples: list[tuple[Path, int]], image_size: int, training: bool) -> None:
         from torchvision import transforms
 
-        class _Dataset(Dataset):
-            def __init__(self) -> None:
-                if training:
-                    self.transform = transforms.Compose([
-                        transforms.RandomAffine(
-                            degrees=9,
-                            translate=(0.035, 0.035),
-                            scale=(0.93, 1.07),
-                            fill=BACKGROUND,
-                        ),
-                        transforms.RandomHorizontalFlip(p=0.5),
-                        # Deliberately no hue shift: flower/Arceus/Silvally colours are labels.
-                        transforms.ColorJitter(brightness=0.10, contrast=0.10, saturation=0.07),
-                        transforms.ToTensor(),
-                        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-                    ])
-                else:
-                    self.transform = transforms.Compose([
-                        transforms.ToTensor(),
-                        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-                    ])
+        self.samples = samples
+        self.image_size = image_size
+        if training:
+            self.transform = transforms.Compose([
+                transforms.RandomAffine(
+                    degrees=9,
+                    translate=(0.035, 0.035),
+                    scale=(0.93, 1.07),
+                    fill=BACKGROUND,
+                ),
+                transforms.RandomHorizontalFlip(p=0.5),
+                # Deliberately no hue shift: flower/Arceus/Silvally colours are labels.
+                transforms.ColorJitter(brightness=0.10, contrast=0.10, saturation=0.07),
+                transforms.ToTensor(),
+                transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            ])
 
-            def __len__(self) -> int:
-                return len(samples)
+    def __len__(self) -> int:
+        return len(self.samples)
 
-            def __getitem__(self, index: int) -> tuple[Any, int]:
-                path, target = samples[index]
-                try:
-                    with Image.open(path) as image:
-                        image = prepare_image(image, image_size)
-                except Exception as exc:
-                    raise RuntimeError(f"Could not read training image {path}: {exc}") from exc
-                return self.transform(image), target
+    def __getitem__(self, index: int) -> tuple[Any, int]:
+        from PIL import Image
 
-        return _Dataset()
+        path, target = self.samples[index]
+        try:
+            with Image.open(path) as image:
+                image = prepare_image(image, self.image_size)
+        except Exception as exc:
+            raise RuntimeError(f"Could not read training image {path}: {exc}") from exc
+        return self.transform(image), target
 
 
 def make_model(num_classes: int, pretrained: bool):
@@ -362,14 +374,18 @@ def main() -> int:
     print(f"Device: {device} | Architecture: {ARCHITECTURE} | Input: {args.image_size}x{args.image_size}")
     print("Every directory is treated as a distinct class; similarly named forms are never merged automatically.")
 
+    worker_count = max(0, args.workers)
+    if worker_count != args.workers:
+        print(f"[WARNING] Negative --workers value {args.workers} was changed to 0.")
+
     train_dataset = PokemonDataset(train_samples, args.image_size, training=True)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=max(0, args.workers),
+        num_workers=worker_count,
         pin_memory=(device.type == "cuda"),
-        persistent_workers=(args.workers > 0),
+        persistent_workers=(worker_count > 0),
     )
 
     validation_loader = None
@@ -379,9 +395,9 @@ def main() -> int:
             validation_dataset,
             batch_size=args.batch_size,
             shuffle=False,
-            num_workers=max(0, args.workers),
+            num_workers=worker_count,
             pin_memory=(device.type == "cuda"),
-            persistent_workers=(args.workers > 0),
+            persistent_workers=(worker_count > 0),
         )
     else:
         print("[WARNING] No validation images; the script will save the final training checkpoint.")
@@ -407,7 +423,11 @@ def main() -> int:
     )
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.04)
     use_amp = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    try:
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    except (AttributeError, TypeError):
+        # Compatibility with older PyTorch releases.
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     best_state = None
     best_metric = -1.0
@@ -432,7 +452,11 @@ def main() -> int:
             optimizer.zero_grad(set_to_none=True)
 
             if use_amp:
-                with torch.cuda.amp.autocast():
+                try:
+                    autocast_context = torch.amp.autocast("cuda")
+                except (AttributeError, TypeError):
+                    autocast_context = torch.cuda.amp.autocast()
+                with autocast_context:
                     logits = model(images)
                     loss = criterion(logits, targets)
                 scaler.scale(loss).backward()
