@@ -16,7 +16,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from views.ai_views import AIConfigView, AIInfoView, ToolApprovalView
-from views.common_views import ConfirmLayout
+from views.common_views import ConfirmLayout, container_from_embed
 from views.embeds import (
     BRAND_COLOR,
     err_embed,
@@ -113,7 +113,7 @@ SUBTASK_MAX_ITERATIONS = 6
 SUBTASK_MAX_TOKENS = 1024
 
 # Tools that only look at the code: always allowed (for owners).
-READ_ONLY_TOOLS = {"list_files", "read_file", "delegate_subtasks", "list_server_channels", "find_member"}
+READ_ONLY_TOOLS = {"list_files", "read_file", "delegate_subtasks", "list_server_channels", "find_member", "list_roles"}
 # Discord tools that run immediately, no confirmation (harmless / easily undone).
 DISCORD_FREE_TOOLS = {"react_to_message"}
 # Discord tools that change the server or post somewhere else: the owner must press Confirm first.
@@ -121,6 +121,10 @@ DISCORD_CONFIRM_TOOLS = {
     "send_message",
     "create_channel", "delete_channel", "create_category", "delete_category",
     "kick_member", "ban_member", "unban_member", "timeout_member",
+    "set_nickname", "edit_channel", "move_channel", "set_channel_permissions",
+    "create_role", "edit_role", "delete_role", "add_role", "remove_role",
+    "delete_messages", "pin_message", "unpin_message", "edit_server",
+    "create_invite", "move_member_voice",
 }
 # Tools that change code, extensions or the running process: the owner must press Confirm first.
 MUTATING_TOOLS = {
@@ -296,51 +300,72 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}m {secs}s"
 
 
-class _NoStatus:
-    """Replaces the old 'Thinking...' embed: replies are plain messages now, the typing indicator is enough."""
-
-    async def finish(self, success: bool = True):
-        return
-
-
 class ThinkingStatus:
+    """A plain message that shows "Thinking..." with a live elapsed-time counter.
+
+    When the answer is ready it is edited into that same message (see AIChat._deliver)."""
+
+    TICK_SECONDS = 4
+
     def __init__(self, source_message: discord.Message):
         self.source = source_message
         self.status_msg: discord.Message | None = None
         self.started_at = time.time()
+        self.note = ""
+        self._task: asyncio.Task | None = None
+
+    def _text(self) -> str:
+        elapsed = format_duration(time.time() - self.started_at)
+        note = f" · {self.note}" if self.note else ""
+        return f"🧠 **Thinking...** ⏱️ {elapsed}{note}"
 
     async def start(self):
-        embed = discord.Embed(
-            title="🧠 Thinking...",
-            description=f"⏳ Started <t:{int(self.started_at)}:R>",
-            color=BRAND_COLOR,
-        )
         try:
-            self.status_msg = await self.source.reply(embed=embed, mention_author=False)
+            self.status_msg = await self.source.reply(
+                self._text(), mention_author=False, allowed_mentions=discord.AllowedMentions.none()
+            )
         except discord.HTTPException:
             self.status_msg = None
+            return
+        self._task = asyncio.create_task(self._ticker())
+
+    async def _ticker(self):
+        try:
+            while True:
+                await asyncio.sleep(self.TICK_SECONDS)
+                if not self.status_msg:
+                    return
+                try:
+                    await self.status_msg.edit(content=self._text())
+                except discord.HTTPException:
+                    pass
+        except asyncio.CancelledError:
+            pass
 
     async def finish(self, success: bool = True):
-        if not self.status_msg:
-            return
-        now = time.time()
-        duration = format_duration(now - self.started_at)
-        if success:
-            embed = discord.Embed(
-                title=f"✅ Thought for {duration}",
-                description=f"🕒 Finished <t:{int(now)}:T> (<t:{int(now)}:R>)",
-                color=BRAND_COLOR,
-            )
-        else:
-            embed = discord.Embed(
-                title=f"❌ Stopped after {duration}",
-                description=f"🕒 Ended <t:{int(now)}:T> (<t:{int(now)}:R>)",
-                color=BRAND_COLOR,
-            )
+        """Stops the live counter (the message itself is replaced by the answer afterwards)."""
+        task, self._task = self._task, None
+        if task:
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+    async def replace(self, *, content: str | None = None, embed: discord.Embed | None = None) -> bool:
+        """Turns the thinking message into the final answer. False if it couldn't (caller should send normally)."""
+        await self.finish()
+        msg, self.status_msg = self.status_msg, None
+        if msg is None:
+            return False
         try:
-            await self.status_msg.edit(embed=embed)
+            await msg.edit(
+                content=content, embeds=[embed] if embed else [],
+                allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=False),
+            )
+            return True
         except discord.HTTPException:
-            pass
+            return False
 
 
 def is_bot_owner():
@@ -373,6 +398,7 @@ class AIChat(commands.Cog):
         self.ai_channels: dict[int, set[int]] = {}
         self._active_users: set[int] = set()
         self._bg_tasks: set[asyncio.Task] = set()
+        self._statuses: dict[int, ThinkingStatus] = {}
 
         self.key_quota_cache: dict[str, tuple[float, int | None, int | None]] = {}
         self.key_rate_limit_snapshot: dict[str, dict] = {}
@@ -809,7 +835,10 @@ class AIChat(commands.Cog):
                 "`delegate_subtasks`) which let you inspect, modify, and reload/restart your own "
                 "code when requested, plus Discord tools (`send_message`, `react_to_message`, "
                 "`create_channel`, `delete_channel`, `create_category`, `delete_category`, `kick_member`, "
-                "`ban_member`, `unban_member`, `timeout_member`, `list_server_channels`, `find_member`). "
+                "`ban_member`, `unban_member`, `timeout_member`, `set_nickname`, `edit_channel`, `move_channel`, "
+                "`set_channel_permissions`, `create_role`, `edit_role`, `delete_role`, `add_role`, `remove_role`, "
+                "`delete_messages`, `pin_message`, `unpin_message`, `edit_server`, `create_invite`, "
+                "`move_member_voice`, `list_server_channels`, `list_roles`, `find_member`). "
                 f"({worker_note}.)\n\n"
                 "STRICT RULES — every tool call is a separate request against a very tight daily "
                 "budget shared across all API keys, so wasted round-trips directly cost the user "
@@ -1048,7 +1077,8 @@ class AIChat(commands.Cog):
             embed.add_field(name="Action", value=self._describe_discord_action(fn_name, args, guild), inline=False)
         return embed
 
-    async def _ask_owner_approval(self, fn_name: str, args: dict, requester, source: discord.Message | None) -> bool:
+    async def _ask_owner_approval(self, fn_name: str, args: dict, requester, source: discord.Message | None,
+                                  holder: dict | None = None) -> bool:
         """Shows the Confirm / Deny prompt and waits. True only when the requesting owner pressed Confirm."""
         if source is None:
             return False
@@ -1059,8 +1089,38 @@ class AIChat(commands.Cog):
         except Exception as e:
             print(f"AI Cog: could not show the approval prompt: {e}")
             return False
+        if holder is not None:
+            holder["view"] = view
+        status = self._statuses.get(source.id)
+        if status:
+            status.note = "waiting for your approval"
         await view.wait()
+        if status:
+            status.note = ""
         return view.approved is True
+
+    async def _show_tool_result(self, view, fn_name: str, args: dict, result: str, guild) -> None:
+        """After the owner pressed Confirm and the action ran, edits the approval message to show the outcome."""
+        if view is None or getattr(view, "message", None) is None:
+            return
+        ok = not result.startswith(("Error", "DENIED"))
+        embed = discord.Embed(
+            title=f"{'✅ Done' if ok else '❌ Failed'}: {fn_name}",
+            description=self._short(result, 1500),
+            color=discord.Color.green() if ok else discord.Color.red(),
+        )
+        try:
+            if fn_name in DISCORD_CONFIRM_TOOLS:
+                embed.add_field(name="Action", value=self._short(self._describe_discord_action(fn_name, args, guild), 900), inline=False)
+            elif fn_name in ("write_file", "delete_file"):
+                embed.add_field(name="File", value=f"`{self._short(args.get('file_path'), 200)}`", inline=False)
+            elif fn_name in ("load_extension", "unload_extension", "reload_extension"):
+                embed.add_field(name="Extension", value=f"`{self._short(args.get('extension_name'), 200)}`", inline=False)
+            view.clear_items()
+            view.add_item(container_from_embed(embed))
+            await view.message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            print(f"AI Cog: could not update the approval message: {e}")
 
 
     # -- Discord actions -------------------------------------------------
@@ -1086,6 +1146,27 @@ class AIChat(commands.Cog):
         uid = self._to_int(user_id)
         member = guild.get_member(uid) if guild and uid else None
         return f"{member.mention} (`{member}`)" if member else f"<@{uid}> (`{user_id}`)"
+
+    @staticmethod
+    def _get_role(guild: discord.Guild, value) -> discord.Role | None:
+        rid = AIChat._to_int(value)
+        role = guild.get_role(rid) if rid else None
+        if role is None and value:
+            role = discord.utils.find(lambda r: r.name.lower() == str(value).lower(), guild.roles)
+        return role
+
+    @staticmethod
+    async def _resolve_member(guild: discord.Guild, value) -> discord.Member | None:
+        uid = AIChat._to_int(value)
+        if uid is None:
+            return None
+        member = guild.get_member(uid)
+        if member is None:
+            try:
+                member = await guild.fetch_member(uid)
+            except discord.NotFound:
+                member = None
+        return member
 
     def _describe_discord_action(self, fn_name: str, args: dict, guild: discord.Guild | None) -> str:
         reason = f"\n**Reason:** {self._short(args.get('reason'), 200)}" if args.get("reason") else ""
@@ -1116,6 +1197,47 @@ class AIChat(commands.Cog):
             minutes = args.get("minutes", 0)
             what = f"for **{minutes} minute(s)**" if minutes else "(remove the timeout)"
             return f"**Mute (timeout)** {self._label_member(guild, args.get('user_id'))} {what}.{reason}"
+        g, lab_c, lab_m = guild, self._label_channel, self._label_member
+        if fn_name == "set_nickname":
+            nick = args.get("nickname")
+            what = f"to **{self._short(nick, 40)}**" if nick else "back to their normal name (reset)"
+            return f"Change the nickname of {lab_m(g, args.get('user_id'))} {what}.{reason}"
+        if fn_name in ("edit_channel", "move_channel"):
+            changes = [f"{k}: `{self._short(args[k], 80)}`" for k in
+                       ("name", "topic", "slowmode_seconds", "nsfw", "category_id", "position", "sync_permissions") if k in args]
+            return f"Edit {lab_c(g, args.get('channel_id'))}:\n" + ("\n".join(changes) or "(no changes)") + reason
+        if fn_name == "set_channel_permissions":
+            return (
+                f"Change permissions on {lab_c(g, args.get('channel_id'))} for `{args.get('target_id')}`:\n"
+                f"**Allow:** {', '.join(args.get('allow') or []) or '-'}\n**Deny:** {', '.join(args.get('deny') or []) or '-'}"
+                + ("\n**Reset** their overwrite to default." if args.get("reset") else "") + reason
+            )
+        if fn_name == "create_role":
+            return f"Create role `{self._short(args.get('name'), 100)}`" + (f" with permissions: {', '.join(args['permissions'])}" if args.get("permissions") else "") + f".{reason}"
+        if fn_name == "edit_role":
+            changes = [f"{k}: `{self._short(args[k], 80)}`" for k in ("name", "color", "hoist", "mentionable", "permissions") if k in args]
+            return f"Edit role `{args.get('role_id')}`:\n" + ("\n".join(changes) or "(no changes)") + reason
+        if fn_name == "delete_role":
+            return f"**Delete** role `{args.get('role_id')}`. This can't be undone.{reason}"
+        if fn_name in ("add_role", "remove_role"):
+            verb = "Give" if fn_name == "add_role" else "Take"
+            prep = "to" if fn_name == "add_role" else "from"
+            return f"{verb} role `{args.get('role_id')}` {prep} {lab_m(g, args.get('user_id'))}.{reason}"
+        if fn_name == "delete_messages":
+            ids = args.get("message_ids")
+            what = f"{len(ids)} specific message(s)" if ids else f"the last **{args.get('count', 1)}** message(s)"
+            return f"**Delete** {what} in {lab_c(g, args.get('channel_id'))}.{reason}"
+        if fn_name in ("pin_message", "unpin_message"):
+            verb = "Pin" if fn_name == "pin_message" else "Unpin"
+            return f"{verb} message `{args.get('message_id')}` in {lab_c(g, args.get('channel_id'))}."
+        if fn_name == "edit_server":
+            changes = [f"{k}: `{self._short(args[k], 120)}`" for k in ("name", "description") if k in args]
+            return "Edit the server:\n" + ("\n".join(changes) or "(no changes)") + reason
+        if fn_name == "create_invite":
+            return f"Create an invite for {lab_c(g, args.get('channel_id'))} (max age {args.get('max_age_seconds', 86400)}s, max uses {args.get('max_uses', 0) or 'unlimited'})."
+        if fn_name == "move_member_voice":
+            target = f"to {lab_c(g, args.get('channel_id'))}" if args.get("channel_id") else "out of voice (**disconnect**)"
+            return f"Move {lab_m(g, args.get('user_id'))} {target}.{reason}"
         return fn_name
 
     async def _run_discord_tool(self, fn_name: str, args: dict, source: discord.Message | None) -> str:
@@ -1240,6 +1362,170 @@ class AIChat(commands.Cog):
                 await guild.unban(discord.Object(id=uid), reason=audit_reason)
                 return f"Unbanned {uid}."
 
+
+            if fn_name == "set_nickname":
+                member = await self._resolve_member(guild, args.get("user_id"))
+                if member is None:
+                    return "Error: that member isn't in this server."
+                if member.id != self.bot.user.id and member.id != guild.owner_id and member.top_role >= guild.me.top_role:
+                    return "Error: that member's top role is at or above mine, so I can't rename them."
+                nick = str(args.get("nickname") or "").strip()[:32] or None
+                await member.edit(nick=nick, reason=audit_reason)
+                return f"Nickname of {member} is now {nick!r}." if nick else f"Reset the nickname of {member}."
+
+            if fn_name in ("edit_channel", "move_channel"):
+                ch = guild.get_channel(self._to_int(args.get("channel_id")) or 0)
+                if ch is None:
+                    return "Error: that channel doesn't exist."
+                kw: dict = {}
+                if args.get("name"):
+                    kw["name"] = str(args["name"]).strip()[:100]
+                if "topic" in args and isinstance(ch, (discord.TextChannel, discord.ForumChannel)):
+                    kw["topic"] = args.get("topic") or None
+                if "slowmode_seconds" in args and isinstance(ch, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
+                    kw["slowmode_delay"] = min(max(int(args["slowmode_seconds"]), 0), 21600)
+                if "nsfw" in args and hasattr(ch, "nsfw"):
+                    kw["nsfw"] = bool(args["nsfw"])
+                if "category_id" in args and not isinstance(ch, discord.CategoryChannel):
+                    raw = args.get("category_id")
+                    if raw in (None, "", "none", "null", 0, "0"):
+                        kw["category"] = None
+                    else:
+                        cat = guild.get_channel(self._to_int(raw) or 0)
+                        if not isinstance(cat, discord.CategoryChannel):
+                            return "Error: category_id isn't a category."
+                        kw["category"] = cat
+                if "position" in args:
+                    kw["position"] = max(int(args["position"]), 0)
+                if "sync_permissions" in args and not isinstance(ch, discord.CategoryChannel):
+                    kw["sync_permissions"] = bool(args["sync_permissions"])
+                if not kw:
+                    return "Error: nothing to change."
+                await ch.edit(**kw, reason=audit_reason)
+                return f"Updated #{ch.name} ({ch.id}): " + ", ".join(f"{k}={getattr(v, 'name', v)!r}" for k, v in kw.items()) + "."
+
+            if fn_name == "set_channel_permissions":
+                ch = guild.get_channel(self._to_int(args.get("channel_id")) or 0)
+                if ch is None:
+                    return "Error: that channel doesn't exist."
+                tid = self._to_int(args.get("target_id"))
+                target = (guild.get_role(tid) or guild.get_member(tid)) if tid else None
+                if target is None:
+                    return "Error: target_id isn't a role or member in this server."
+                if args.get("reset"):
+                    await ch.set_permissions(target, overwrite=None, reason=audit_reason)
+                    return f"Reset the overwrite for {target} on #{ch.name}."
+                valid = set(discord.Permissions.VALID_FLAGS)
+                bad = [n for n in (args.get("allow") or []) + (args.get("deny") or []) if n not in valid]
+                if bad:
+                    return f"Error: unknown permission name(s): {', '.join(bad)}."
+                overwrite = ch.overwrites_for(target)
+                for n in args.get("allow") or []:
+                    setattr(overwrite, n, True)
+                for n in args.get("deny") or []:
+                    setattr(overwrite, n, False)
+                await ch.set_permissions(target, overwrite=overwrite, reason=audit_reason)
+                return f"Updated permissions for {target} on #{ch.name}."
+
+            if fn_name in ("create_role", "edit_role"):
+                kw = {}
+                if args.get("name"):
+                    kw["name"] = str(args["name"]).strip()[:100]
+                if args.get("color"):
+                    kw["colour"] = discord.Colour(int(str(args["color"]).lstrip("#"), 16))
+                if "hoist" in args:
+                    kw["hoist"] = bool(args["hoist"])
+                if "mentionable" in args:
+                    kw["mentionable"] = bool(args["mentionable"])
+                if "permissions" in args:
+                    valid = set(discord.Permissions.VALID_FLAGS)
+                    names = args.get("permissions") or []
+                    bad = [n for n in names if n not in valid]
+                    if bad:
+                        return f"Error: unknown permission name(s): {', '.join(bad)}."
+                    kw["permissions"] = discord.Permissions(**{n: True for n in names})
+                if fn_name == "create_role":
+                    if "name" not in kw:
+                        return "Error: 'name' is required."
+                    role = await guild.create_role(**kw, reason=audit_reason)
+                    return f"Created role {role.name} ({role.id})."
+                role = self._get_role(guild, args.get("role_id"))
+                if role is None:
+                    return "Error: that role doesn't exist."
+                if not kw:
+                    return "Error: nothing to change."
+                await role.edit(**kw, reason=audit_reason)
+                return f"Updated role {role.name} ({role.id})."
+
+            if fn_name == "delete_role":
+                role = self._get_role(guild, args.get("role_id"))
+                if role is None:
+                    return "Error: that role doesn't exist."
+                name = role.name
+                await role.delete(reason=audit_reason)
+                return f"Deleted role '{name}'."
+
+            if fn_name in ("add_role", "remove_role"):
+                member = await self._resolve_member(guild, args.get("user_id"))
+                role = self._get_role(guild, args.get("role_id"))
+                if member is None or role is None:
+                    return "Error: member or role not found."
+                if fn_name == "add_role":
+                    await member.add_roles(role, reason=audit_reason)
+                    return f"Gave {role.name} to {member}."
+                await member.remove_roles(role, reason=audit_reason)
+                return f"Removed {role.name} from {member}."
+
+            if fn_name == "delete_messages":
+                channel = guild.get_channel(self._to_int(args.get("channel_id")) or source.channel.id) or source.channel
+                ids = [self._to_int(i) for i in (args.get("message_ids") or []) if self._to_int(i)]
+                if ids:
+                    await channel.delete_messages([discord.Object(id=i) for i in ids[:100]], reason=audit_reason)
+                    return f"Deleted {len(ids[:100])} message(s) in #{channel.name}."
+                count = min(max(int(args.get("count") or 1), 1), 100)
+                deleted = await channel.purge(
+                    limit=count, before=source if channel.id == source.channel.id else None, reason=audit_reason
+                )
+                return f"Deleted {len(deleted)} message(s) in #{channel.name}."
+
+            if fn_name in ("pin_message", "unpin_message"):
+                channel = guild.get_channel(self._to_int(args.get("channel_id")) or source.channel.id) or source.channel
+                target = await channel.fetch_message(self._to_int(args.get("message_id")) or 0)
+                if fn_name == "pin_message":
+                    await target.pin(reason=audit_reason)
+                    return f"Pinned message {target.id}."
+                await target.unpin(reason=audit_reason)
+                return f"Unpinned message {target.id}."
+
+            if fn_name == "edit_server":
+                kw = {k: args[k] for k in ("name", "description") if args.get(k)}
+                if not kw:
+                    return "Error: nothing to change."
+                await guild.edit(**kw, reason=audit_reason)
+                return "Updated the server: " + ", ".join(kw) + "."
+
+            if fn_name == "create_invite":
+                ch = guild.get_channel(self._to_int(args.get("channel_id")) or source.channel.id) or source.channel
+                invite = await ch.create_invite(
+                    max_age=int(args.get("max_age_seconds", 86400) or 0),
+                    max_uses=int(args.get("max_uses") or 0),
+                    reason=audit_reason,
+                )
+                return f"Created invite: {invite.url}"
+
+            if fn_name == "move_member_voice":
+                member = await self._resolve_member(guild, args.get("user_id"))
+                if member is None:
+                    return "Error: that member isn't in this server."
+                if args.get("channel_id"):
+                    dest = guild.get_channel(self._to_int(args.get("channel_id")) or 0)
+                    if not isinstance(dest, (discord.VoiceChannel, discord.StageChannel)):
+                        return "Error: channel_id isn't a voice channel."
+                    await member.move_to(dest, reason=audit_reason)
+                    return f"Moved {member} to {dest.name}."
+                await member.move_to(None, reason=audit_reason)
+                return f"Disconnected {member} from voice."
+
         except discord.Forbidden:
             return "Error: Discord says I don't have permission to do that (check my role/permissions)."
         except discord.NotFound:
@@ -1292,6 +1578,42 @@ class AIChat(commands.Cog):
                {"user_id": uid, "delete_message_days": {"type": "integer", "description": "0-7"}, "reason": reason}, ["user_id"]),
             fn("unban_member", "Unbans a user. Needs owner confirmation.",
                {"user_id": uid, "reason": reason}, ["user_id"]),
+            fn("list_roles", "Lists the server's roles with IDs (top to bottom). Read-only.", {}),
+            fn("set_nickname", "Changes (or resets, if nickname is empty) a member's server nickname. Works for the owner too: their ID is in the context. Needs owner confirmation.",
+               {"user_id": uid, "nickname": {"type": "string", "description": "Empty string resets it."}, "reason": reason}, ["user_id"]),
+            fn("edit_channel", "Edits a channel or category: name, topic, slowmode, nsfw, category, position. Needs owner confirmation.",
+               {"channel_id": {"type": "string"}, "name": {"type": "string"}, "topic": {"type": "string"},
+                "slowmode_seconds": {"type": "integer"}, "nsfw": {"type": "boolean"},
+                "category_id": {"type": "string", "description": "'none' to remove it from its category."},
+                "position": {"type": "integer"}, "sync_permissions": {"type": "boolean"}, "reason": reason}, ["channel_id"]),
+            fn("move_channel", "Moves a channel into another category and/or to a position. Needs owner confirmation.",
+               {"channel_id": {"type": "string"}, "category_id": {"type": "string", "description": "'none' to remove it from its category."},
+                "position": {"type": "integer"}, "sync_permissions": {"type": "boolean"}, "reason": reason}, ["channel_id"]),
+            fn("set_channel_permissions", "Sets or resets a role's/member's permission overwrite on a channel (e.g. lock a channel). Needs owner confirmation. Permission names are discord.py names like send_messages, view_channel.",
+               {"channel_id": {"type": "string"}, "target_id": {"type": "string", "description": "Role or member ID."},
+                "allow": {"type": "array", "items": {"type": "string"}}, "deny": {"type": "array", "items": {"type": "string"}},
+                "reset": {"type": "boolean"}, "reason": reason}, ["channel_id", "target_id"]),
+            fn("create_role", "Creates a role. Needs owner confirmation.",
+               {"name": {"type": "string"}, "color": {"type": "string", "description": "Hex like #ff0000."}, "hoist": {"type": "boolean"},
+                "mentionable": {"type": "boolean"}, "permissions": {"type": "array", "items": {"type": "string"}}, "reason": reason}, ["name"]),
+            fn("edit_role", "Edits a role. Needs owner confirmation.",
+               {"role_id": {"type": "string"}, "name": {"type": "string"}, "color": {"type": "string"}, "hoist": {"type": "boolean"},
+                "mentionable": {"type": "boolean"}, "permissions": {"type": "array", "items": {"type": "string"}, "description": "Replaces the role's permissions."},
+                "reason": reason}, ["role_id"]),
+            fn("delete_role", "Deletes a role. Needs owner confirmation.", {"role_id": {"type": "string"}, "reason": reason}, ["role_id"]),
+            fn("add_role", "Gives a role to a member. Needs owner confirmation.", {"user_id": uid, "role_id": {"type": "string"}, "reason": reason}, ["user_id", "role_id"]),
+            fn("remove_role", "Takes a role from a member. Needs owner confirmation.", {"user_id": uid, "role_id": {"type": "string"}, "reason": reason}, ["user_id", "role_id"]),
+            fn("delete_messages", "Deletes specific messages (message_ids) or the last N messages (count, max 100) in a channel. Needs owner confirmation.",
+               {"channel_id": {"type": "string", "description": "Defaults to the current channel."},
+                "message_ids": {"type": "array", "items": {"type": "string"}}, "count": {"type": "integer"}, "reason": reason}),
+            fn("pin_message", "Pins a message. Needs owner confirmation.", {"message_id": {"type": "string"}, "channel_id": {"type": "string"}}, ["message_id"]),
+            fn("unpin_message", "Unpins a message. Needs owner confirmation.", {"message_id": {"type": "string"}, "channel_id": {"type": "string"}}, ["message_id"]),
+            fn("edit_server", "Edits the server name and/or description. Needs owner confirmation.",
+               {"name": {"type": "string"}, "description": {"type": "string"}, "reason": reason}),
+            fn("create_invite", "Creates an invite link. Needs owner confirmation.",
+               {"channel_id": {"type": "string"}, "max_age_seconds": {"type": "integer"}, "max_uses": {"type": "integer"}}),
+            fn("move_member_voice", "Moves a member to a voice channel, or disconnects them if channel_id is omitted. Needs owner confirmation.",
+               {"user_id": uid, "channel_id": {"type": "string"}, "reason": reason}, ["user_id"]),
             fn("timeout_member", "Mutes (times out) a member for N minutes (max 40320); minutes=0 removes it. Needs owner confirmation.",
                {"user_id": uid, "minutes": {"type": "integer"}, "reason": reason}, ["user_id", "minutes"]),
         ]
@@ -1307,6 +1629,8 @@ class AIChat(commands.Cog):
                 for ch in channels:
                     lines.append(f"  - {ch.name} ({ch.id}) [{ch.type.name}]")
             return self._short("\n".join(lines), 12000) or "No channels."
+        if fn_name == "list_roles":
+            return self._short("\n".join(f"{r.name} ({r.id})" for r in reversed(guild.roles)), 12000)
         query = str(args.get("query", "")).lower().strip()
         if not query:
             return "Error: 'query' is empty."
@@ -1325,6 +1649,27 @@ class AIChat(commands.Cog):
         requester=None,
         source: discord.Message | None = None,
         read_only: bool = False,
+    ) -> str:
+        holder: dict = {}
+        result = await self._execute_tool_call(
+            tool_call, requester=requester, source=source, read_only=read_only, holder=holder
+        )
+        view = holder.get("view")
+        if view is not None and view.approved is True:
+            await self._show_tool_result(
+                view, tool_call["function"]["name"], holder.get("args") or {}, result,
+                source.guild if source else None,
+            )
+        return result
+
+    async def _execute_tool_call(
+        self,
+        tool_call: dict,
+        *,
+        requester=None,
+        source: discord.Message | None = None,
+        read_only: bool = False,
+        holder: dict | None = None,
     ) -> str:
         """Runs one tool call.
 
@@ -1350,7 +1695,9 @@ class AIChat(commands.Cog):
         if fn_name in MUTATING_TOOLS:
             if fn_name in ("write_file", "delete_file") and not self._is_safe_path(str(args.get("file_path", ""))):
                 return "Error: Permission denied (path outside project directory)."
-            if not await self._ask_owner_approval(fn_name, args, requester, source):
+            if holder is not None:
+                holder["args"] = args
+            if not await self._ask_owner_approval(fn_name, args, requester, source, holder):
                 return (
                     "DENIED: the owner did not confirm this change (denied or timed out). "
                     "Nothing was changed. Do not retry; tell the owner nothing was modified."
@@ -1361,7 +1708,7 @@ class AIChat(commands.Cog):
         if fn_name in DISCORD_FREE_TOOLS and read_only:
             return "Error: Permission denied (this agent is read-only)."
 
-        if fn_name in ("list_server_channels", "find_member"):
+        if fn_name in ("list_server_channels", "find_member", "list_roles"):
             return self._run_read_discord_tool(fn_name, args, source)
         if fn_name in DISCORD_CONFIRM_TOOLS or fn_name in DISCORD_FREE_TOOLS:
             return await self._run_discord_tool(fn_name, args, source)
@@ -1978,15 +2325,19 @@ class AIChat(commands.Cog):
             tb = traceback.format_exc()
             print(f"Unhandled exception in AIChat.on_message:\n{tb}")
             try:
-                await message.reply(
+                await self._deliver(
+                    message, self._statuses.get(message.id),
                     embed=err_embed(
                         "Something Went Wrong",
                         "Something went wrong handling that message. Check console logs.",
-                    )
+                    ),
                 )
             except Exception:
                 pass
         finally:
+            leftover = self._statuses.pop(message.id, None)
+            if leftover:
+                await leftover.finish()
             self._active_users.discard(user_id)
 
     async def _reject_busy(self, message: discord.Message):
@@ -2002,33 +2353,42 @@ class AIChat(commands.Cog):
 
     _EMBED_MARKER_RE = re.compile(r"^\s*\[\[embed(?::\s*([^\]]+?))?\]\]\s*", re.IGNORECASE)
 
-    async def _send_result(self, message: discord.Message, text: str):
+    async def _deliver(self, message: discord.Message, status: "ThinkingStatus | None", *,
+                       content: str | None = None, embed: discord.Embed | None = None) -> None:
+        """First message of an answer: edits the thinking message if there is one, otherwise replies."""
+        if status is not None and await status.replace(content=content, embed=embed):
+            return
+        no_pings = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=False)
+        await message.reply(content, embed=embed, mention_author=False, allowed_mentions=no_pings)
+
+    async def _send_result(self, message: discord.Message, text: str, status: "ThinkingStatus | None" = None):
         """Plain message by default. Embed only if the model started its reply with [[embed]]
-        (which it's told to do only when the user explicitly asked). No model/time footer."""
+        (which it's told to do only when the user explicitly asked)."""
         no_pings = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=False)
         marker = self._EMBED_MARKER_RE.match(text)
         if marker:
             title = (marker.group(1) or "").strip() or None
             body = text[marker.end():].strip() or "\u200b"
-            chunks = split_message(body, EMBED_DESCRIPTION_LIMIT)
-            for i, chunk in enumerate(chunks):
+            for i, chunk in enumerate(split_message(body, EMBED_DESCRIPTION_LIMIT)):
                 embed = discord.Embed(description=chunk, color=BRAND_COLOR, title=title if i == 0 else None)
                 if i == 0:
-                    await message.reply(embed=embed, mention_author=False, allowed_mentions=no_pings)
+                    await self._deliver(message, status, embed=embed)
                 else:
                     await message.channel.send(embed=embed, allowed_mentions=no_pings)
             return
 
         for i, chunk in enumerate(split_message(text, 2000)):
             if i == 0:
-                await message.reply(chunk, mention_author=False, allowed_mentions=no_pings)
+                await self._deliver(message, status, content=chunk)
             else:
                 await message.channel.send(chunk, allowed_mentions=no_pings)
 
     async def _handle_ai_message(self, message: discord.Message):
         memory_key = (message.channel.id, message.author.id)
 
-        status = _NoStatus()
+        status = ThinkingStatus(message)
+        self._statuses[message.id] = status
+        await status.start()
 
         async with message.channel.typing():
             is_owner = await self.is_owner_user(message.author)
@@ -2043,18 +2403,24 @@ class AIChat(commands.Cog):
                 f"- Channel: #{message.channel.name} (id {message.channel.id})\n"
                 f"- Message from: {message.author.display_name} (@{message.author.name}, id {message.author.id})\n"
                 f"- Sender status: {sender_role}\n"
+                f"- Bot has Administrator permission here: {'YES (it can do nearly anything in this server)' if guild.me.guild_permissions.administrator else 'NO (some actions may fail with a permission error)'}\n"
                 f"- Message id: {message.id}\n\n"
             )
             if is_owner:
                 permissions_block = (
                     "The sender is a BOT OWNER, so you may act for them using your tools: edit your own code, "
                     "send messages in other channels, react to messages, create/delete channels and categories, "
-                    "and kick/ban/unban/mute members. Use `list_server_channels` / `find_member` to look up IDs "
+                    "change nicknames (including the owner's own), move/edit channels and categories, edit channel "
+                    "permissions, manage roles, delete/pin messages, create invites, move members between voice "
+                    "channels, edit the server, and kick/ban/unban/mute members. Use `list_server_channels`, "
+                    "`list_roles` / `find_member` to look up IDs "
                     "instead of guessing.\n"
                     "- Confirmation: anything that changes something (code, extensions, restart, send_message, "
                     "create/delete channel or category, kick, ban, unban, mute) automatically shows the owner a "
-                    "Confirm / Deny button prompt. Just call the tool; don't ask in chat first. If it's denied or "
-                    "times out, nothing happened: say so and don't retry. Reactions run instantly.\n"
+                    "Confirm / Deny button prompt, and that same prompt is edited to show the result once it runs. "
+                    "Just call the tool; don't ask in chat first. If it's denied or times out, nothing happened: "
+                    "say so and don't retry. Reactions run instantly. Keep your final reply short since the prompt "
+                    "already shows the result.\n"
                     "- Your normal reply already goes to the current channel; only use `send_message` for OTHER channels.\n\n"
                 )
             else:
@@ -2138,14 +2504,14 @@ class AIChat(commands.Cog):
                 except RuntimeError as e:
                     print(f"OpenRouter request failed: {e}")
                     await status.finish(success=False)
-                    await message.reply(embed=err_embed("Request Failed", str(e)))
+                    await self._deliver(message, status, embed=err_embed("Request Failed", str(e)))
                     reply_sent = True
                     break
 
                 if "choices" not in data or not data["choices"]:
                     print(f"OpenRouter returned no choices: {data}")
                     await status.finish(success=False)
-                    await message.reply(embed=err_embed("Empty Response", "Sorry, I got an empty response from the AI backend."))
+                    await self._deliver(message, status, embed=err_embed("Empty Response", "Sorry, I got an empty response from the AI backend."))
                     reply_sent = True
                     break
 
@@ -2160,12 +2526,12 @@ class AIChat(commands.Cog):
                 if finish_reason == "length":
                     await status.finish(success=False)
                     if choice_message.get("tool_calls"):
-                        await message.reply(embed=err_embed(
+                        await self._deliver(message, status, embed=err_embed(
                             "Response Cut Off",
                             "The AI's response was cut off before it finished. Try again with a narrower request."
                         ))
                     else:
-                        await message.reply(embed=err_embed(
+                        await self._deliver(message, status, embed=err_embed(
                             "Out of Tokens",
                             "The AI ran out of tokens before it could act on your request."
                         ))
@@ -2226,10 +2592,10 @@ class AIChat(commands.Cog):
                     self.history[memory_key].append({"role": "assistant", "content": reply_text})
                     self.history[memory_key] = self.history[memory_key][-self.max_history:]
                     await status.finish(success=True)
-                    await self._send_result(message, reply_text)
+                    await self._send_result(message, reply_text, status)
                 else:
                     await status.finish(success=False)
-                    await message.reply(embed=err_embed(
+                    await self._deliver(message, status, embed=err_embed(
                         "No Response",
                         "Action completed, but no text response was returned."
                     ))
@@ -2238,7 +2604,7 @@ class AIChat(commands.Cog):
                 break
             else:
                 await status.finish(success=False)
-                await message.reply(embed=err_embed(
+                await self._deliver(message, status, embed=err_embed(
                     "Iteration Limit",
                     "Task hit tool call iteration limits."
                 ))
@@ -2246,7 +2612,7 @@ class AIChat(commands.Cog):
 
             if not reply_sent:
                 await status.finish(success=False)
-                await message.reply(embed=err_embed(
+                await self._deliver(message, status, embed=err_embed(
                     "Unexpected Error",
                     "Something unexpected happened and no response was generated."
                 ))
